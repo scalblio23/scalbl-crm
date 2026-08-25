@@ -174,11 +174,41 @@ const navItems = [
 
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
-  const [contacts] = useState(initialContacts);
+  const [contacts, setContacts] = useState(initialContacts);
   const [clients] = useState(initialClients);
   const [conversations] = useState(initialConversations);
   const [activeConvo, setActiveConvo] = useState(1);
   const [search, setSearch] = useState("");
+
+  // Add-contact modal
+  const emptyContactForm = {
+    name: "",
+    email: "",
+    phone: "",
+    client: initialClients[0]?.name || "",
+    status: "New Lead",
+    notes: "",
+  };
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [contactForm, setContactForm] = useState(emptyContactForm);
+  const updateContactForm = (key, value) =>
+    setContactForm((f) => ({ ...f, [key]: value }));
+
+  const handleAddContact = (e) => {
+    e.preventDefault();
+    if (!contactForm.name.trim() || !contactForm.phone.trim()) return;
+    const newContact = {
+      id: Math.max(0, ...contacts.map((c) => c.id)) + 1,
+      ...contactForm,
+      name: contactForm.name.trim(),
+      phone: contactForm.phone.trim(),
+      lastContact: "Today",
+      createdAt: new Date().toISOString(),
+    };
+    setContacts((cs) => [...cs, newContact]);
+    setContactForm(emptyContactForm);
+    setShowAddContact(false);
+  };
 
   // Powerdialler state
   const [calling, setCalling] = useState(false);
@@ -367,7 +397,10 @@ export default function SimpleCRM() {
                     className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-64"
                   />
                 </div>
-                <button className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium">
+                <button
+                  onClick={() => setShowAddContact(true)}
+                  className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                >
                   <Plus size={15} /> Add contact
                 </button>
               </div>
@@ -748,6 +781,116 @@ export default function SimpleCRM() {
           </div>
         )}
       </main>
+
+      {/* Add contact modal */}
+      {showAddContact && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddContact(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add contact</h2>
+              <button
+                onClick={() => setShowAddContact(false)}
+                className="text-gray-400 hover:text-gray-700"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddContact} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Name</label>
+                <input
+                  required
+                  value={contactForm.name}
+                  onChange={(e) => updateContactForm("name", e.target.value)}
+                  placeholder="Jane Smith"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Email</label>
+                <input
+                  type="email"
+                  value={contactForm.email}
+                  onChange={(e) => updateContactForm("email", e.target.value)}
+                  placeholder="jane@email.com"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Phone</label>
+                <input
+                  required
+                  value={contactForm.phone}
+                  onChange={(e) => updateContactForm("phone", e.target.value)}
+                  placeholder="0412 345 678"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Client</label>
+                  <select
+                    value={contactForm.client}
+                    onChange={(e) => updateContactForm("client", e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    {clients.map((cl) => (
+                      <option key={cl.id} value={cl.name}>
+                        {cl.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Status</label>
+                  <select
+                    value={contactForm.status}
+                    onChange={(e) => updateContactForm("status", e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    {Object.keys(statusColors).map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Notes</label>
+                <textarea
+                  value={contactForm.notes}
+                  onChange={(e) => updateContactForm("notes", e.target.value)}
+                  placeholder="Anything worth knowing before the next call…"
+                  rows={3}
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 resize-none"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddContact(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium"
+                >
+                  Save
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
