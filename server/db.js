@@ -1,28 +1,45 @@
 // Shared database layer — used by both the local Express server
 // (server/index.js) and the Vercel serverless functions (/api/*.js),
-// exactly like server/twilioCore.js does for calling. One Postgres
-// database (Neon, connected via Vercel's Storage tab) backs both:
-// locally you point at it with POSTGRES_URL in .env; in production
-// Vercel injects the same var automatically.
-import { neon } from "@neondatabase/serverless";
+// exactly like server/twilioCore.js does for calling. Uses the
+// standard `pg` driver over a normal Postgres connection string, so
+// it works with any Postgres-compatible provider (Neon, Prisma
+// Postgres, Supabase, RDS, …) — whichever one POSTGRES_URL points at.
+import pg from "pg";
 
-let sqlClient = null;
-function sql(strings, ...values) {
-  if (!sqlClient) {
-    const connectionString =
-      process.env.POSTGRES_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL_NON_POOLING;
-    if (!connectionString) {
-      throw new Error(
-        "No database connection string found. Set POSTGRES_URL (from your Vercel Postgres/Neon database) in .env."
-      );
-    }
-    sqlClient = neon(connectionString);
-  }
-  return sqlClient(strings, ...values);
+const { Pool } = pg;
+
+function connectionString() {
+  return process.env.POSTGRES_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL_NON_POOLING;
 }
 
 export function isDbConfigured() {
-  return Boolean(process.env.POSTGRES_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL_NON_POOLING);
+  return Boolean(connectionString());
+}
+
+let pool = null;
+function getPool() {
+  if (!pool) {
+    const cs = connectionString();
+    if (!cs) {
+      throw new Error(
+        "No database connection string found. Set POSTGRES_URL (from your Vercel Postgres database) in .env."
+      );
+    }
+    pool = new Pool({
+      connectionString: cs,
+      // Most hosted Postgres providers require SSL and present a cert
+      // chain Node won't fully validate by default — this matches the
+      // common Vercel + Postgres deployment pattern.
+      ssl: cs.includes("sslmode=disable") ? false : { rejectUnauthorized: false },
+      max: 5,
+    });
+  }
+  return pool;
+}
+
+async function query(text, params = []) {
+  const { rows } = await getPool().query(text, params);
+  return rows;
 }
 
 // Idempotent — safe to call on every request. Creates the schema on
@@ -31,7 +48,7 @@ let schemaReady = null;
 export async function ensureSchema() {
   if (schemaReady) return schemaReady;
   schemaReady = (async () => {
-    await sql`
+    await query(`
       CREATE TABLE IF NOT EXISTS clients (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
@@ -41,8 +58,8 @@ export async function ensureSchema() {
         script TEXT,
         script_steps JSONB DEFAULT '[]'
       )
-    `;
-    await sql`
+    `);
+    await query(`
       CREATE TABLE IF NOT EXISTS contacts (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
@@ -54,8 +71,8 @@ export async function ensureSchema() {
         notes TEXT,
         created_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
-    await sql`
+    `);
+    await query(`
       CREATE TABLE IF NOT EXISTS conversations (
         id SERIAL PRIMARY KEY,
         lead_id INTEGER,
@@ -65,8 +82,8 @@ export async function ensureSchema() {
         unread BOOLEAN DEFAULT false,
         updated_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
-    await sql`
+    `);
+    await query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
         conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
@@ -76,21 +93,21 @@ export async function ensureSchema() {
         outgoing BOOLEAN DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
-    await sql`
+    `);
+    await query(`
       CREATE TABLE IF NOT EXISTS dial_lists (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
         lead_ids JSONB DEFAULT '[]',
         created_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
-    await sql`
+    `);
+    await query(`
       CREATE TABLE IF NOT EXISTS called_leads (
         lead_id INTEGER PRIMARY KEY
       )
-    `;
-    await sql`
+    `);
+    await query(`
       CREATE TABLE IF NOT EXISTS call_log (
         id SERIAL PRIMARY KEY,
         lead_id INTEGER,
@@ -101,7 +118,7 @@ export async function ensureSchema() {
         notes TEXT,
         called_at TIMESTAMPTZ DEFAULT now()
       )
-    `;
+    `);
     await seedIfEmpty();
   })();
   return schemaReady;
@@ -225,23 +242,22 @@ const SEED_CONTACTS = [
 ];
 
 async function seedIfEmpty() {
-  const [{ count }] = await sql`SELECT count(*)::int AS count FROM clients`;
+  const [{ count }] = await query("SELECT count(*)::int AS count FROM clients");
   if (count > 0) return;
 
   for (const c of SEED_CLIENTS) {
-    await sql`
-      INSERT INTO clients (name, industry, leads, ads_live, script, script_steps)
-      VALUES (${c.name}, ${c.industry}, ${c.leads}, ${c.adsLive}, ${c.script}, ${JSON.stringify(c.scriptSteps)})
-    `;
+    await query(
+      "INSERT INTO clients (name, industry, leads, ads_live, script, script_steps) VALUES ($1,$2,$3,$4,$5,$6)",
+      [c.name, c.industry, c.leads, c.adsLive, c.script, JSON.stringify(c.scriptSteps)]
+    );
   }
 
   const contactIds = {};
   for (const c of SEED_CONTACTS) {
-    const [row] = await sql`
-      INSERT INTO contacts (name, email, phone, client, status, last_contact, notes)
-      VALUES (${c.name}, ${c.email}, ${c.phone}, ${c.client}, ${c.status}, ${c.lastContact}, ${c.notes})
-      RETURNING id
-    `;
+    const [row] = await query(
+      "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+      [c.name, c.email, c.phone, c.client, c.status, c.lastContact, c.notes]
+    );
     contactIds[c.name] = row.id;
   }
 
@@ -276,16 +292,15 @@ async function seedIfEmpty() {
 
   for (const convo of seedConvos) {
     const last = convo.messages[convo.messages.length - 1];
-    const [row] = await sql`
-      INSERT INTO conversations (lead_id, name, preview, time_label, unread)
-      VALUES (${convo.leadId}, ${convo.name}, ${convo.messages[0].text}, ${last.time}, true)
-      RETURNING id
-    `;
+    const [row] = await query(
+      "INSERT INTO conversations (lead_id, name, preview, time_label, unread) VALUES ($1,$2,$3,$4,true) RETURNING id",
+      [convo.leadId, convo.name, convo.messages[0].text, last.time]
+    );
     for (const m of convo.messages) {
-      await sql`
-        INSERT INTO messages (conversation_id, type, text, time_label, outgoing)
-        VALUES (${row.id}, 'text', ${m.text}, ${m.time}, ${m.outgoing})
-      `;
+      await query(
+        "INSERT INTO messages (conversation_id, type, text, time_label, outgoing) VALUES ($1,'text',$2,$3,$4)",
+        [row.id, m.text, m.time, m.outgoing]
+      );
     }
   }
 }
@@ -293,7 +308,7 @@ async function seedIfEmpty() {
 // ---------- Queries used by the API routes ----------
 
 export async function getClients() {
-  const rows = await sql`SELECT * FROM clients ORDER BY id`;
+  const rows = await query("SELECT * FROM clients ORDER BY id");
   return rows.map((r) => ({
     id: r.id,
     name: r.name,
@@ -305,9 +320,8 @@ export async function getClients() {
   }));
 }
 
-export async function getContacts() {
-  const rows = await sql`SELECT * FROM contacts ORDER BY created_at DESC`;
-  return rows.map((r) => ({
+function contactFromRow(r) {
+  return {
     id: r.id,
     name: r.name,
     email: r.email,
@@ -317,55 +331,38 @@ export async function getContacts() {
     lastContact: r.last_contact,
     notes: r.notes,
     createdAt: r.created_at,
-  }));
-}
-
-export async function createContact(c) {
-  const [row] = await sql`
-    INSERT INTO contacts (name, email, phone, client, status, last_contact, notes)
-    VALUES (${c.name}, ${c.email || ""}, ${c.phone}, ${c.client || ""}, ${c.status || "New Lead"}, ${c.lastContact || "Today"}, ${c.notes || ""})
-    RETURNING *
-  `;
-  return {
-    id: row.id,
-    name: row.name,
-    email: row.email,
-    phone: row.phone,
-    client: row.client,
-    status: row.status,
-    lastContact: row.last_contact,
-    notes: row.notes,
-    createdAt: row.created_at,
   };
 }
 
+export async function getContacts() {
+  const rows = await query("SELECT * FROM contacts ORDER BY created_at DESC");
+  return rows.map(contactFromRow);
+}
+
+export async function createContact(c) {
+  const rows = await query(
+    "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+    [c.name, c.email || "", c.phone, c.client || "", c.status || "New Lead", c.lastContact || "Today", c.notes || ""]
+  );
+  return contactFromRow(rows[0]);
+}
+
 export async function updateContact(id, patch) {
-  const [row] = await sql`
-    UPDATE contacts SET
-      status = COALESCE(${patch.status ?? null}, status),
-      notes = COALESCE(${patch.notes ?? null}, notes),
-      last_contact = COALESCE(${patch.lastContact ?? null}, last_contact)
-    WHERE id = ${id}
-    RETURNING *
-  `;
-  return row
-    ? {
-        id: row.id,
-        name: row.name,
-        email: row.email,
-        phone: row.phone,
-        client: row.client,
-        status: row.status,
-        lastContact: row.last_contact,
-        notes: row.notes,
-        createdAt: row.created_at,
-      }
-    : null;
+  const rows = await query(
+    `UPDATE contacts SET
+       status = COALESCE($2, status),
+       notes = COALESCE($3, notes),
+       last_contact = COALESCE($4, last_contact)
+     WHERE id = $1
+     RETURNING *`,
+    [id, patch.status ?? null, patch.notes ?? null, patch.lastContact ?? null]
+  );
+  return rows[0] ? contactFromRow(rows[0]) : null;
 }
 
 export async function getConversations() {
-  const convos = await sql`SELECT * FROM conversations ORDER BY updated_at DESC`;
-  const messages = await sql`SELECT * FROM messages ORDER BY id ASC`;
+  const convos = await query("SELECT * FROM conversations ORDER BY updated_at DESC");
+  const messages = await query("SELECT * FROM messages ORDER BY id ASC");
   return convos.map((c) => ({
     id: c.id,
     leadId: c.lead_id,
@@ -382,55 +379,56 @@ export async function getConversations() {
 // Logs a call onto a lead's conversation — creates the conversation if
 // one doesn't exist yet, otherwise appends a message and bumps it.
 export async function logCall({ leadId, name, text, time }) {
-  const [existing] = await sql`SELECT id FROM conversations WHERE lead_id = ${leadId}`;
-  let conversationId = existing?.id;
+  const existingRows = await query("SELECT id FROM conversations WHERE lead_id = $1", [leadId]);
+  let conversationId = existingRows[0]?.id;
   if (!conversationId) {
-    const [row] = await sql`
-      INSERT INTO conversations (lead_id, name, preview, time_label, unread)
-      VALUES (${leadId}, ${name}, ${text}, ${time}, false)
-      RETURNING id
-    `;
-    conversationId = row.id;
+    const rows = await query(
+      "INSERT INTO conversations (lead_id, name, preview, time_label, unread) VALUES ($1,$2,$3,$4,false) RETURNING id",
+      [leadId, name, text, time]
+    );
+    conversationId = rows[0].id;
   } else {
-    await sql`
-      UPDATE conversations SET preview = ${text}, time_label = ${time}, unread = false, updated_at = now()
-      WHERE id = ${conversationId}
-    `;
+    await query(
+      "UPDATE conversations SET preview = $2, time_label = $3, unread = false, updated_at = now() WHERE id = $1",
+      [conversationId, text, time]
+    );
   }
-  await sql`
-    INSERT INTO messages (conversation_id, type, text, time_label, outgoing)
-    VALUES (${conversationId}, 'call', ${text}, ${time}, true)
-  `;
+  await query("INSERT INTO messages (conversation_id, type, text, time_label, outgoing) VALUES ($1,'call',$2,$3,true)", [
+    conversationId,
+    text,
+    time,
+  ]);
   return conversationId;
 }
 
 export async function getDialLists() {
-  const rows = await sql`SELECT * FROM dial_lists ORDER BY created_at`;
+  const rows = await query("SELECT * FROM dial_lists ORDER BY created_at");
   return rows.map((r) => ({ id: r.id, name: r.name, leadIds: r.lead_ids || [] }));
 }
 
 export async function createDialList(name, leadIds) {
-  const [row] = await sql`
-    INSERT INTO dial_lists (name, lead_ids) VALUES (${name}, ${JSON.stringify(leadIds)}) RETURNING *
-  `;
-  return { id: row.id, name: row.name, leadIds: row.lead_ids || [] };
+  const rows = await query("INSERT INTO dial_lists (name, lead_ids) VALUES ($1,$2) RETURNING *", [
+    name,
+    JSON.stringify(leadIds),
+  ]);
+  return { id: rows[0].id, name: rows[0].name, leadIds: rows[0].lead_ids || [] };
 }
 
 export async function deleteDialList(id) {
-  await sql`DELETE FROM dial_lists WHERE id = ${id}`;
+  await query("DELETE FROM dial_lists WHERE id = $1", [id]);
 }
 
 export async function getCalledLeadIds() {
-  const rows = await sql`SELECT lead_id FROM called_leads`;
+  const rows = await query("SELECT lead_id FROM called_leads");
   return rows.map((r) => r.lead_id);
 }
 
 export async function markLeadCalled(leadId) {
-  await sql`INSERT INTO called_leads (lead_id) VALUES (${leadId}) ON CONFLICT DO NOTHING`;
+  await query("INSERT INTO called_leads (lead_id) VALUES ($1) ON CONFLICT DO NOTHING", [leadId]);
 }
 
 export async function getCallLog() {
-  const rows = await sql`SELECT * FROM call_log ORDER BY called_at DESC`;
+  const rows = await query("SELECT * FROM call_log ORDER BY called_at DESC");
   return rows.map((r) => ({
     id: r.id,
     leadId: r.lead_id,
@@ -444,11 +442,11 @@ export async function getCallLog() {
 }
 
 export async function addCallLogEntry(entry) {
-  const [row] = await sql`
-    INSERT INTO call_log (lead_id, name, phone, client, status, notes)
-    VALUES (${entry.leadId}, ${entry.name}, ${entry.phone}, ${entry.client}, ${entry.status}, ${entry.notes})
-    RETURNING *
-  `;
+  const rows = await query(
+    "INSERT INTO call_log (lead_id, name, phone, client, status, notes) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+    [entry.leadId, entry.name, entry.phone, entry.client, entry.status, entry.notes]
+  );
+  const row = rows[0];
   return {
     id: row.id,
     leadId: row.lead_id,

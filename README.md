@@ -89,18 +89,24 @@ Redeploy after changing env vars (Vercel only picks them up on a fresh
 build). You can sanity-check they're set correctly by visiting
 `https://<your-vercel-domain>/api/health` — it should return `{"ok":true}`.
 
-## Database (Postgres / Neon)
+## Database (Postgres)
 
 Contacts, conversations, dialler lists, and the call log are stored in a
 Postgres database, not the browser — so they persist across devices and
 survive a redeploy. Same setup pattern as Twilio: one database, wherever the
 app is running (locally or on Vercel).
 
+The database layer (`server/db.js`) uses the standard `pg` driver over a
+normal Postgres connection string, so it works with whichever
+Postgres-compatible provider you connect through Vercel's Storage tab — Neon,
+Prisma Postgres, Supabase, etc. — as long as `POSTGRES_URL` is set to a
+direct (non-Prisma-Accelerate) connection string.
+
 ### 1. Create the database
 
 1. Open your project on **vercel.com** → **Storage** tab → **Create Database**.
-2. Choose **Postgres** (this provisions a Neon database and connects it to
-   your project automatically).
+2. Pick a Postgres provider (any of them work here — Neon, Prisma Postgres,
+   Supabase…) and connect it to your project.
 3. Vercel injects `POSTGRES_URL` (and a couple of related vars) into your
    project's environment variables for you — no manual copy-paste needed for
    the deployed site.
