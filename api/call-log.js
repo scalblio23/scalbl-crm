@@ -1,6 +1,9 @@
 import { ensureSchema, getCallLog, addCallLogEntry } from "../server/db.js";
+import { requireAuth } from "../server/auth.js";
 
 export default async function handler(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
   try {
     await ensureSchema();
 

@@ -2,8 +2,11 @@
 // frontend at /api/token. Requires the same TWILIO_* env vars as
 // local dev, set instead in the Vercel project's Environment Variables.
 import { missingTwilioEnv, mintAccessToken } from "../server/twilioCore.js";
+import { requireAuth } from "../server/auth.js";
 
 export default function handler(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
   const missing = missingTwilioEnv();
   if (missing.length) {
     res.status(500).json({

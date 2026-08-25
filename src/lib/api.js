@@ -10,6 +10,7 @@ async function request(path, options = {}) {
   try {
     res = await fetch(`${API_BASE}${path}`, {
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       ...options,
     });
   } catch {
@@ -21,7 +22,11 @@ async function request(path, options = {}) {
   }
   if (res.status === 204) return null;
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(body.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return body;
 }
 

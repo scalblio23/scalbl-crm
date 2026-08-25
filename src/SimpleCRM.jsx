@@ -21,6 +21,8 @@ import {
   Table2,
   Upload,
   Loader2,
+  LogOut,
+  Lock,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -202,8 +204,6 @@ function formatClientCellDisplay(col, value) {
   return String(value);
 }
 
-const CURRENT_USER = "Henry";
-
 function formatCallDuration(ms) {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
   const m = Math.floor(totalSeconds / 60);
@@ -223,6 +223,70 @@ const navItems = [
 
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
+
+  // ---------- Auth ----------
+  // Checked once on mount via the session cookie. Everything else in
+  // this component (the database bootstrap fetch included) waits for
+  // this to resolve — there's no "logged out" flash of real data
+  // because nothing else fetches until authUser is set.
+  const [authUser, setAuthUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState("login"); // "login" | "setup"
+  const [authForm, setAuthForm] = useState({ email: "", password: "", confirm: "" });
+  const [authError, setAuthError] = useState("");
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { user } = await api.get("/api/auth-me");
+        if (!cancelled) setAuthUser(user);
+      } catch {
+        // Treated as logged out — the login screen below handles it.
+      } finally {
+        if (!cancelled) setAuthLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError("");
+    const email = authForm.email.trim();
+    const password = authForm.password;
+    if (!email || !password) {
+      setAuthError("Enter your email and password.");
+      return;
+    }
+    if (authMode === "setup" && password !== authForm.confirm) {
+      setAuthError("Passwords don't match.");
+      return;
+    }
+    setAuthSubmitting(true);
+    try {
+      const path = authMode === "setup" ? "/api/auth-set-password" : "/api/auth-login";
+      const { user } = await api.post(path, { email, password });
+      setAuthUser(user);
+    } catch (err) {
+      setAuthError(err.message || "Something went wrong.");
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.post("/api/auth-logout", {});
+    } catch {
+      // Cookie may already be gone — reload regardless.
+    }
+    window.location.reload();
+  };
+
   // Start empty rather than pre-filled with the sample data — that
   // data is only ever a fallback for when the database fetch below
   // genuinely fails, not something to flash on screen while it's
@@ -244,6 +308,7 @@ export default function SimpleCRM() {
   const [dbLoading, setDbLoading] = useState(true);
   const [dbError, setDbError] = useState("");
   useEffect(() => {
+    if (!authUser) return; // wait for login before fetching any CRM data
     let cancelled = false;
     (async () => {
       try {
@@ -278,7 +343,7 @@ export default function SimpleCRM() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authUser]);
 
   // Add-contact modal
   const emptyContactForm = {
@@ -744,7 +809,7 @@ export default function SimpleCRM() {
   const logCallToConversation = (lead, durationMs) => {
     const now = new Date();
     const timeLabel = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const summary = `Outgoing call · ${timeLabel} · ${formatCallDuration(durationMs)} · by ${CURRENT_USER}`;
+    const summary = `Outgoing call · ${timeLabel} · ${formatCallDuration(durationMs)} · by ${authUser?.name || "You"}`;
     const message = { id: `call-${lead.id}-${now.getTime()}`, type: "call", text: summary, time: timeLabel };
 
     const existing = conversations.find((c) => c.leadId === lead.id);
@@ -983,6 +1048,104 @@ export default function SimpleCRM() {
     hangUp();
   };
 
+  if (authLoading) {
+    return (
+      <div
+        className="flex h-screen items-center justify-center gap-2 bg-white text-sm text-gray-400"
+        style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
+      >
+        <Loader2 size={16} className="animate-spin" /> Loading…
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <div
+        className="flex h-screen items-center justify-center bg-gray-50"
+        style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
+      >
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-6">
+            <div className="text-xl font-bold tracking-tight text-gray-900">Scalbl CRM</div>
+            <div className="text-xs text-gray-400 mt-0.5">Lead operations</div>
+          </div>
+          <form onSubmit={handleAuthSubmit} className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+            <div className="flex items-center gap-2 mb-4 text-sm font-semibold text-gray-800">
+              <Lock size={15} />
+              {authMode === "setup" ? "Set your password" : "Log in"}
+            </div>
+
+            {authError && (
+              <div className="mb-4 flex items-start gap-2 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                {authError}
+              </div>
+            )}
+
+            <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
+            <input
+              type="email"
+              autoComplete="email"
+              value={authForm.email}
+              onChange={(e) => setAuthForm((f) => ({ ...f, email: e.target.value }))}
+              className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+              placeholder="you@example.com"
+            />
+
+            <label className="block text-xs font-medium text-gray-500 mb-1">
+              {authMode === "setup" ? "Choose a password" : "Password"}
+            </label>
+            <input
+              type="password"
+              autoComplete={authMode === "setup" ? "new-password" : "current-password"}
+              value={authForm.password}
+              onChange={(e) => setAuthForm((f) => ({ ...f, password: e.target.value }))}
+              className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+              placeholder={authMode === "setup" ? "At least 8 characters" : "••••••••"}
+            />
+
+            {authMode === "setup" && (
+              <>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Confirm password</label>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={authForm.confirm}
+                  onChange={(e) => setAuthForm((f) => ({ ...f, confirm: e.target.value }))}
+                  className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                  placeholder="••••••••"
+                />
+              </>
+            )}
+
+            <button
+              type="submit"
+              disabled={authSubmitting}
+              className="w-full mt-1 flex items-center justify-center gap-2 rounded-md bg-gray-900 text-white text-sm font-medium py-2 hover:bg-gray-800 disabled:opacity-60"
+            >
+              {authSubmitting && <Loader2 size={14} className="animate-spin" />}
+              {authMode === "setup" ? "Set password & log in" : "Log in"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode((m) => (m === "setup" ? "login" : "setup"));
+                setAuthError("");
+              }}
+              className="w-full mt-3 text-xs text-gray-400 hover:text-gray-600"
+            >
+              {authMode === "setup"
+                ? "Already have a password? Log in instead"
+                : "First time here? Set your password"}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   if (dbLoading) {
     return (
       <div
@@ -1018,8 +1181,15 @@ export default function SimpleCRM() {
             </button>
           ))}
         </nav>
-        <div className="px-5 py-4 border-t border-gray-100 text-xs text-gray-400">
-          {CURRENT_USER} · Admin
+        <div className="px-5 py-4 border-t border-gray-100 flex items-center justify-between gap-2">
+          <span className="text-xs text-gray-400 truncate">{authUser?.name || "Signed in"}</span>
+          <button
+            onClick={handleLogout}
+            title="Log out"
+            className="text-gray-300 hover:text-gray-600 shrink-0"
+          >
+            <LogOut size={14} />
+          </button>
         </div>
       </aside>
 

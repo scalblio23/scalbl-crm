@@ -165,3 +165,55 @@ Check it worked by visiting `/api/health` — the `database` field should say
 - If the database isn't reachable, the app falls back to its built-in sample
   data and shows a dismissible banner explaining that changes won't be saved
   until it's fixed — it won't just show a blank screen.
+
+## Login (users)
+
+The app requires logging in — everyone who logs in shares the same CRM data,
+login just controls who's allowed in and whose name shows up on activity
+(calls, texts). Accounts are invite-only: someone is added to the `users`
+table (currently seeded with Henry and Jem — see `INVITED_USERS` in
+`server/db.js`) before they can do anything.
+
+### 1. Set `SESSION_SECRET`
+
+Sessions are a signed JWT in an HttpOnly cookie — no separate session table.
+Generate a random secret and set it both locally and on Vercel:
+
+```bash
+openssl rand -hex 32
+```
+
+```bash
+# .env
+SESSION_SECRET=<paste the value here>
+```
+
+Add the same variable in **Vercel → Project Settings → Environment
+Variables**, then redeploy — logins won't work without it (the API returns a
+clear error instead of failing silently).
+
+### 2. First login — claiming an account
+
+An invited user's row exists in the database but starts with no password.
+The first time they visit the app they'll see a login screen with a "First
+time here? Set your password" link — that calls `/api/auth-set-password`,
+which only works while the account has no password yet. After that, only
+`/api/auth-login` works for that email.
+
+Nobody can create an account for an email that wasn't invited — both
+endpoints check the `users` table first.
+
+### 3. Adding another user later
+
+Add a `{ name, email }` entry to `INVITED_USERS` in `server/db.js` and
+redeploy — the next schema check seeds the row (`password_hash` starts
+`NULL`), and that person can then claim it the same way.
+
+### How it fits together
+
+- `server/auth.js` — password hashing (bcrypt), session cookie
+  creation/verification, and `requireAuth()`, shared by local dev and Vercel.
+- `api/auth-login.js`, `api/auth-set-password.js`, `api/auth-logout.js`,
+  `api/auth-me.js` — the four auth endpoints; everything else under `/api`
+  requires a valid session cookie except the Twilio webhooks
+  (`/api/voice`, `/api/status`, `/api/sms-inbound`) and `/api/health`.

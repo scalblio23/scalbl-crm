@@ -33,16 +33,50 @@ import {
   markLeadCalled,
   getCallLog,
   addCallLogEntry,
+  getUserByEmail,
+  claimUserPassword,
 } from "./db.js";
+import {
+  getUserFromRequest,
+  requireAuth,
+  hashPassword,
+  verifyPassword,
+  createSessionCookie,
+  clearSessionCookie,
+} from "./auth.js";
 
 dotenv.config();
 
 const { PORT = 3001 } = process.env;
 
 const app = express();
-app.use(cors());
+// credentials: true + a reflected origin (rather than the cors()
+// default wildcard "*") is required for the session cookie to be
+// sent/accepted — browsers refuse credentialed requests against "*".
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+
+// Twilio webhooks and the auth endpoints themselves are the only
+// routes reachable without a session cookie.
+const PUBLIC_PATHS = new Set([
+  "/api/health",
+  "/api/voice",
+  "/api/status",
+  "/api/sms-inbound",
+  "/api/auth-login",
+  "/api/auth-set-password",
+  "/api/auth-logout",
+  "/api/auth-me",
+]);
+
+app.use((req, res, next) => {
+  if (PUBLIC_PATHS.has(req.path)) return next();
+  const user = requireAuth(req, res);
+  if (!user) return; // requireAuth already sent the 401
+  req.user = user;
+  next();
+});
 
 // Wraps a route so DB errors come back as a clean 500 instead of
 // crashing the process, and so every route ensures the schema exists.
@@ -66,6 +100,56 @@ app.get("/api/health", (req, res) => {
     missing,
     database: dbConfigured ? "connected" : "not configured — set POSTGRES_URL",
   });
+});
+
+// ---------- Auth ----------
+
+app.get("/api/auth-me", (req, res) => {
+  res.json({ user: getUserFromRequest(req) });
+});
+
+app.post(
+  "/api/auth-login",
+  dbRoute(async (req, res) => {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
+    const row = await getUserByEmail(email);
+    if (!row || !row.password_hash) {
+      return res.status(401).json({ error: "Incorrect email or password." });
+    }
+    const ok = await verifyPassword(password, row.password_hash);
+    if (!ok) return res.status(401).json({ error: "Incorrect email or password." });
+    const user = { id: row.id, name: row.name, email: row.email };
+    res.setHeader("Set-Cookie", createSessionCookie(user));
+    res.json({ user });
+  })
+);
+
+app.post(
+  "/api/auth-set-password",
+  dbRoute(async (req, res) => {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
+    if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+    const existing = await getUserByEmail(email);
+    if (!existing) return res.status(404).json({ error: "That email hasn't been invited." });
+    if (existing.password_hash) {
+      return res.status(409).json({ error: "This account already has a password — log in instead." });
+    }
+    const hash = await hashPassword(password);
+    const row = await claimUserPassword(email, hash);
+    if (!row) {
+      return res.status(409).json({ error: "This account already has a password — log in instead." });
+    }
+    const user = { id: row.id, name: row.name, email: row.email };
+    res.setHeader("Set-Cookie", createSessionCookie(user));
+    res.json({ user });
+  })
+);
+
+app.post("/api/auth-logout", (req, res) => {
+  res.setHeader("Set-Cookie", clearSessionCookie());
+  res.status(204).end();
 });
 
 // Everything the app needs on first load, in one request — see

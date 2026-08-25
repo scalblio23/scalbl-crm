@@ -135,9 +135,37 @@ export async function ensureSchema() {
         called_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     await seedIfEmpty();
+    await seedUsersIfMissing();
   })();
   return schemaReady;
+}
+
+// Invite-only accounts: pre-seed the people allowed to ever log in,
+// with no password set yet. Each one claims their account once via
+// "set password" — anyone else's email just won't exist here, so
+// there's no open self-registration.
+const INVITED_USERS = [
+  { name: "Henry", email: "henryfortunatow@gmail.com" },
+  { name: "Jem", email: "jem.scalbl@gmail.com" },
+];
+
+async function seedUsersIfMissing() {
+  for (const u of INVITED_USERS) {
+    await query("INSERT INTO users (name, email) VALUES ($1,$2) ON CONFLICT (email) DO NOTHING", [
+      u.name,
+      u.email,
+    ]);
+  }
 }
 
 // ---------- Seed data (same sample data the app shipped with) ----------
@@ -575,4 +603,23 @@ export async function addCallLogEntry(entry) {
     notes: row.notes,
     calledAt: row.called_at,
   };
+}
+
+// ---------- Users ----------
+
+export async function getUserByEmail(email) {
+  const rows = await query("SELECT * FROM users WHERE email = $1", [String(email).toLowerCase().trim()]);
+  return rows[0] || null;
+}
+
+// Sets a user's password — but only if one isn't already set. That's
+// what makes this "claim your invited account" rather than "reset
+// anyone's password": once password_hash is non-null, this is a
+// no-op (returns null), and the normal login flow takes over.
+export async function claimUserPassword(email, passwordHash) {
+  const rows = await query(
+    "UPDATE users SET password_hash = $2 WHERE email = $1 AND password_hash IS NULL RETURNING *",
+    [String(email).toLowerCase().trim(), passwordHash]
+  );
+  return rows[0] || null;
 }

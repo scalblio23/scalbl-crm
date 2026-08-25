@@ -8,6 +8,7 @@ import {
   getCalledLeadIds,
   getCallLog,
 } from "../server/db.js";
+import { requireAuth } from "../server/auth.js";
 
 // GET /api/bootstrap — everything the app needs on first load, in one
 // request. Firing 7 separate requests on mount meant 7 separate
@@ -16,6 +17,8 @@ import {
 // tiers), that compounded into a very slow first paint. One request
 // only pays that cold-start/wake-up cost once.
 export default async function handler(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
   try {
     await ensureSchema();
     const [clients, clientColumns, contacts, conversations, dialLists, calledLeadIds, callLog] = await Promise.all([

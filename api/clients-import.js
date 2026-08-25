@@ -1,10 +1,13 @@
 import { ensureSchema, importClientData } from "../server/db.js";
+import { requireAuth } from "../server/auth.js";
 
 // POST /api/clients-import — wipes existing clients + column
 // definitions and replaces them with the real client-list data from
 // the team's CSV. Triggered by the "Import client list" button on
 // the Clients page. Safe to re-run.
 export default async function handler(req, res) {
+  const user = requireAuth(req, res);
+  if (!user) return;
   try {
     await ensureSchema();
     if (req.method !== "POST") {
