@@ -20,6 +20,7 @@ import {
   LayoutGrid,
   Table2,
   Upload,
+  Loader2,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -1135,9 +1136,11 @@ export default function SimpleCRM() {
                       <button
                         onClick={handleSendMessage}
                         disabled={!messageDraft.trim() || !activeConversationPhone || sendingMessage}
-                        className="bg-gray-900 text-white text-sm px-5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                        className={`flex items-center justify-center bg-gray-900 text-white text-sm px-5 rounded-lg font-medium min-w-[72px] ${
+                          sendingMessage ? "" : "disabled:opacity-40 disabled:cursor-not-allowed"
+                        }`}
                       >
-                        {sendingMessage ? "Sending…" : "Send"}
+                        {sendingMessage ? <Loader2 size={15} className="animate-spin" /> : "Send"}
                       </button>
                     </div>
                     <div className="text-xs text-gray-400">Sent as a real SMS via Twilio to {activeConversationPhone || "—"}</div>
