@@ -331,6 +331,29 @@ export default function SimpleCRM() {
       c.client.toLowerCase().includes(search.toLowerCase())
   );
 
+  // Bulk-select + delete on the Contacts table
+  const [selectedContactIds, setSelectedContactIds] = useState([]);
+  const toggleContactSelected = (id) =>
+    setSelectedContactIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const allVisibleContactsSelected =
+    filteredContacts.length > 0 && filteredContacts.every((c) => selectedContactIds.includes(c.id));
+  const toggleSelectAllContacts = () =>
+    setSelectedContactIds(allVisibleContactsSelected ? [] : filteredContacts.map((c) => c.id));
+
+  const deleteSelectedContacts = async () => {
+    if (!selectedContactIds.length) return;
+    const count = selectedContactIds.length;
+    if (!window.confirm(`Delete ${count} contact${count === 1 ? "" : "s"}? This can't be undone.`)) return;
+    const ids = selectedContactIds;
+    setSelectedContactIds([]);
+    setContacts((cs) => cs.filter((c) => !ids.includes(c.id)));
+    try {
+      await api.delete(`/api/contacts?ids=${ids.join(",")}`);
+    } catch (err) {
+      setDbError(err.message || "Could not delete the selected contacts.");
+    }
+  };
+
   // A lead's client record, derived from the Client column: look up the
   // client by name in the client list to read its script link/content.
   const getClient = (clientName) =>
@@ -723,6 +746,14 @@ export default function SimpleCRM() {
             <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
               <h1 className="text-xl font-bold">Contacts</h1>
               <div className="flex gap-3">
+                {selectedContactIds.length > 0 && (
+                  <button
+                    onClick={deleteSelectedContacts}
+                    className="flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Trash2 size={15} /> Delete {selectedContactIds.length} selected
+                  </button>
+                )}
                 <div className="relative">
                   <Search size={15} className="absolute left-3 top-2.5 text-gray-400" />
                   <input
@@ -743,7 +774,15 @@ export default function SimpleCRM() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
-                  <th className="px-8 py-3 font-medium">Name</th>
+                  <th className="pl-8 pr-2 py-3 font-medium w-8">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleContactsSelected}
+                      onChange={toggleSelectAllContacts}
+                      className="w-4 h-4 rounded border-gray-300"
+                    />
+                  </th>
+                  <th className="px-5 py-3 font-medium">Name</th>
                   <th className="py-3 font-medium">Phone</th>
                   <th className="py-3 font-medium">Client</th>
                   <th className="py-3 font-medium">Status</th>
@@ -753,7 +792,15 @@ export default function SimpleCRM() {
               <tbody>
                 {filteredContacts.map((c) => (
                   <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="px-8 py-3.5 font-medium">{c.name}</td>
+                    <td className="pl-8 pr-2 py-3.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedContactIds.includes(c.id)}
+                        onChange={() => toggleContactSelected(c.id)}
+                        className="w-4 h-4 rounded border-gray-300"
+                      />
+                    </td>
+                    <td className="px-5 py-3.5 font-medium">{c.name}</td>
                     <td className="py-3.5 text-gray-600">{c.phone}</td>
                     <td className="py-3.5 text-gray-600">{c.client}</td>
                     <td className="py-3.5">
@@ -764,6 +811,13 @@ export default function SimpleCRM() {
                     <td className="py-3.5 text-gray-500">{c.lastContact}</td>
                   </tr>
                 ))}
+                {filteredContacts.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-8 py-10 text-center text-sm text-gray-400">
+                      No contacts match "{search}"
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

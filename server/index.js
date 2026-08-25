@@ -13,6 +13,7 @@ import {
   getContacts,
   createContact,
   updateContact,
+  deleteContacts,
   getConversations,
   logCall,
   getDialLists,
@@ -114,6 +115,18 @@ app.patch(
     const contact = await updateContact(id, patch);
     if (!contact) return res.status(404).json({ error: "Contact not found" });
     res.json(contact);
+  })
+);
+app.delete(
+  "/api/contacts",
+  dbRoute(async (req, res) => {
+    const ids = String(req.query.ids || "")
+      .split(",")
+      .map((id) => Number(id.trim()))
+      .filter(Boolean);
+    if (!ids.length) return res.status(400).json({ error: "Missing ids" });
+    await deleteContacts(ids);
+    res.status(204).end();
   })
 );
 

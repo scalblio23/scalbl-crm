@@ -360,6 +360,10 @@ export async function updateContact(id, patch) {
   return rows[0] ? contactFromRow(rows[0]) : null;
 }
 
+export async function deleteContacts(ids) {
+  await query("DELETE FROM contacts WHERE id = ANY($1::int[])", [ids]);
+}
+
 export async function getConversations() {
   const convos = await query("SELECT * FROM conversations ORDER BY updated_at DESC");
   const messages = await query("SELECT * FROM messages ORDER BY id ASC");
