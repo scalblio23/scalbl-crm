@@ -92,6 +92,13 @@ const initialClients = [
     leads: 42,
     adsLive: true,
     script: "https://scripts.scalbl.io/lux-solar",
+    scriptSteps: [
+      "Introduce yourself and confirm you're calling about their battery rebate enquiry.",
+      "Confirm they own the property and have north/west-facing roof space.",
+      "Explain the current rebate amount and typical payback period.",
+      "Offer a free site assessment and lock in a time.",
+      "If hesitant, offer to send the rebate breakdown by email.",
+    ],
   },
   {
     id: 2,
@@ -100,6 +107,13 @@ const initialClients = [
     leads: 31,
     adsLive: true,
     script: "https://scripts.scalbl.io/stoprent-properties",
+    scriptSteps: [
+      "Introduce yourself and confirm which listing they enquired about.",
+      "Ask their preferred move-in date and household size.",
+      "Confirm budget range and any must-have features.",
+      "Offer an inspection time and confirm the best contact number.",
+      "Send a calendar invite once a time is agreed.",
+    ],
   },
   {
     id: 3,
@@ -108,6 +122,13 @@ const initialClients = [
     leads: 18,
     adsLive: true,
     script: "https://scripts.scalbl.io/silverloom-advisory",
+    scriptSteps: [
+      "Introduce yourself and confirm they requested a financial review.",
+      "Ask what prompted the enquiry (super, investing, insurance, etc.).",
+      "Briefly explain the free initial consultation and what it covers.",
+      "Book a call with an advisor and confirm timezone.",
+      "Note any sensitive details in Notes rather than over email.",
+    ],
   },
   {
     id: 4,
@@ -116,6 +137,13 @@ const initialClients = [
     leads: 9,
     adsLive: false,
     script: "https://scripts.scalbl.io/lasertronics",
+    scriptSteps: [
+      "Introduce yourself and confirm the equipment they enquired about.",
+      "Ask about current setup, page volume, and lease end date if any.",
+      "Explain the current promo pricing and service inclusions.",
+      "Offer to send a tailored quote by email.",
+      "If no answer, leave a voicemail and log a follow-up for next week.",
+    ],
   },
 ];
 
@@ -169,10 +197,10 @@ export default function SimpleCRM() {
       c.client.toLowerCase().includes(search.toLowerCase())
   );
 
-  // A client's call script, derived from the Client column: look up the
-  // client by name in the client list, then read its script link.
-  const getClientScript = (clientName) =>
-    clients.find((cl) => cl.name === clientName)?.script;
+  // A lead's client record, derived from the Client column: look up the
+  // client by name in the client list to read its script link/content.
+  const getClient = (clientName) =>
+    clients.find((cl) => cl.name === clientName);
 
   // Leads for the powerdialler, newest first, filterable by every column
   const dialQueue = [...contacts].sort(
@@ -349,47 +377,72 @@ export default function SimpleCRM() {
             <div className="px-8 pt-6">
               {calling && activeLead ? (
                 <div className="bg-green-50 border border-green-200 rounded-2xl px-6 py-5">
-                  <div className="flex items-start justify-between gap-6">
-                    <div className="flex items-start gap-4">
-                      <span className="relative flex h-3 w-3 mt-1.5 shrink-0">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <span className="relative flex h-3 w-3 shrink-0">
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
                         <span className="relative inline-flex rounded-full h-3 w-3 bg-green-600" />
                       </span>
-                      <div>
-                        <div className="text-xs font-semibold uppercase tracking-widest text-green-700">
-                          Live call
-                        </div>
-                        <div className="text-xl font-bold mt-0.5">{activeLead.name}</div>
-                        <div className="text-sm text-gray-600 mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
-                          <span>{activeLead.phone}</span>
-                          <span>{activeLead.email}</span>
-                          <span>{activeLead.client}</span>
-                        </div>
-                        {activeLead.notes && (
-                          <div className="mt-3 max-w-xl bg-white/70 border border-green-100 rounded-lg px-3 py-2 text-sm text-gray-600">
-                            {activeLead.notes}
-                          </div>
-                        )}
+                      <div className="text-xs font-semibold uppercase tracking-widest text-green-700">
+                        Live call
                       </div>
                     </div>
-                    <div className="flex flex-col items-end gap-2 shrink-0">
-                      <button
-                        onClick={() => setCalling(false)}
-                        className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold"
-                      >
-                        <PhoneOff size={15} /> End call
-                      </button>
-                      {getClientScript(activeLead.client) && (
-                        <a
-                          href={getClientScript(activeLead.client)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-1.5 text-sm font-medium text-green-700 hover:text-green-800"
-                        >
-                          <ExternalLink size={14} /> {activeLead.client} script
-                        </a>
+                    <button
+                      onClick={() => setCalling(false)}
+                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
+                    >
+                      <PhoneOff size={15} /> End call
+                    </button>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-[1fr_1.3fr] gap-6 md:items-center">
+                    {/* Left: who you're talking to */}
+                    <div>
+                      <div className="text-xl font-bold">{activeLead.name}</div>
+                      <div className="text-sm text-gray-600 mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                        <span>{activeLead.phone}</span>
+                        <span>{activeLead.email}</span>
+                        <span>{activeLead.client}</span>
+                      </div>
+                      {activeLead.notes && (
+                        <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2 text-sm text-gray-600">
+                          {activeLead.notes}
+                        </div>
                       )}
                     </div>
+
+                    {/* Right: the client's call script, front and centre */}
+                    {(() => {
+                      const activeClient = getClient(activeLead.client);
+                      return (
+                        <div className="bg-white border border-green-100 rounded-xl px-5 py-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                              {activeLead.client} script
+                            </div>
+                            {activeClient?.script && (
+                              <a
+                                href={activeClient.script}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700"
+                              >
+                                <ExternalLink size={12} /> Full script
+                              </a>
+                            )}
+                          </div>
+                          {activeClient?.scriptSteps?.length ? (
+                            <ol className="space-y-1.5 text-sm text-gray-700 list-decimal list-inside">
+                              {activeClient.scriptSteps.map((step, i) => (
+                                <li key={i}>{step}</li>
+                              ))}
+                            </ol>
+                          ) : (
+                            <div className="text-sm text-gray-400">No script on file for this client.</div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               ) : (
@@ -500,9 +553,9 @@ export default function SimpleCRM() {
                           </span>
                         </td>
                         <td className="px-5 py-3.5">
-                          {getClientScript(lead.client) ? (
+                          {getClient(lead.client)?.script ? (
                             <a
-                              href={getClientScript(lead.client)}
+                              href={getClient(lead.client).script}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"
