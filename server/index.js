@@ -26,6 +26,7 @@ import {
   getContactColumns,
   createContactColumn,
   deleteContactColumn,
+  updateContactColumnByKey,
   importContactsBulk,
   getConversations,
   logCall,
@@ -436,6 +437,16 @@ app.post(
     const { label, type, options } = req.body || {};
     if (!label || !type) return res.status(400).json({ error: "Missing label or type" });
     res.status(201).json(await createContactColumn({ label, type, options }));
+  })
+);
+app.patch(
+  "/api/contact-columns",
+  dbRoute(async (req, res) => {
+    const { key, label, type, options } = req.body || {};
+    if (!key) return res.status(400).json({ error: "Missing key" });
+    const column = await updateContactColumnByKey(key, { label, type, options });
+    if (!column) return res.status(404).json({ error: `No column with key "${key}"` });
+    res.json(column);
   })
 );
 app.delete(

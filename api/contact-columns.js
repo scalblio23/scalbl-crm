@@ -1,4 +1,10 @@
-import { ensureSchema, getContactColumns, createContactColumn, deleteContactColumn } from "../server/db.js";
+import {
+  ensureSchema,
+  getContactColumns,
+  createContactColumn,
+  deleteContactColumn,
+  updateContactColumnByKey,
+} from "../server/db.js";
 import { requireAuth } from "../server/auth.js";
 
 export default async function handler(req, res) {
@@ -18,6 +24,14 @@ export default async function handler(req, res) {
       return res.status(201).json(column);
     }
 
+    if (req.method === "PATCH") {
+      const { key, label, type, options } = req.body || {};
+      if (!key) return res.status(400).json({ error: "Missing key" });
+      const column = await updateContactColumnByKey(key, { label, type, options });
+      if (!column) return res.status(404).json({ error: `No column with key "${key}"` });
+      return res.status(200).json(column);
+    }
+
     if (req.method === "DELETE") {
       const id = req.query.id;
       if (!id) return res.status(400).json({ error: "Missing id" });
@@ -25,7 +39,7 @@ export default async function handler(req, res) {
       return res.status(204).end();
     }
 
-    res.setHeader("Allow", "GET, POST, DELETE");
+    res.setHeader("Allow", "GET, POST, PATCH, DELETE");
     return res.status(405).json({ error: "Method not allowed" });
   } catch (err) {
     console.error("[api/contact-columns]", err);

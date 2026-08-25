@@ -26,8 +26,31 @@ export const CONTACT_COLUMNS = [
   {
     "key": "stage",
     "label": "STAGE",
-    "type": "text",
-    "options": []
+    "type": "select",
+    "options": [
+      { "value": "Booked", "color": "green" },
+      { "value": "Not Interested", "color": "red" },
+      { "value": "No Answer Yet", "color": "amber" },
+      { "value": "New", "color": "blue" },
+      { "value": "No Answer", "color": "gray" },
+      { "value": "Progressed To Close", "color": "green" },
+      { "value": "Disqualified", "color": "red" },
+      { "value": "Callback Requested", "color": "amber" },
+      { "value": "Paid", "color": "green" },
+      { "value": "Under 5%", "color": "purple" },
+      { "value": "5% – 5.5%", "color": "purple" },
+      { "value": "5.5% – 6%", "color": "purple" },
+      { "value": "6% – 6.5%", "color": "purple" },
+      { "value": "6.5% – 7%", "color": "purple" },
+      { "value": "Over 7%", "color": "purple" },
+      { "value": "As soon as possible", "color": "amber" },
+      { "value": "Within 1–3 months", "color": "gray" },
+      { "value": "Within 3–6 months", "color": "gray" },
+      { "value": "Within 6–12 months", "color": "gray" },
+      { "value": "Just exploring options", "color": "gray" },
+      { "value": "THROUGH", "color": "gray" },
+      { "value": "interest", "color": "gray" }
+    ]
   },
   {
     "key": "status",

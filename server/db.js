@@ -564,6 +564,29 @@ export async function deleteContactColumn(id) {
   await query("DELETE FROM contact_columns WHERE id = $1", [id]);
 }
 
+// Changes an existing column's type/options/label in place — the
+// values already stored in each contact's `fields` blob don't need
+// to move, since type is purely a display/edit hint (e.g. retyping a
+// column "text" -> "select" just changes how the same string values
+// render). Looked up by key (e.g. "stage") since that's stable and
+// human-guessable, unlike the numeric id. Whichever of label/type/
+// options is passed gets updated; everything else is left as-is.
+export async function updateContactColumnByKey(key, { label, type, options } = {}) {
+  if (type && !COLUMN_TYPES.includes(type)) throw new Error(`Unknown column type: ${type}`);
+  const rows = await query(
+    `UPDATE contact_columns SET
+       label = COALESCE($2, label),
+       type = COALESCE($3, type),
+       options = COALESCE($4, options)
+     WHERE key = $1
+     RETURNING *`,
+    [key, label ?? null, type ?? null, options ? JSON.stringify(options) : null]
+  );
+  if (!rows[0]) return null;
+  const r = rows[0];
+  return { id: r.id, key: r.key, label: r.label, type: r.type, options: r.options || [], position: r.position };
+}
+
 const IMPORT_SELECT_COLOR_CYCLE = ["blue", "green", "amber", "red", "purple", "gray"];
 
 // Looks at the actual values a column took across an import batch and
