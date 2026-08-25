@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@twilio/voice-sdk": "^2.12.3",
+    "@vercel/functions": "^3.9.5",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
