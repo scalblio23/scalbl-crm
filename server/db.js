@@ -85,6 +85,21 @@ export async function ensureSchema() {
         status TEXT DEFAULT 'New Lead',
         last_contact TEXT,
         notes TEXT,
+        fields JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // Table already existed before `fields` was added — safe no-op if
+    // it's already there.
+    await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS fields JSONB DEFAULT '{}'`);
+    await query(`
+      CREATE TABLE IF NOT EXISTS contact_columns (
+        id SERIAL PRIMARY KEY,
+        key TEXT UNIQUE NOT NULL,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options JSONB DEFAULT '[]',
+        position INTEGER DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
@@ -435,6 +450,7 @@ function contactFromRow(r) {
     status: r.status,
     lastContact: r.last_contact,
     notes: r.notes,
+    fields: r.fields || {},
     createdAt: r.created_at,
   };
 }
@@ -446,27 +462,72 @@ export async function getContacts() {
 
 export async function createContact(c) {
   const rows = await query(
-    "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-    [c.name, c.email || "", c.phone, c.client || "", c.status || "New Lead", c.lastContact || "Today", c.notes || ""]
+    "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes, fields) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+    [
+      c.name,
+      c.email || "",
+      c.phone,
+      c.client || "",
+      c.status || "New Lead",
+      c.lastContact || "Today",
+      c.notes || "",
+      JSON.stringify(c.fields || {}),
+    ]
   );
   return contactFromRow(rows[0]);
 }
 
+// `fields` is shallow-merged onto the existing JSONB blob, same as
+// updateClient, so patching one custom column doesn't clobber others.
 export async function updateContact(id, patch) {
   const rows = await query(
     `UPDATE contacts SET
        status = COALESCE($2, status),
        notes = COALESCE($3, notes),
-       last_contact = COALESCE($4, last_contact)
+       last_contact = COALESCE($4, last_contact),
+       fields = fields || $5::jsonb
      WHERE id = $1
      RETURNING *`,
-    [id, patch.status ?? null, patch.notes ?? null, patch.lastContact ?? null]
+    [id, patch.status ?? null, patch.notes ?? null, patch.lastContact ?? null, JSON.stringify(patch.fields || {})]
   );
   return rows[0] ? contactFromRow(rows[0]) : null;
 }
 
 export async function deleteContacts(ids) {
   await query("DELETE FROM contacts WHERE id = ANY($1::int[])", [ids]);
+}
+
+// ---------- Contact table columns (dynamic schema, same pattern as
+// client_columns) ----------
+
+export async function getContactColumns() {
+  const rows = await query("SELECT * FROM contact_columns ORDER BY position, id");
+  return rows.map((r) => ({
+    id: r.id,
+    key: r.key,
+    label: r.label,
+    type: r.type,
+    options: r.options || [],
+    position: r.position,
+  }));
+}
+
+export async function createContactColumn({ label, type, options }) {
+  if (!COLUMN_TYPES.includes(type)) throw new Error(`Unknown column type: ${type}`);
+  const key = slugifyColumnKey(label);
+  const [{ next_position }] = await query(
+    "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM contact_columns"
+  );
+  const rows = await query(
+    "INSERT INTO contact_columns (key, label, type, options, position) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+    [key, label, type, JSON.stringify(options || []), next_position]
+  );
+  const r = rows[0];
+  return { id: r.id, key: r.key, label: r.label, type: r.type, options: r.options || [], position: r.position };
+}
+
+export async function deleteContactColumn(id) {
+  await query("DELETE FROM contact_columns WHERE id = $1", [id]);
 }
 
 // Strips a phone number down to just its Australian local digits

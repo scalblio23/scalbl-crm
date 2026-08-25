@@ -169,8 +169,10 @@ const statusColors = {
   "No Answer": "bg-gray-50 text-gray-500 border-gray-200",
 };
 
-// ---------- Client table (dynamic columns) ----------
-const CLIENT_COLUMN_TYPES = [
+// ---------- Dynamic columns (shared by the Client table and the
+// Contact table — same column types, same storage pattern: a
+// `_columns` metadata table plus a `fields` JSONB blob per row) ----------
+const COLUMN_TYPES = [
   { value: "text", label: "Text" },
   { value: "long_text", label: "Long text" },
   { value: "number", label: "Number" },
@@ -191,7 +193,7 @@ const SELECT_COLORS = {
 };
 const SELECT_COLOR_CYCLE = ["blue", "green", "amber", "red", "purple", "gray"];
 
-function formatClientCellDisplay(col, value) {
+function formatDynamicCellDisplay(col, value) {
   if (value === null || value === undefined || value === "") return null;
   if (col.type === "currency") {
     const n = Number(value);
@@ -202,6 +204,60 @@ function formatClientCellDisplay(col, value) {
     return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
   }
   return String(value);
+}
+
+// One-line/simple input for a dynamic column's value, used by the Add
+// Contact modal to collect custom fields on a brand-new row (as
+// opposed to renderClientCell/renderContactCell below, which render
+// an existing row's cell in view vs. inline-edit mode).
+function renderDynamicFieldInput(col, value, onChange) {
+  if (col.type === "checkbox") {
+    return (
+      <input
+        type="checkbox"
+        checked={Boolean(value)}
+        onChange={(e) => onChange(e.target.checked)}
+        className="w-4 h-4 rounded border-gray-300"
+      />
+    );
+  }
+  if (col.type === "select") {
+    return (
+      <select
+        value={value || ""}
+        onChange={(e) => onChange(e.target.value || null)}
+        className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+      >
+        <option value="">—</option>
+        {(col.options || []).map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.value}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (col.type === "long_text") {
+    return (
+      <textarea
+        rows={3}
+        value={value || ""}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 resize-y"
+      />
+    );
+  }
+  const inputType =
+    col.type === "number" || col.type === "currency" ? "number" : col.type === "date" ? "date" : col.type === "url" ? "url" : "text";
+  return (
+    <input
+      type={inputType}
+      step={col.type === "currency" ? "0.01" : undefined}
+      value={value ?? ""}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+    />
+  );
 }
 
 function formatCallDuration(ms) {
@@ -296,6 +352,7 @@ export default function SimpleCRM() {
   const [contacts, setContacts] = useState([]);
   const [clients, setClients] = useState([]);
   const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
+  const [contactColumns, setContactColumns] = useState([]); // dynamic custom columns for the contact table
   const [conversations, setConversations] = useState([]);
   const [activeConvo, setActiveConvo] = useState(null);
   const [selectedConvoIds, setSelectedConvoIds] = useState([]);
@@ -312,12 +369,21 @@ export default function SimpleCRM() {
     let cancelled = false;
     (async () => {
       try {
-        const { clients: clientsData, clientColumns: clientColumnsData, contacts: contactsData, conversations: conversationsData, dialLists: dialListsData, calledLeadIds: calledLeadIdsData, callLog: callLogData } =
-          await api.get("/api/bootstrap");
+        const {
+          clients: clientsData,
+          clientColumns: clientColumnsData,
+          contacts: contactsData,
+          contactColumns: contactColumnsData,
+          conversations: conversationsData,
+          dialLists: dialListsData,
+          calledLeadIds: calledLeadIdsData,
+          callLog: callLogData,
+        } = await api.get("/api/bootstrap");
         if (cancelled) return;
         setClients(clientsData);
         setClientColumns(clientColumnsData);
         setContacts(contactsData);
+        setContactColumns(contactColumnsData);
         setConversations(conversationsData);
         setDialLists(dialListsData);
         setCalledLeadIds(calledLeadIdsData);
@@ -353,11 +419,14 @@ export default function SimpleCRM() {
     client: initialClients[0]?.name || "",
     status: "New Lead",
     notes: "",
+    fields: {},
   };
   const [showAddContact, setShowAddContact] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
   const updateContactForm = (key, value) =>
     setContactForm((f) => ({ ...f, [key]: value }));
+  const updateContactFormField = (key, value) =>
+    setContactForm((f) => ({ ...f, fields: { ...f.fields, [key]: value } }));
 
   const handleAddContact = async (e) => {
     e.preventDefault();
@@ -769,11 +838,227 @@ export default function SimpleCRM() {
       );
     }
 
-    const display = formatClientCellDisplay(col, value);
+    const display = formatDynamicCellDisplay(col, value);
     const isNumeric = col.type === "number" || col.type === "currency";
     return (
       <button
         onClick={() => startEditClientCell(client.id, col.key, value ?? "")}
+        title={typeof display === "string" && display.length > 30 ? display : undefined}
+        className={`w-full text-left text-xs truncate ${isNumeric ? "text-right tabular-nums" : ""}`}
+      >
+        {display !== null ? display : <span className="text-gray-300">—</span>}
+      </button>
+    );
+  };
+
+  // ----- Contact table (dynamic column types) — same pattern as the
+  // Client table above, so lead data can carry whatever extra
+  // criteria a given client needs (source, budget, campaign, …)
+  // without every contact being forced onto one fixed schema. -----
+  const [editingContactCell, setEditingContactCell] = useState(null); // `${contactId}:${key}` or null
+  const [contactEditValue, setContactEditValue] = useState("");
+
+  const updateContactField = async (contactId, key, value) => {
+    setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, fields: { ...c.fields, [key]: value } } : c)));
+    try {
+      await api.patch("/api/contacts", { id: contactId, fields: { [key]: value } });
+    } catch (err) {
+      setDbError(err.message || "Could not save the change.");
+    }
+  };
+
+  const startEditContactCell = (contactId, key, currentValue) => {
+    setEditingContactCell(`${contactId}:${key}`);
+    setContactEditValue(currentValue === null || currentValue === undefined ? "" : String(currentValue));
+  };
+
+  const commitEditContactCell = (contact, col) => {
+    let value = contactEditValue;
+    if (col.type === "number" || col.type === "currency") {
+      value = value === "" ? null : Number(value);
+      if (Number.isNaN(value)) value = null;
+    } else if (value === "") {
+      value = null;
+    }
+    setEditingContactCell(null);
+    updateContactField(contact.id, col.key, value);
+  };
+
+  // Add-column modal (Contacts)
+  const emptyContactColumnForm = { label: "", type: "text", options: "" };
+  const [showAddContactColumn, setShowAddContactColumn] = useState(false);
+  const [contactColumnForm, setContactColumnForm] = useState(emptyContactColumnForm);
+
+  const handleAddContactColumn = async (e) => {
+    e.preventDefault();
+    if (!contactColumnForm.label.trim()) return;
+    const options =
+      contactColumnForm.type === "select"
+        ? contactColumnForm.options
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((value, i) => ({ value, color: SELECT_COLOR_CYCLE[i % SELECT_COLOR_CYCLE.length] }))
+        : [];
+    try {
+      const created = await api.post("/api/contact-columns", {
+        label: contactColumnForm.label.trim(),
+        type: contactColumnForm.type,
+        options,
+      });
+      setContactColumns((cols) => [...cols, created]);
+      setContactColumnForm(emptyContactColumnForm);
+      setShowAddContactColumn(false);
+    } catch (err) {
+      setDbError(err.message || "Could not create the column.");
+    }
+  };
+
+  const handleDeleteContactColumn = async (id) => {
+    if (!window.confirm("Delete this column? It will be removed from every contact.")) return;
+    setContactColumns((cols) => cols.filter((c) => c.id !== id));
+    try {
+      await api.delete(`/api/contact-columns?id=${id}`);
+    } catch (err) {
+      setDbError(err.message || "Could not delete the column.");
+    }
+  };
+
+  // Renders one cell of the contact table, in view or edit mode
+  // depending on the column's type — identical behaviour to
+  // renderClientCell, just backed by the contact's own fields blob.
+  const renderContactCell = (contact, col) => {
+    const cellKey = `${contact.id}:${col.key}`;
+    const value = contact.fields?.[col.key];
+    const isEditing = editingContactCell === cellKey;
+
+    if (col.type === "checkbox") {
+      return (
+        <input
+          type="checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => updateContactField(contact.id, col.key, e.target.checked)}
+          className="w-4 h-4 rounded border-gray-300"
+        />
+      );
+    }
+
+    if (col.type === "select") {
+      if (isEditing) {
+        return (
+          <select
+            autoFocus
+            defaultValue={value || ""}
+            onChange={(e) => {
+              setEditingContactCell(null);
+              updateContactField(contact.id, col.key, e.target.value || null);
+            }}
+            onBlur={() => setEditingContactCell(null)}
+            className="w-full border border-gray-300 rounded-md px-2 py-1 text-xs outline-none bg-white"
+          >
+            <option value="">—</option>
+            {(col.options || []).map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.value}
+              </option>
+            ))}
+          </select>
+        );
+      }
+      return (
+        <button onClick={() => setEditingContactCell(cellKey)} className="w-full text-left">
+          {value ? (
+            <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(col, value)}`}>
+              {value}
+            </span>
+          ) : (
+            <span className="text-gray-300 text-xs">—</span>
+          )}
+        </button>
+      );
+    }
+
+    if (col.type === "url") {
+      if (isEditing) {
+        return (
+          <input
+            autoFocus
+            type="text"
+            value={contactEditValue}
+            onChange={(e) => setContactEditValue(e.target.value)}
+            onBlur={() => commitEditContactCell(contact, col)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitEditContactCell(contact, col);
+              if (e.key === "Escape") setEditingContactCell(null);
+            }}
+            className="w-full border border-gray-300 rounded-md px-2 py-1 text-xs outline-none"
+          />
+        );
+      }
+      return (
+        <div className="flex items-center gap-1.5 group/cell">
+          {value ? (
+            <a
+              href={value}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-xs text-blue-600 hover:text-blue-700 truncate max-w-[140px] inline-block"
+            >
+              {value}
+            </a>
+          ) : (
+            <span className="text-gray-300 text-xs">—</span>
+          )}
+          <button
+            onClick={() => startEditContactCell(contact.id, col.key, value)}
+            className="opacity-0 group-hover/cell:opacity-100 text-gray-300 hover:text-gray-600 shrink-0"
+          >
+            <Pencil size={11} />
+          </button>
+        </div>
+      );
+    }
+
+    if (isEditing) {
+      if (col.type === "long_text") {
+        return (
+          <textarea
+            autoFocus
+            rows={3}
+            value={contactEditValue}
+            onChange={(e) => setContactEditValue(e.target.value)}
+            onBlur={() => commitEditContactCell(contact, col)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setEditingContactCell(null);
+            }}
+            className="w-full min-w-[200px] border border-gray-300 rounded-md px-2 py-1 text-xs outline-none resize-y"
+          />
+        );
+      }
+      const inputType = col.type === "number" || col.type === "currency" ? "number" : col.type === "date" ? "date" : "text";
+      return (
+        <input
+          autoFocus
+          type={inputType}
+          step={col.type === "currency" ? "0.01" : undefined}
+          value={contactEditValue}
+          onChange={(e) => setContactEditValue(e.target.value)}
+          onBlur={() => commitEditContactCell(contact, col)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitEditContactCell(contact, col);
+            if (e.key === "Escape") setEditingContactCell(null);
+          }}
+          className="w-full border border-gray-300 rounded-md px-2 py-1 text-xs outline-none"
+        />
+      );
+    }
+
+    const display = formatDynamicCellDisplay(col, value);
+    const isNumeric = col.type === "number" || col.type === "currency";
+    return (
+      <button
+        onClick={() => startEditContactCell(contact.id, col.key, value ?? "")}
         title={typeof display === "string" && display.length > 30 ? display : undefined}
         className={`w-full text-left text-xs truncate ${isNumeric ? "text-right tabular-nums" : ""}`}
       >
@@ -1493,56 +1778,86 @@ export default function SimpleCRM() {
                 </button>
               </div>
             </div>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
-                  <th className="pl-8 pr-2 py-3 font-medium w-8">
-                    <input
-                      type="checkbox"
-                      checked={allVisibleContactsSelected}
-                      onChange={toggleSelectAllContacts}
-                      className="w-4 h-4 rounded border-gray-300"
-                    />
-                  </th>
-                  <th className="px-5 py-3 font-medium">Name</th>
-                  <th className="py-3 font-medium">Phone</th>
-                  <th className="py-3 font-medium">Client</th>
-                  <th className="py-3 font-medium">Status</th>
-                  <th className="py-3 font-medium">Last contact</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredContacts.map((c) => (
-                  <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="pl-8 pr-2 py-3.5">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                    <th className="pl-8 pr-2 py-3 font-medium w-8">
                       <input
                         type="checkbox"
-                        checked={selectedContactIds.includes(c.id)}
-                        onChange={() => toggleContactSelected(c.id)}
+                        checked={allVisibleContactsSelected}
+                        onChange={toggleSelectAllContacts}
                         className="w-4 h-4 rounded border-gray-300"
                       />
-                    </td>
-                    <td className="px-5 py-3.5 font-medium">{c.name}</td>
-                    <td className="py-3.5 text-gray-600">{c.phone}</td>
-                    <td className="py-3.5 text-gray-600">{c.client}</td>
-                    <td className="py-3.5">
-                      <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[c.status]}`}>
-                        {c.status}
-                      </span>
-                    </td>
-                    <td className="py-3.5 text-gray-500">{c.lastContact}</td>
+                    </th>
+                    <th className="px-5 py-3 font-medium whitespace-nowrap">Name</th>
+                    <th className="py-3 font-medium whitespace-nowrap">Phone</th>
+                    <th className="py-3 font-medium whitespace-nowrap">Client</th>
+                    <th className="py-3 font-medium whitespace-nowrap">Status</th>
+                    <th className="py-3 font-medium whitespace-nowrap">Last contact</th>
+                    {contactColumns.map((col) => (
+                      <th key={col.id} className="px-3 py-3 font-medium whitespace-nowrap">
+                        <div className="flex items-center gap-1.5">
+                          <span>{col.label}</span>
+                          <button
+                            onClick={() => handleDeleteContactColumn(col.id)}
+                            className="text-gray-300 hover:text-red-500"
+                            title="Delete column"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </th>
+                    ))}
+                    <th className="px-3 py-3">
+                      <button
+                        onClick={() => setShowAddContactColumn(true)}
+                        className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-800 whitespace-nowrap"
+                      >
+                        <Plus size={13} /> Add column
+                      </button>
+                    </th>
                   </tr>
-                ))}
-                {filteredContacts.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="px-8 py-10 text-center text-sm text-gray-400">
-                      No contacts{contactsTagFilter !== "All" ? ` tagged ${contactsTagFilter}` : ""}
-                      {search ? ` match "${search}"` : ""}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {filteredContacts.map((c) => (
+                    <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50">
+                      <td className="pl-8 pr-2 py-3.5">
+                        <input
+                          type="checkbox"
+                          checked={selectedContactIds.includes(c.id)}
+                          onChange={() => toggleContactSelected(c.id)}
+                          className="w-4 h-4 rounded border-gray-300"
+                        />
+                      </td>
+                      <td className="px-5 py-3.5 font-medium whitespace-nowrap">{c.name}</td>
+                      <td className="py-3.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
+                      <td className="py-3.5 text-gray-600 whitespace-nowrap">{c.client}</td>
+                      <td className="py-3.5 whitespace-nowrap">
+                        <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[c.status]}`}>
+                          {c.status}
+                        </span>
+                      </td>
+                      <td className="py-3.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
+                      {contactColumns.map((col) => (
+                        <td key={col.id} className="px-3 py-3.5 min-w-[130px] max-w-[220px]">
+                          {renderContactCell(c, col)}
+                        </td>
+                      ))}
+                      <td />
+                    </tr>
+                  ))}
+                  {filteredContacts.length === 0 && (
+                    <tr>
+                      <td colSpan={contactColumns.length + 7} className="px-8 py-10 text-center text-sm text-gray-400">
+                        No contacts{contactsTagFilter !== "All" ? ` tagged ${contactsTagFilter}` : ""}
+                        {search ? ` match "${search}"` : ""}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
@@ -2383,6 +2698,18 @@ export default function SimpleCRM() {
                   className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 resize-none"
                 />
               </div>
+              {contactColumns.length > 0 && (
+                <div className="space-y-4 pt-1 border-t border-gray-100">
+                  {contactColumns.map((col) => (
+                    <div key={col.id} className={col.type === "checkbox" ? "flex items-center gap-2" : ""}>
+                      <label className="text-sm font-medium block mb-1.5">{col.label}</label>
+                      {renderDynamicFieldInput(col, contactForm.fields[col.key], (value) =>
+                        updateContactFormField(col.key, value)
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="flex justify-end gap-3 pt-2">
                 <button
                   type="button"
@@ -2435,7 +2762,7 @@ export default function SimpleCRM() {
                   onChange={(e) => setColumnForm((f) => ({ ...f, type: e.target.value }))}
                   className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
                 >
-                  {CLIENT_COLUMN_TYPES.map((t) => (
+                  {COLUMN_TYPES.map((t) => (
                     <option key={t.value} value={t.value}>
                       {t.label}
                     </option>
@@ -2458,6 +2785,74 @@ export default function SimpleCRM() {
                 <button
                   type="button"
                   onClick={() => setShowAddColumn(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">
+                  Add column
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add contact column modal */}
+      {showAddContactColumn && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddContactColumn(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add column</h2>
+              <button onClick={() => setShowAddContactColumn(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddContactColumn} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Column name</label>
+                <input
+                  required
+                  autoFocus
+                  value={contactColumnForm.label}
+                  onChange={(e) => setContactColumnForm((f) => ({ ...f, label: e.target.value }))}
+                  placeholder="e.g. Lead Source"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Type</label>
+                <select
+                  value={contactColumnForm.type}
+                  onChange={(e) => setContactColumnForm((f) => ({ ...f, type: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+                >
+                  {COLUMN_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {contactColumnForm.type === "select" && (
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Options</label>
+                  <input
+                    value={contactColumnForm.options}
+                    onChange={(e) => setContactColumnForm((f) => ({ ...f, options: e.target.value }))}
+                    placeholder="Comma-separated, e.g. Hot, Warm, Cold"
+                    className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                  />
+                  <div className="text-xs text-gray-400 mt-1">Each one becomes a colored option in the dropdown.</div>
+                </div>
+              )}
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddContactColumn(false)}
                   className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
                 >
                   Cancel

@@ -21,6 +21,9 @@ import {
   createContact,
   updateContact,
   deleteContacts,
+  getContactColumns,
+  createContactColumn,
+  deleteContactColumn,
   getConversations,
   logCall,
   logMessage,
@@ -157,17 +160,28 @@ app.post("/api/auth-logout", (req, res) => {
 app.get(
   "/api/bootstrap",
   dbRoute(async (req, res) => {
-    const [clients, clientColumnsData, contacts, conversations, dialLists, calledLeadIds, callLog] = await Promise.all([
-      getClients(),
-      getClientColumns(),
-      getContacts(),
-      getConversations(),
-      getDialLists(),
-      getCalledLeadIds(),
-      getCallLog(),
-    ]);
+    const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, calledLeadIds, callLog] =
+      await Promise.all([
+        getClients(),
+        getClientColumns(),
+        getContacts(),
+        getContactColumns(),
+        getConversations(),
+        getDialLists(),
+        getCalledLeadIds(),
+        getCallLog(),
+      ]);
     res.setHeader("Cache-Control", "no-store");
-    res.json({ clients, clientColumns: clientColumnsData, contacts, conversations, dialLists, calledLeadIds, callLog });
+    res.json({
+      clients,
+      clientColumns: clientColumnsData,
+      contacts,
+      contactColumns: contactColumnsData,
+      conversations,
+      dialLists,
+      calledLeadIds,
+      callLog,
+    });
   })
 );
 
@@ -345,6 +359,25 @@ app.delete(
       .filter(Boolean);
     if (!ids.length) return res.status(400).json({ error: "Missing ids" });
     await deleteContacts(ids);
+    res.status(204).end();
+  })
+);
+
+app.get("/api/contact-columns", dbRoute(async (req, res) => res.json(await getContactColumns())));
+app.post(
+  "/api/contact-columns",
+  dbRoute(async (req, res) => {
+    const { label, type, options } = req.body || {};
+    if (!label || !type) return res.status(400).json({ error: "Missing label or type" });
+    res.status(201).json(await createContactColumn({ label, type, options }));
+  })
+);
+app.delete(
+  "/api/contact-columns",
+  dbRoute(async (req, res) => {
+    const id = req.query.id;
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    await deleteContactColumn(id);
     res.status(204).end();
   })
 );
