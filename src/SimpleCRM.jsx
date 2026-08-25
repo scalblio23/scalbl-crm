@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MessageSquare,
   Users,
@@ -13,6 +13,9 @@ import {
   ExternalLink,
   X,
   AlertTriangle,
+  ListChecks,
+  Trash2,
+  ClipboardList,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 
@@ -168,6 +171,7 @@ const navItems = [
   { key: "conversation", label: "Conversation", icon: MessageSquare },
   { key: "contacts", label: "Contacts", icon: Users },
   { key: "powerdialler", label: "Powerdialler", icon: Phone },
+  { key: "log", label: "Log", icon: ClipboardList },
   { key: "clients", label: "Clients", icon: Briefcase },
   { key: "settings", label: "Settings", icon: Settings },
 ];
@@ -263,6 +267,122 @@ export default function SimpleCRM() {
   const [callError, setCallError] = useState("");
   const activeCallRef = useRef(null);
 
+  // ----- Power Dialler session (auto-dial through a list) -----
+  const [dialLists, setDialLists] = useState([]); // [{ id, name, leadIds }]
+  const [selectedLeadIds, setSelectedLeadIds] = useState([]);
+  const [newListName, setNewListName] = useState("");
+  const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
+  const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
+  const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, secondsLeft }
+  const [callLog, setCallLog] = useState([]);
+
+  // Kept in sync with `session` so the long-lived Twilio call event
+  // handlers below (registered once per call, not re-created each
+  // render) always see whether a session is *currently* active rather
+  // than whichever one was active when the call started.
+  const sessionRef = useRef(null);
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  const WRAP_UP_SECONDS = 15;
+
+  const toggleLeadSelected = (id) =>
+    setSelectedLeadIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+
+  const remainingInList = (leadIds) =>
+    leadIds.filter((id) => !calledLeadIds.includes(id) && dialQueue.some((l) => l.id === id));
+
+  const saveSelectedAsList = () => {
+    if (!newListName.trim() || selectedLeadIds.length === 0) return;
+    setDialLists((ls) => [...ls, { id: `list-${Date.now()}`, name: newListName.trim(), leadIds: selectedLeadIds }]);
+    setSelectedLeadIds([]);
+    setNewListName("");
+  };
+
+  const deleteDialList = (id) => setDialLists((ls) => ls.filter((l) => l.id !== id));
+
+  // Kicks off a Power Dialler session: works through `leadIds` in
+  // order, top to bottom, placing the first call immediately.
+  const startSession = (listName, leadIds) => {
+    const queue = remainingInList(leadIds);
+    if (!queue.length) return;
+    setWrapUp(null);
+    setSession({ listName, queue });
+    const firstLead = dialQueue.find((l) => l.id === queue[0]);
+    if (firstLead) startCall(firstLead);
+  };
+
+  const stopSession = () => {
+    setSession(null);
+    setWrapUp(null);
+    if (calling) {
+      hangUp();
+      activeCallRef.current = null;
+      setCalling(false);
+      setCallStatus("idle");
+    }
+  };
+
+  // Called whenever a call ends (hung up, disconnected, or failed).
+  // Only relevant mid-session — a one-off call from the table doesn't
+  // force a wrap-up.
+  const handleCallEnded = (lead) => {
+    if (!sessionRef.current || !lead) return;
+    setWrapUp({ lead, status: lead.status, notes: lead.notes || "", secondsLeft: WRAP_UP_SECONDS });
+  };
+
+  // Saves the wrap-up's status/notes onto the lead, logs the call, and
+  // advances the session to the next lead — auto-triggered by the
+  // countdown reaching zero, or manually via "Next lead".
+  const finishWrapUp = () => {
+    if (!wrapUp) return;
+    const { lead, status, notes } = wrapUp;
+
+    setContacts((cs) =>
+      cs.map((c) => (c.id === lead.id ? { ...c, status, notes, lastContact: "Today" } : c))
+    );
+    setCallLog((log) => [
+      {
+        id: `${lead.id}-${Date.now()}`,
+        leadId: lead.id,
+        name: lead.name,
+        phone: lead.phone,
+        client: lead.client,
+        status,
+        notes,
+        calledAt: new Date().toISOString(),
+      },
+      ...log,
+    ]);
+    setCalledLeadIds((ids) => [...ids, lead.id]);
+    setWrapUp(null);
+
+    if (!session) return;
+    const remainingQueue = session.queue.filter((id) => id !== lead.id);
+    if (!remainingQueue.length) {
+      setSession(null);
+      return;
+    }
+    setSession({ ...session, queue: remainingQueue });
+    const nextLead = dialQueue.find((l) => l.id === remainingQueue[0]);
+    if (nextLead) startCall(nextLead);
+  };
+
+  // Wrap-up countdown — ticks every second, auto-advancing at zero.
+  useEffect(() => {
+    if (!wrapUp) return;
+    if (wrapUp.secondsLeft <= 0) {
+      finishWrapUp();
+      return;
+    }
+    const t = setTimeout(() => {
+      setWrapUp((w) => (w ? { ...w, secondsLeft: w.secondsLeft - 1 } : w));
+    }, 1000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wrapUp]);
+
   const startCall = async (lead) => {
     setCallError("");
     setActiveLeadId(lead.id);
@@ -276,17 +396,20 @@ export default function SimpleCRM() {
         setCalling(false);
         setCallStatus("idle");
         activeCallRef.current = null;
+        handleCallEnded(lead);
       });
       call.on("cancel", () => {
         setCalling(false);
         setCallStatus("idle");
         activeCallRef.current = null;
+        handleCallEnded(lead);
       });
       call.on("error", (err) => {
         setCallError(err.message || "The call failed.");
         setCalling(false);
         setCallStatus("idle");
         activeCallRef.current = null;
+        handleCallEnded(lead);
       });
     } catch (err) {
       setCallError(err.message || "Could not start the call — check your Twilio setup.");
@@ -296,10 +419,12 @@ export default function SimpleCRM() {
   };
 
   const endCall = () => {
+    const lead = activeLead;
     hangUp();
     activeCallRef.current = null;
     setCalling(false);
     setCallStatus("idle");
+    handleCallEnded(lead);
   };
 
   return (
@@ -454,8 +579,109 @@ export default function SimpleCRM() {
               )}
             </div>
 
+            {/* Dialler lists — segments the Power Dialler can run through */}
+            <div className="px-8 pt-6">
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                Dialler lists
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {(() => {
+                  const allLeadsIds = filteredDialQueue.map((l) => l.id);
+                  const allLeadsRemaining = remainingInList(allLeadsIds);
+                  return (
+                    <div className="border border-gray-200 rounded-xl px-4 py-3 flex items-center gap-4 min-w-[220px]">
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold">All leads</div>
+                        <div className="text-xs text-gray-400">
+                          {allLeadsRemaining.length} to call{dialFiltersActive ? " (filtered)" : ""}
+                        </div>
+                      </div>
+                      <button
+                        disabled={!!session || !allLeadsRemaining.length}
+                        onClick={() => startSession("All leads", allLeadsIds)}
+                        className="flex items-center gap-1.5 bg-gray-900 text-white text-xs px-3 py-2 rounded-lg font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        <PhoneCall size={13} /> Start Power Dialler
+                      </button>
+                    </div>
+                  );
+                })()}
+                {dialLists.map((list) => {
+                  const remaining = remainingInList(list.leadIds);
+                  return (
+                    <div
+                      key={list.id}
+                      className="border border-gray-200 rounded-xl px-4 py-3 flex items-center gap-4 min-w-[220px]"
+                    >
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold">{list.name}</div>
+                        <div className="text-xs text-gray-400">{remaining.length} to call</div>
+                      </div>
+                      <button
+                        disabled={!!session || !remaining.length}
+                        onClick={() => startSession(list.name, list.leadIds)}
+                        className="flex items-center gap-1.5 bg-gray-900 text-white text-xs px-3 py-2 rounded-lg font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        <PhoneCall size={13} /> Start Power Dialler
+                      </button>
+                      <button
+                        onClick={() => deleteDialList(list.id)}
+                        title="Delete list"
+                        className="text-gray-300 hover:text-red-500"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Selected-rows → save as a new dialler list */}
+            {selectedLeadIds.length > 0 && (
+              <div className="mx-8 mt-4 flex flex-wrap items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+                <ListChecks size={16} className="text-blue-600 shrink-0" />
+                <span className="text-sm font-medium text-blue-800">{selectedLeadIds.length} selected</span>
+                <input
+                  value={newListName}
+                  onChange={(e) => setNewListName(e.target.value)}
+                  placeholder="Name this list…"
+                  className="border border-blue-200 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-blue-400 bg-white flex-1 min-w-[160px]"
+                />
+                <button
+                  disabled={!newListName.trim()}
+                  onClick={saveSelectedAsList}
+                  className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Save as list
+                </button>
+                <button
+                  onClick={() => setSelectedLeadIds([])}
+                  className="text-sm text-blue-700/70 hover:text-blue-900"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
+
+            {/* Active Power Dialler session */}
+            {session && (
+              <div className="mx-8 mt-4 flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-3">
+                <div className="text-sm text-indigo-800">
+                  <span className="font-semibold">Power Dialler running:</span> {session.listName} —{" "}
+                  {session.queue.length} lead{session.queue.length === 1 ? "" : "s"} remaining
+                </div>
+                <button
+                  onClick={stopSession}
+                  className="text-sm font-medium text-indigo-700 hover:text-indigo-900"
+                >
+                  Stop session
+                </button>
+              </div>
+            )}
+
             {callError && (
-              <div className="mx-8 mt-6 flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
+              <div className="mx-8 mt-4 flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
                 <AlertTriangle size={16} className="mt-0.5 shrink-0" />
                 <div className="flex-1">{callError}</div>
                 <button onClick={() => setCallError("")} className="text-red-400 hover:text-red-600">
@@ -464,9 +690,70 @@ export default function SimpleCRM() {
               </div>
             )}
 
-            {/* Hotseat — the live call in progress */}
+            {/* Hotseat — the live call, or the post-call wrap-up */}
             <div className="px-8 pt-6">
-              {calling && activeLead ? (
+              {wrapUp ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl px-6 py-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-widest text-amber-700">
+                        Wrap up
+                      </div>
+                      <div className="text-xl font-bold mt-0.5">{wrapUp.lead.name}</div>
+                      <div className="text-sm text-gray-600 mt-1">
+                        {wrapUp.lead.phone} · {wrapUp.lead.client}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-3xl font-bold text-amber-600 tabular-nums">{wrapUp.secondsLeft}s</div>
+                      <div className="text-xs text-gray-400">auto-advancing</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 h-1.5 bg-amber-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-amber-500 transition-all duration-1000 ease-linear"
+                      style={{ width: `${(wrapUp.secondsLeft / WRAP_UP_SECONDS) * 100}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">Status</label>
+                      <select
+                        value={wrapUp.status}
+                        onChange={(e) => setWrapUp((w) => (w ? { ...w, status: e.target.value } : w))}
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
+                      >
+                        {Object.keys(statusColors).map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">Notes</label>
+                      <textarea
+                        value={wrapUp.notes}
+                        onChange={(e) => setWrapUp((w) => (w ? { ...w, notes: e.target.value } : w))}
+                        rows={2}
+                        placeholder="What happened on this call?"
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 resize-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex justify-end">
+                    <button
+                      onClick={finishWrapUp}
+                      className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-semibold"
+                    >
+                      Next lead
+                    </button>
+                  </div>
+                </div>
+              ) : calling && activeLead ? (
                 <div className="bg-green-50 border border-green-200 rounded-2xl px-6 py-5">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex items-center gap-3">
@@ -563,6 +850,7 @@ export default function SimpleCRM() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                      <th className="pl-5 pr-2 py-3 font-medium w-8" />
                       <th className="px-5 py-3 font-medium">Name</th>
                       <th className="px-5 py-3 font-medium">Email</th>
                       <th className="px-5 py-3 font-medium">Phone</th>
@@ -573,6 +861,7 @@ export default function SimpleCRM() {
                       <th className="px-5 py-3 font-medium text-right">Action</th>
                     </tr>
                     <tr className="border-b border-gray-100 bg-gray-50/60">
+                      <th className="pl-5 pr-2 pb-3" />
                       <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.name}
@@ -643,6 +932,14 @@ export default function SimpleCRM() {
                           activeLead?.id === lead.id ? "bg-gray-50" : ""
                         }`}
                       >
+                        <td className="pl-5 pr-2 py-3.5">
+                          <input
+                            type="checkbox"
+                            checked={selectedLeadIds.includes(lead.id)}
+                            onChange={() => toggleLeadSelected(lead.id)}
+                            className="w-4 h-4 rounded border-gray-300"
+                          />
+                        </td>
                         <td className="px-5 py-3.5 font-medium">{lead.name}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.phone}</td>
@@ -691,7 +988,7 @@ export default function SimpleCRM() {
                     ))}
                     {filteredDialQueue.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="px-5 py-10 text-center text-sm text-gray-400">
+                        <td colSpan={9} className="px-5 py-10 text-center text-sm text-gray-400">
                           No leads match the current filters
                         </td>
                       </tr>
@@ -700,6 +997,57 @@ export default function SimpleCRM() {
                 </table>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Log */}
+        {page === "log" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-8 py-6 border-b border-gray-100">
+              <h1 className="text-xl font-bold">Call log</h1>
+              <div className="text-sm text-gray-400 mt-0.5">
+                {callLog.length} call{callLog.length === 1 ? "" : "s"} logged
+              </div>
+            </div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                  <th className="px-8 py-3 font-medium">Lead</th>
+                  <th className="py-3 font-medium">Client</th>
+                  <th className="py-3 font-medium">Phone</th>
+                  <th className="py-3 font-medium">Outcome</th>
+                  <th className="py-3 font-medium">Notes</th>
+                  <th className="py-3 font-medium">Called</th>
+                </tr>
+              </thead>
+              <tbody>
+                {callLog.map((entry) => (
+                  <tr key={entry.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="px-8 py-3.5 font-medium">{entry.name}</td>
+                    <td className="py-3.5 text-gray-600">{entry.client}</td>
+                    <td className="py-3.5 text-gray-600">{entry.phone}</td>
+                    <td className="py-3.5">
+                      <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[entry.status]}`}>
+                        {entry.status}
+                      </span>
+                    </td>
+                    <td className="py-3.5 text-gray-500 max-w-xs truncate" title={entry.notes}>
+                      {entry.notes || "—"}
+                    </td>
+                    <td className="py-3.5 text-gray-400">
+                      {new Date(entry.calledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                    </td>
+                  </tr>
+                ))}
+                {callLog.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-8 py-10 text-center text-sm text-gray-400">
+                      No calls logged yet — run the Power Dialler to start logging calls.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         )}
 
