@@ -273,6 +273,7 @@ export default function SimpleCRM() {
   const [newListName, setNewListName] = useState("");
   const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
+  const [sessionPaused, setSessionPaused] = useState(false);
   const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, secondsLeft }
   const [callLog, setCallLog] = useState([]);
 
@@ -308,6 +309,7 @@ export default function SimpleCRM() {
     const queue = remainingInList(leadIds);
     if (!queue.length) return;
     setWrapUp(null);
+    setSessionPaused(false);
     setSession({ listName, queue });
     const firstLead = dialQueue.find((l) => l.id === queue[0]);
     if (firstLead) startCall(firstLead);
@@ -315,12 +317,27 @@ export default function SimpleCRM() {
 
   const stopSession = () => {
     setSession(null);
+    setSessionPaused(false);
     setWrapUp(null);
     if (calling) {
       hangUp();
       activeCallRef.current = null;
       setCalling(false);
       setCallStatus("idle");
+    }
+  };
+
+  // Pausing doesn't hang up a call in progress or freeze the current
+  // wrap-up's fields — it just stops the session from auto-dialing
+  // the next lead once the current one wraps up. Resuming either
+  // unfreezes an in-progress wrap-up countdown, or — if nothing is
+  // currently happening — immediately dials the next lead in queue.
+  const togglePause = () => {
+    const next = !sessionPaused;
+    setSessionPaused(next);
+    if (!next && !calling && !wrapUp && session?.queue.length) {
+      const nextLead = dialQueue.find((l) => l.id === session.queue[0]);
+      if (nextLead) startCall(nextLead);
     }
   };
 
@@ -362,16 +379,19 @@ export default function SimpleCRM() {
     const remainingQueue = session.queue.filter((id) => id !== lead.id);
     if (!remainingQueue.length) {
       setSession(null);
+      setSessionPaused(false);
       return;
     }
     setSession({ ...session, queue: remainingQueue });
+    if (sessionPaused) return; // stay put — Resume will dial the next lead
     const nextLead = dialQueue.find((l) => l.id === remainingQueue[0]);
     if (nextLead) startCall(nextLead);
   };
 
   // Wrap-up countdown — ticks every second, auto-advancing at zero.
+  // Frozen while the session is paused, so notes aren't rushed.
   useEffect(() => {
-    if (!wrapUp) return;
+    if (!wrapUp || sessionPaused) return;
     if (wrapUp.secondsLeft <= 0) {
       finishWrapUp();
       return;
@@ -381,7 +401,7 @@ export default function SimpleCRM() {
     }, 1000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wrapUp]);
+  }, [wrapUp, sessionPaused]);
 
   const startCall = async (lead) => {
     setCallError("");
@@ -666,17 +686,30 @@ export default function SimpleCRM() {
 
             {/* Active Power Dialler session */}
             {session && (
-              <div className="mx-8 mt-4 flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-3">
-                <div className="text-sm text-indigo-800">
-                  <span className="font-semibold">Power Dialler running:</span> {session.listName} —{" "}
-                  {session.queue.length} lead{session.queue.length === 1 ? "" : "s"} remaining
+              <div
+                className={`mx-8 mt-4 flex items-center justify-between border rounded-xl px-4 py-3 ${
+                  sessionPaused ? "bg-gray-50 border-gray-200" : "bg-indigo-50 border-indigo-200"
+                }`}
+              >
+                <div className={`text-sm ${sessionPaused ? "text-gray-700" : "text-indigo-800"}`}>
+                  <span className="font-semibold">
+                    {sessionPaused ? "Power Dialler paused:" : "Power Dialler running:"}
+                  </span>{" "}
+                  {session.listName} — {session.queue.length} lead{session.queue.length === 1 ? "" : "s"} remaining
                 </div>
-                <button
-                  onClick={stopSession}
-                  className="text-sm font-medium text-indigo-700 hover:text-indigo-900"
-                >
-                  Stop session
-                </button>
+                <div className="flex items-center gap-4">
+                  <button
+                    onClick={togglePause}
+                    className={`text-sm font-medium ${
+                      sessionPaused ? "text-gray-700 hover:text-gray-900" : "text-indigo-700 hover:text-indigo-900"
+                    }`}
+                  >
+                    {sessionPaused ? "Resume" : "Pause"}
+                  </button>
+                  <button onClick={stopSession} className="text-sm font-medium text-red-600 hover:text-red-800">
+                    Stop session
+                  </button>
+                </div>
               </div>
             )}
 
@@ -705,14 +738,22 @@ export default function SimpleCRM() {
                       </div>
                     </div>
                     <div className="text-right shrink-0">
-                      <div className="text-3xl font-bold text-amber-600 tabular-nums">{wrapUp.secondsLeft}s</div>
-                      <div className="text-xs text-gray-400">auto-advancing</div>
+                      <div
+                        className={`text-3xl font-bold tabular-nums ${
+                          sessionPaused ? "text-gray-400" : "text-amber-600"
+                        }`}
+                      >
+                        {wrapUp.secondsLeft}s
+                      </div>
+                      <div className="text-xs text-gray-400">{sessionPaused ? "paused" : "auto-advancing"}</div>
                     </div>
                   </div>
 
                   <div className="mt-3 h-1.5 bg-amber-100 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-amber-500 transition-all duration-1000 ease-linear"
+                      className={`h-full transition-all duration-1000 ease-linear ${
+                        sessionPaused ? "bg-gray-300" : "bg-amber-500"
+                      }`}
                       style={{ width: `${(wrapUp.secondsLeft / WRAP_UP_SECONDS) * 100}%` }}
                     />
                   </div>
