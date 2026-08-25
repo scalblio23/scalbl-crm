@@ -468,6 +468,10 @@ export default function SimpleCRM() {
   // from (e.g. "9. Khan Legal"); for anything else it's whatever was
   // typed into the Add Contact modal, or left blank ("Untagged").
   const [contactsTagFilter, setContactsTagFilter] = useState("All");
+  // "is" (only this tag) or "is not" (everyone except this tag) —
+  // meaningless when contactsTagFilter is "All", which already shows
+  // everyone either way.
+  const [contactsTagMode, setContactsTagMode] = useState("is");
   const contactTagCounts = contacts.reduce((acc, c) => {
     const t = c.tag || "Untagged";
     acc[t] = (acc[t] || 0) + 1;
@@ -485,11 +489,17 @@ export default function SimpleCRM() {
     return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
   };
 
+  const contactMatchesTagFilter = (c) => {
+    if (contactsTagFilter === "All") return true;
+    const isMatch = contactsTagFilter === "Untagged" ? !c.tag : c.tag === contactsTagFilter;
+    return contactsTagMode === "is" ? isMatch : !isMatch;
+  };
+
   const filteredContacts = contacts.filter(
     (c) =>
       (c.name.toLowerCase().includes(search.toLowerCase()) ||
         c.client.toLowerCase().includes(search.toLowerCase())) &&
-      (contactsTagFilter === "All" || (contactsTagFilter === "Untagged" ? !c.tag : c.tag === contactsTagFilter))
+      contactMatchesTagFilter(c)
   );
 
   // Paginated — with thousands of imported leads, rendering every
@@ -1723,6 +1733,32 @@ export default function SimpleCRM() {
               <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
                 Tags
               </div>
+              <div className="px-4 pb-2">
+                <div
+                  className={`flex border border-gray-200 rounded-lg overflow-hidden text-xs font-medium ${
+                    contactsTagFilter === "All" ? "opacity-40 pointer-events-none" : ""
+                  }`}
+                >
+                  <button
+                    onClick={() => setContactsTagMode("is")}
+                    className={`flex-1 px-2 py-1.5 ${
+                      contactsTagMode === "is" ? "bg-gray-900 text-white" : "bg-white text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    Is
+                  </button>
+                  <button
+                    onClick={() => setContactsTagMode("is not")}
+                    className={`flex-1 px-2 py-1.5 border-l border-gray-200 ${
+                      contactsTagMode === "is not"
+                        ? "bg-gray-900 text-white"
+                        : "bg-white text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    Is not
+                  </button>
+                </div>
+              </div>
               <nav className="flex-1 pb-4">
                 <button
                   onClick={() => setContactsTagFilter("All")}
@@ -1969,7 +2005,9 @@ export default function SimpleCRM() {
               <div>
                 <h1 className="text-xl font-bold">Contacts</h1>
                 {contactsTagFilter !== "All" && (
-                  <div className="text-sm text-gray-400 mt-0.5">Tagged {contactsTagFilter}</div>
+                  <div className="text-sm text-gray-400 mt-0.5">
+                    {contactsTagMode === "is" ? "Tagged" : "Not tagged"} {contactsTagFilter}
+                  </div>
                 )}
               </div>
               <div className="flex gap-3">
@@ -2109,7 +2147,10 @@ export default function SimpleCRM() {
                         colSpan={visibleContactColumns.length + 9}
                         className="px-8 py-10 text-center text-sm text-gray-400"
                       >
-                        No contacts{contactsTagFilter !== "All" ? ` tagged ${contactsTagFilter}` : ""}
+                        No contacts
+                        {contactsTagFilter !== "All"
+                          ? ` ${contactsTagMode === "is" ? "tagged" : "not tagged"} ${contactsTagFilter}`
+                          : ""}
                         {search ? ` match "${search}"` : ""}
                       </td>
                     </tr>
