@@ -492,14 +492,44 @@ export default function SimpleCRM() {
       (contactsTagFilter === "All" || (contactsTagFilter === "Untagged" ? !c.tag : c.tag === contactsTagFilter))
   );
 
+  // Paginated — with thousands of imported leads, rendering every
+  // matching row (some tags alone run to 800+) froze the tab. This
+  // caps what actually hits the DOM at once; filteredContacts above
+  // still drives counts/select-all/export, just not the render.
+  const CONTACTS_PAGE_SIZE = 100;
+  const [contactsPage, setContactsPage] = useState(0);
+  useEffect(() => {
+    setContactsPage(0);
+  }, [contactsTagFilter, search]);
+  const totalContactsPages = Math.max(1, Math.ceil(filteredContacts.length / CONTACTS_PAGE_SIZE));
+  const pagedContacts = filteredContacts.slice(
+    contactsPage * CONTACTS_PAGE_SIZE,
+    (contactsPage + 1) * CONTACTS_PAGE_SIZE
+  );
+
+  // Custom columns are per-lead-source (226 of them across every
+  // imported tab) — showing all of them for every view meant mostly
+  // blank cells and, combined with row count, was the other half of
+  // the freeze. Narrow to whatever actually has a value somewhere in
+  // the current filter, so picking a tag shows that tag's own
+  // criteria instead of 226 columns.
+  const hasFieldValue = (v) => v !== null && v !== undefined && v !== "" && v !== false;
+  const visibleContactColumns = contactColumns.filter((col) =>
+    filteredContacts.some((c) => hasFieldValue(c.fields?.[col.key]))
+  );
+
   // Bulk-select + delete on the Contacts table
   const [selectedContactIds, setSelectedContactIds] = useState([]);
   const toggleContactSelected = (id) =>
     setSelectedContactIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   const allVisibleContactsSelected =
-    filteredContacts.length > 0 && filteredContacts.every((c) => selectedContactIds.includes(c.id));
+    pagedContacts.length > 0 && pagedContacts.every((c) => selectedContactIds.includes(c.id));
   const toggleSelectAllContacts = () =>
-    setSelectedContactIds(allVisibleContactsSelected ? [] : filteredContacts.map((c) => c.id));
+    setSelectedContactIds((ids) =>
+      allVisibleContactsSelected
+        ? ids.filter((id) => !pagedContacts.some((c) => c.id === id))
+        : [...ids, ...pagedContacts.filter((c) => !ids.includes(c.id)).map((c) => c.id)]
+    );
 
   const deleteSelectedContacts = async () => {
     if (!selectedContactIds.length) return;
@@ -1286,6 +1316,22 @@ export default function SimpleCRM() {
       (dialLists.find((dl) => dl.id === dialListFilter)?.leadIds || []).includes(l.id)
   );
 
+  // Paginated for the same reason as Contacts — with thousands of
+  // imported leads, "All leads" alone was enough rows to freeze the
+  // tab. filteredDialQueue above (the full matching set) still drives
+  // the dial session queue, "Start Power Dialler," and Save-as-list —
+  // only what actually renders in the table is capped.
+  const DIAL_QUEUE_PAGE_SIZE = 100;
+  const [dialQueuePage, setDialQueuePage] = useState(0);
+  useEffect(() => {
+    setDialQueuePage(0);
+  }, [dialFilters, dialListFilter]);
+  const totalDialQueuePages = Math.max(1, Math.ceil(filteredDialQueue.length / DIAL_QUEUE_PAGE_SIZE));
+  const pagedDialQueue = filteredDialQueue.slice(
+    dialQueuePage * DIAL_QUEUE_PAGE_SIZE,
+    (dialQueuePage + 1) * DIAL_QUEUE_PAGE_SIZE
+  );
+
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
   const [newListName, setNewListName] = useState("");
   const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
@@ -1945,7 +1991,7 @@ export default function SimpleCRM() {
                     <th className="py-3 font-medium whitespace-nowrap">Tag</th>
                     <th className="py-3 font-medium whitespace-nowrap">Status</th>
                     <th className="py-3 font-medium whitespace-nowrap">Last contact</th>
-                    {contactColumns.map((col) => (
+                    {visibleContactColumns.map((col) => (
                       <th key={col.id} className="px-3 py-3 font-medium whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
                           <span>{col.label}</span>
@@ -1970,7 +2016,7 @@ export default function SimpleCRM() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredContacts.map((c) => (
+                  {pagedContacts.map((c) => (
                     <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50">
                       <td className="pl-8 pr-2 py-3.5">
                         <input
@@ -1999,7 +2045,7 @@ export default function SimpleCRM() {
                         </span>
                       </td>
                       <td className="py-3.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
-                      {contactColumns.map((col) => (
+                      {visibleContactColumns.map((col) => (
                         <td key={col.id} className="px-3 py-3.5 min-w-[130px] max-w-[220px]">
                           {renderContactCell(c, col)}
                         </td>
@@ -2009,7 +2055,10 @@ export default function SimpleCRM() {
                   ))}
                   {filteredContacts.length === 0 && (
                     <tr>
-                      <td colSpan={contactColumns.length + 9} className="px-8 py-10 text-center text-sm text-gray-400">
+                      <td
+                        colSpan={visibleContactColumns.length + 9}
+                        className="px-8 py-10 text-center text-sm text-gray-400"
+                      >
                         No contacts{contactsTagFilter !== "All" ? ` tagged ${contactsTagFilter}` : ""}
                         {search ? ` match "${search}"` : ""}
                       </td>
@@ -2018,6 +2067,34 @@ export default function SimpleCRM() {
                 </tbody>
               </table>
             </div>
+            {filteredContacts.length > CONTACTS_PAGE_SIZE && (
+              <div className="flex items-center justify-between px-8 py-3 border-t border-gray-100 text-sm text-gray-500">
+                <span>
+                  {contactsPage * CONTACTS_PAGE_SIZE + 1}–
+                  {Math.min((contactsPage + 1) * CONTACTS_PAGE_SIZE, filteredContacts.length)} of{" "}
+                  {filteredContacts.length}
+                </span>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setContactsPage((p) => Math.max(0, p - 1))}
+                    disabled={contactsPage === 0}
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 font-medium hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-xs text-gray-400">
+                    Page {contactsPage + 1} of {totalContactsPages}
+                  </span>
+                  <button
+                    onClick={() => setContactsPage((p) => Math.min(totalContactsPages - 1, p + 1))}
+                    disabled={contactsPage >= totalContactsPages - 1}
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 font-medium hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -2420,7 +2497,7 @@ export default function SimpleCRM() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredDialQueue.map((lead) => (
+                    {pagedDialQueue.map((lead) => (
                       <tr
                         key={lead.id}
                         className={`border-b border-gray-50 last:border-0 hover:bg-gray-50 ${
@@ -2491,6 +2568,34 @@ export default function SimpleCRM() {
                   </tbody>
                 </table>
               </div>
+              {filteredDialQueue.length > DIAL_QUEUE_PAGE_SIZE && (
+                <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 text-sm text-gray-500">
+                  <span>
+                    {dialQueuePage * DIAL_QUEUE_PAGE_SIZE + 1}–
+                    {Math.min((dialQueuePage + 1) * DIAL_QUEUE_PAGE_SIZE, filteredDialQueue.length)} of{" "}
+                    {filteredDialQueue.length}
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setDialQueuePage((p) => Math.max(0, p - 1))}
+                      disabled={dialQueuePage === 0}
+                      className="px-3 py-1.5 rounded-lg border border-gray-200 font-medium hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-xs text-gray-400">
+                      Page {dialQueuePage + 1} of {totalDialQueuePages}
+                    </span>
+                    <button
+                      onClick={() => setDialQueuePage((p) => Math.min(totalDialQueuePages - 1, p + 1))}
+                      disabled={dialQueuePage >= totalDialQueuePages - 1}
+                      className="px-3 py-1.5 rounded-lg border border-gray-200 font-medium hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
