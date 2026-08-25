@@ -392,26 +392,25 @@ export default function SimpleCRM() {
   const [dialFilters, setDialFilters] = useState(emptyDialFilters);
 
   // Secondary sidebar (Contacts) — filters the table down to one
-  // client at a time, "All" shows everyone.
-  const [contactsClientFilter, setContactsClientFilter] = useState("All");
-  const contactClientCounts = contacts.reduce((acc, c) => {
-    acc[c.client] = (acc[c.client] || 0) + 1;
+  // status tag at a time, "All" shows everyone.
+  const [contactsTagFilter, setContactsTagFilter] = useState("All");
+  const contactTagCounts = contacts.reduce((acc, c) => {
+    acc[c.status] = (acc[c.status] || 0) + 1;
     return acc;
   }, {});
-  // Union of clients from the Clients list and any client name that
-  // shows up on a contact but isn't a real client record yet — either
-  // way it's a valid thing to filter by.
-  const contactClientNames = Array.from(
-    new Set([...clients.map((cl) => cl.name), ...contacts.map((c) => c.client)])
-  )
-    .filter(Boolean)
-    .sort((a, b) => a.localeCompare(b));
+  // The fixed status tags first (in their usual order), then any
+  // status value that shows up on a contact but isn't one of the
+  // fixed ones — still a valid thing to filter by.
+  const contactTagNames = [
+    ...Object.keys(statusColors),
+    ...Array.from(new Set(contacts.map((c) => c.status))).filter((s) => s && !statusColors[s]),
+  ];
 
   const filteredContacts = contacts.filter(
     (c) =>
       (c.name.toLowerCase().includes(search.toLowerCase()) ||
         c.client.toLowerCase().includes(search.toLowerCase())) &&
-      (contactsClientFilter === "All" || c.client === contactsClientFilter)
+      (contactsTagFilter === "All" || c.status === contactsTagFilter)
   );
 
   // Bulk-select + delete on the Contacts table
@@ -1228,13 +1227,13 @@ export default function SimpleCRM() {
           {page === "contacts" && (
             <>
               <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
-                Clients
+                Tags
               </div>
               <nav className="flex-1 pb-4">
                 <button
-                  onClick={() => setContactsClientFilter("All")}
+                  onClick={() => setContactsTagFilter("All")}
                   className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                    contactsClientFilter === "All"
+                    contactsTagFilter === "All"
                       ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                       : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
                   }`}
@@ -1242,22 +1241,28 @@ export default function SimpleCRM() {
                   <span className="truncate">All contacts</span>
                   <span className="text-xs text-gray-400 shrink-0">{contacts.length}</span>
                 </button>
-                {contactClientNames.map((name) => (
+                {contactTagNames.map((tag) => (
                   <button
-                    key={name}
-                    onClick={() => setContactsClientFilter(name)}
+                    key={tag}
+                    onClick={() => setContactsTagFilter(tag)}
                     className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                      contactsClientFilter === name
+                      contactsTagFilter === tag
                         ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
-                        : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                        : "hover:bg-gray-100"
                     }`}
                   >
-                    <span className="truncate">{name}</span>
-                    <span className="text-xs text-gray-400 shrink-0">{contactClientCounts[name] || 0}</span>
+                    <span
+                      className={`truncate text-xs px-2.5 py-1 rounded-full border ${
+                        statusColors[tag] || "bg-gray-50 text-gray-500 border-gray-200"
+                      }`}
+                    >
+                      {tag}
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{contactTagCounts[tag] || 0}</span>
                   </button>
                 ))}
-                {contactClientNames.length === 0 && (
-                  <div className="px-4 py-2 text-xs text-gray-400">No clients yet</div>
+                {contactTagNames.length === 0 && (
+                  <div className="px-4 py-2 text-xs text-gray-400">No tags yet</div>
                 )}
               </nav>
             </>
@@ -1458,8 +1463,8 @@ export default function SimpleCRM() {
             <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
               <div>
                 <h1 className="text-xl font-bold">Contacts</h1>
-                {contactsClientFilter !== "All" && (
-                  <div className="text-sm text-gray-400 mt-0.5">Filtered to {contactsClientFilter}</div>
+                {contactsTagFilter !== "All" && (
+                  <div className="text-sm text-gray-400 mt-0.5">Tagged {contactsTagFilter}</div>
                 )}
               </div>
               <div className="flex gap-3">
@@ -1531,7 +1536,7 @@ export default function SimpleCRM() {
                 {filteredContacts.length === 0 && (
                   <tr>
                     <td colSpan={6} className="px-8 py-10 text-center text-sm text-gray-400">
-                      No contacts{contactsClientFilter !== "All" ? ` for ${contactsClientFilter}` : ""}
+                      No contacts{contactsTagFilter !== "All" ? ` tagged ${contactsTagFilter}` : ""}
                       {search ? ` match "${search}"` : ""}
                     </td>
                   </tr>
