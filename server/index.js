@@ -17,6 +17,7 @@ import {
   createClientColumn,
   deleteClientColumn,
   importClientData,
+  resetContactImport,
   importContactDataBatch,
   getContacts,
   createContact,
@@ -389,7 +390,8 @@ app.post(
 app.post(
   "/api/contacts-import",
   dbRoute(async (req, res) => {
-    const { offset, limit } = req.body || {};
+    const { reset, offset, limit } = req.body || {};
+    if (reset) return res.json(await resetContactImport());
     res.json(
       await importContactDataBatch({
         offset: Number.isFinite(offset) ? offset : 0,

@@ -661,14 +661,23 @@ export async function importContactsBulk(records) {
   return { imported, columnsCreated: createdColumns.length };
 }
 
+// One multi-row insert instead of 226 one-at-a-time — the latter was
+// 226 sequential round trips sharing a request with the DELETEs and
+// the first batch of contacts, which was enough on its own to blow
+// past Vercel's timeout before a single lead got inserted.
 async function seedContactColumnsForImport() {
-  for (let i = 0; i < CONTACT_COLUMNS.length; i++) {
-    const c = CONTACT_COLUMNS[i];
-    await query(
-      "INSERT INTO contact_columns (key, label, type, options, position) VALUES ($1,$2,$3,$4,$5)",
-      [c.key, c.label, c.type, JSON.stringify(c.options || []), i]
-    );
-  }
+  if (!CONTACT_COLUMNS.length) return;
+  const placeholders = [];
+  const params = [];
+  CONTACT_COLUMNS.forEach((c, i) => {
+    const base = i * 5;
+    placeholders.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5})`);
+    params.push(c.key, c.label, c.type, JSON.stringify(c.options || []), i);
+  });
+  await query(
+    `INSERT INTO contact_columns (key, label, type, options, position) VALUES ${placeholders.join(",")}`,
+    params
+  );
 }
 
 // Inserts a batch of already-shaped contact rows in chunks of 300 —
@@ -704,21 +713,25 @@ async function insertContactRows(rows) {
   }
 }
 
-// Wipes existing contacts + column definitions and replaces them with
-// the real lead data imported from the team's spreadsheet, one page
-// at a time. Safe to re-run — it's a full reset, not an incremental
-// merge (same pattern as importClientData) — the wipe + column setup
-// only happens on the first page (offset 0), so calling this
-// repeatedly with increasing offsets resumes correctly rather than
-// re-wiping every call. Paginated specifically so each call finishes
-// well inside Vercel's serverless request timeout — a single request
-// trying to insert all ~6,500 rows in one go was hitting a 504.
+// Wipes existing contacts + column definitions and seeds the column
+// list fresh — its own step, called once before any row-inserting
+// calls, so a wipe never has to share a request (and its slice of
+// Vercel's timeout) with actually inserting leads.
+export async function resetContactImport() {
+  await query("DELETE FROM contacts");
+  await query("DELETE FROM contact_columns");
+  await seedContactColumnsForImport();
+  return { total: IMPORTED_CONTACTS.length, columns: CONTACT_COLUMNS.length };
+}
+
+// Inserts one page of the real lead data imported from the team's
+// spreadsheet — call resetContactImport() once first, then this
+// repeatedly with increasing offsets. Paginated specifically so each
+// call finishes well inside Vercel's serverless request timeout — a
+// single request trying to insert all ~6,500 rows (or even just
+// wiping + seeding 226 columns one at a time) in one go was hitting
+// a 504.
 export async function importContactDataBatch({ offset = 0, limit = 500 } = {}) {
-  if (offset <= 0) {
-    await query("DELETE FROM contacts");
-    await query("DELETE FROM contact_columns");
-    await seedContactColumnsForImport();
-  }
   const slice = IMPORTED_CONTACTS.slice(offset, offset + limit);
   await insertContactRows(slice);
   const nextOffset = offset + slice.length;
@@ -727,15 +740,17 @@ export async function importContactDataBatch({ offset = 0, limit = 500 } = {}) {
     nextOffset,
     total: IMPORTED_CONTACTS.length,
     done: nextOffset >= IMPORTED_CONTACTS.length,
-    columns: CONTACT_COLUMNS.length,
   };
 }
 
 // Full, single-shot import — fine for local dev (no request timeout
 // to worry about), but risks a 504 if called against the deployed
-// site for a batch this large. Prefer importContactDataBatch there.
+// site for a batch this large. Prefer resetContactImport() +
+// importContactDataBatch() there.
 export async function importContactData() {
-  return importContactDataBatch({ offset: 0, limit: IMPORTED_CONTACTS.length });
+  await resetContactImport();
+  await insertContactRows(IMPORTED_CONTACTS);
+  return { contacts: IMPORTED_CONTACTS.length, columns: CONTACT_COLUMNS.length };
 }
 
 // Strips a phone number down to just its Australian local digits

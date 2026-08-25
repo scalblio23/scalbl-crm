@@ -1,20 +1,20 @@
-import { ensureSchema, importContactDataBatch } from "../server/db.js";
+import { ensureSchema, resetContactImport, importContactDataBatch } from "../server/db.js";
 import { requireAuth } from "../server/auth.js";
 
 // Bumps this function's execution time limit as far as Vercel allows
 // (60s on Hobby, more on paid plans).
 export const config = { maxDuration: 60 };
 
-// POST /api/contacts-import — imports one page of the real lead data
-// (from the team's spreadsheet) into contacts + contact_columns.
-// Body: { offset?, limit? }. offset 0 (or omitted) wipes the existing
-// contacts/columns first, then every call inserts up to `limit` rows
-// starting at `offset` and returns { inserted, nextOffset, total,
-// done }. Triggered by the "Import leads" button on the Contacts
-// page, which drives the paging loop itself — a single request
-// trying to insert everything at once was hitting Vercel's request
-// timeout (504) for a batch this size, so this only ever does a
-// few hundred rows per call.
+// POST /api/contacts-import — imports the real lead data (from the
+// team's spreadsheet) into contacts + contact_columns, one step at a
+// time so no single request risks a 504:
+//   1. { reset: true } — wipes existing contacts/columns and seeds
+//      the column list, returns { total, columns }.
+//   2. { offset, limit } (repeated, increasing offset) — inserts up
+//      to `limit` rows starting at `offset`, returns
+//      { inserted, nextOffset, total, done }.
+// Triggered by the "Import leads" button on the Contacts page, which
+// drives this two-step loop itself.
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
@@ -24,7 +24,10 @@ export default async function handler(req, res) {
       res.setHeader("Allow", "POST");
       return res.status(405).json({ error: "Method not allowed" });
     }
-    const { offset, limit } = req.body || {};
+    const { reset, offset, limit } = req.body || {};
+    if (reset) {
+      return res.status(200).json(await resetContactImport());
+    }
     const result = await importContactDataBatch({
       offset: Number.isFinite(offset) ? offset : 0,
       limit: Number.isFinite(limit) ? limit : 500,

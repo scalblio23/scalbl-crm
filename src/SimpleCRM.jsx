@@ -730,8 +730,14 @@ export default function SimpleCRM() {
     setImportingContacts(true);
     setImportProgress(null);
     try {
+      // Wipe + seed the column list as its own request first — this
+      // used to happen inline on the first page of rows and, at 226
+      // columns, was slow enough on its own to time out before a
+      // single lead got inserted.
+      const { total } = await api.post("/api/contacts-import", { reset: true });
       let offset = 0;
-      let done = false;
+      let done = total === 0;
+      setImportProgress({ inserted: 0, total });
       while (!done) {
         const result = await api.post("/api/contacts-import", { offset, limit: 500 });
         offset = result.nextOffset;
