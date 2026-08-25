@@ -26,6 +26,7 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  Filter,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -471,10 +472,11 @@ export default function SimpleCRM() {
   // from (e.g. "9. Khan Legal"); for anything else it's whatever was
   // typed into the Add Contact modal, or left blank ("Untagged").
   const [contactsTagFilter, setContactsTagFilter] = useState("All");
-  // "is" (only this tag) or "is not" (everyone except this tag) —
-  // meaningless when contactsTagFilter is "All", which already shows
-  // everyone either way.
-  const [contactsTagMode, setContactsTagMode] = useState("is");
+  // "is" / "is not" (needs a specific tag picked — contactsTagFilter)
+  // or "is empty" / "is not empty" (no tag value needed, just
+  // whether the contact has any tag at all).
+  const [contactsTagOp, setContactsTagOp] = useState("is");
+  const [showTagFilterMenu, setShowTagFilterMenu] = useState(false);
   const contactTagCounts = contacts.reduce((acc, c) => {
     const t = c.tag || "Untagged";
     acc[t] = (acc[t] || 0) + 1;
@@ -493,10 +495,13 @@ export default function SimpleCRM() {
   };
 
   const contactMatchesTagFilter = (c) => {
+    if (contactsTagOp === "is empty") return !c.tag;
+    if (contactsTagOp === "is not empty") return !!c.tag;
     if (contactsTagFilter === "All") return true;
     const isMatch = contactsTagFilter === "Untagged" ? !c.tag : c.tag === contactsTagFilter;
-    return contactsTagMode === "is" ? isMatch : !isMatch;
+    return contactsTagOp === "is" ? isMatch : !isMatch;
   };
+  const contactsTagFilterActive = contactsTagOp === "is empty" || contactsTagOp === "is not empty" || contactsTagFilter !== "All";
 
   const filteredContacts = contacts.filter(
     (c) =>
@@ -578,7 +583,7 @@ export default function SimpleCRM() {
   const [contactsPage, setContactsPage] = useState(0);
   useEffect(() => {
     setContactsPage(0);
-  }, [contactsTagFilter, contactsTagMode, search, contactSort.key, contactSort.dir]);
+  }, [contactsTagFilter, contactsTagOp, search, contactSort.key, contactSort.dir]);
   const totalContactsPages = Math.max(1, Math.ceil(sortedContacts.length / CONTACTS_PAGE_SIZE));
   const pagedContacts = sortedContacts.slice(
     contactsPage * CONTACTS_PAGE_SIZE,
@@ -1801,21 +1806,14 @@ export default function SimpleCRM() {
               <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
                 Tags
               </div>
-              <div className={`px-4 pb-2 ${contactsTagFilter === "All" ? "opacity-40 pointer-events-none" : ""}`}>
-                <select
-                  value={contactsTagMode}
-                  onChange={(e) => setContactsTagMode(e.target.value)}
-                  className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-medium outline-none focus:border-gray-400 bg-white"
-                >
-                  <option value="is">Tag is</option>
-                  <option value="is not">Tag is not</option>
-                </select>
-              </div>
               <nav className="flex-1 pb-4">
                 <button
-                  onClick={() => setContactsTagFilter("All")}
+                  onClick={() => {
+                    setContactsTagFilter("All");
+                    setContactsTagOp("is");
+                  }}
                   className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                    contactsTagFilter === "All"
+                    !contactsTagFilterActive
                       ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                       : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
                   }`}
@@ -1826,9 +1824,12 @@ export default function SimpleCRM() {
                 {contactTagNames.map((tag) => (
                   <button
                     key={tag}
-                    onClick={() => setContactsTagFilter(tag)}
+                    onClick={() => {
+                      setContactsTagFilter(tag);
+                      setContactsTagOp("is");
+                    }}
                     className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                      contactsTagFilter === tag
+                      contactsTagOp === "is" && contactsTagFilter === tag
                         ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                         : "hover:bg-gray-100"
                     }`}
@@ -1841,9 +1842,9 @@ export default function SimpleCRM() {
                 ))}
                 {contactTagCounts["Untagged"] > 0 && (
                   <button
-                    onClick={() => setContactsTagFilter("Untagged")}
+                    onClick={() => setContactsTagOp("is empty")}
                     className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                      contactsTagFilter === "Untagged"
+                      contactsTagOp === "is empty"
                         ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                         : "hover:bg-gray-100"
                     }`}
@@ -2056,11 +2057,79 @@ export default function SimpleCRM() {
             <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
               <div>
                 <h1 className="text-xl font-bold">Contacts</h1>
-                {contactsTagFilter !== "All" && (
-                  <div className="text-sm text-gray-400 mt-0.5">
-                    {contactsTagMode === "is" ? "Tagged" : "Not tagged"} {contactsTagFilter}
-                  </div>
-                )}
+                <div className="relative mt-1.5">
+                  <button
+                    onClick={() => setShowTagFilterMenu((v) => !v)}
+                    className={`flex items-center gap-1.5 rounded-full border text-xs font-medium px-3 py-1.5 ${
+                      contactsTagFilterActive
+                        ? "border-gray-300 bg-white text-gray-800"
+                        : "border-dashed border-gray-300 text-gray-400 hover:text-gray-600 hover:border-gray-400"
+                    }`}
+                  >
+                    <Filter size={12} />
+                    {contactsTagFilterActive ? (
+                      <>
+                        Tag {contactsTagOp}
+                        {(contactsTagOp === "is" || contactsTagOp === "is not") && `: ${contactsTagFilter}`}
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 ml-0.5" />
+                      </>
+                    ) : (
+                      "+ Filter"
+                    )}
+                  </button>
+
+                  {showTagFilterMenu && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setShowTagFilterMenu(false)} />
+                      <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-3 w-64">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-sm font-medium text-gray-700 shrink-0">Tag</span>
+                          <select
+                            value={contactsTagOp}
+                            onChange={(e) => setContactsTagOp(e.target.value)}
+                            className="flex-1 border border-gray-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-gray-400 bg-white"
+                          >
+                            <option value="is">is</option>
+                            <option value="is not">is not</option>
+                            <option value="is empty">is empty</option>
+                            <option value="is not empty">is not empty</option>
+                          </select>
+                        </div>
+
+                        {(contactsTagOp === "is" || contactsTagOp === "is not") && (
+                          <select
+                            autoFocus
+                            value={contactTagNames.includes(contactsTagFilter) ? contactsTagFilter : ""}
+                            onChange={(e) => setContactsTagFilter(e.target.value)}
+                            className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                          >
+                            <option value="" disabled>
+                              Select tag…
+                            </option>
+                            {contactTagNames.map((tag) => (
+                              <option key={tag} value={tag}>
+                                {tag}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+
+                        {contactsTagFilterActive && (
+                          <button
+                            onClick={() => {
+                              setContactsTagFilter("All");
+                              setContactsTagOp("is");
+                              setShowTagFilterMenu(false);
+                            }}
+                            className="mt-3 text-xs text-gray-400 hover:text-red-600"
+                          >
+                            Clear filter
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
               <div className="flex gap-3">
                 {selectedContactIds.length > 0 && (
@@ -2255,9 +2324,9 @@ export default function SimpleCRM() {
                         className="px-8 py-10 text-center text-sm text-gray-400"
                       >
                         No contacts
-                        {contactsTagFilter !== "All"
-                          ? ` ${contactsTagMode === "is" ? "tagged" : "not tagged"} ${contactsTagFilter}`
-                          : ""}
+                        {contactsTagFilterActive ? ` matching tag ${contactsTagOp}${
+                          contactsTagOp === "is" || contactsTagOp === "is not" ? `: ${contactsTagFilter}` : ""
+                        }` : ""}
                         {search ? ` match "${search}"` : ""}
                       </td>
                     </tr>
