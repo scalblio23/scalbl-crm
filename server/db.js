@@ -871,6 +871,20 @@ export async function deleteDialList(id) {
   await query("DELETE FROM dial_lists WHERE id = $1", [id]);
 }
 
+// Merges leadIds into an existing dial list (deduped) — used by
+// "Add to Powerlist" on the Contacts page, as opposed to
+// createDialList which always makes a new one.
+export async function addLeadsToDialList(id, leadIds) {
+  const rows = await query("SELECT lead_ids FROM dial_lists WHERE id = $1", [id]);
+  if (!rows[0]) return null;
+  const merged = Array.from(new Set([...(rows[0].lead_ids || []), ...leadIds]));
+  const updated = await query("UPDATE dial_lists SET lead_ids = $2 WHERE id = $1 RETURNING *", [
+    id,
+    JSON.stringify(merged),
+  ]);
+  return { id: updated[0].id, name: updated[0].name, leadIds: updated[0].lead_ids || [] };
+}
+
 export async function getCalledLeadIds() {
   const rows = await query("SELECT lead_id FROM called_leads");
   return rows.map((r) => r.lead_id);

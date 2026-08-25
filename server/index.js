@@ -35,6 +35,7 @@ import {
   deleteConversations,
   getDialLists,
   createDialList,
+  addLeadsToDialList,
   deleteDialList,
   getCalledLeadIds,
   markLeadCalled,
@@ -503,6 +504,18 @@ app.post(
       return res.status(400).json({ error: "Missing name or leadIds" });
     }
     res.status(201).json(await createDialList(name, leadIds));
+  })
+);
+app.patch(
+  "/api/dial-lists",
+  dbRoute(async (req, res) => {
+    const { id, leadIds } = req.body || {};
+    if (!id || !Array.isArray(leadIds) || !leadIds.length) {
+      return res.status(400).json({ error: "Missing id or leadIds" });
+    }
+    const list = await addLeadsToDialList(id, leadIds);
+    if (!list) return res.status(404).json({ error: "Powerlist not found" });
+    res.json(list);
   })
 );
 app.delete(

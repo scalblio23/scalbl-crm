@@ -1307,6 +1307,48 @@ export default function SimpleCRM() {
   // ----- Power Dialler session (auto-dial through a list) -----
   const [dialLists, setDialLists] = useState([]); // [{ id, name, leadIds }]
 
+  // "Add to Powerlist" — from the Contacts page's bulk-select, add the
+  // selected contacts to an existing powerlist or create a new one
+  // from them, without leaving Contacts.
+  const [showAddToPowerlist, setShowAddToPowerlist] = useState(false);
+  const [newPowerlistName, setNewPowerlistName] = useState("");
+  const [addingToPowerlist, setAddingToPowerlist] = useState(false);
+
+  const handleAddSelectedToExistingPowerlist = async (listId) => {
+    if (!selectedContactIds.length) return;
+    setAddingToPowerlist(true);
+    try {
+      const updated = await api.patch("/api/dial-lists", { id: listId, leadIds: selectedContactIds });
+      setDialLists((lists) => lists.map((l) => (l.id === listId ? updated : l)));
+      setShowAddToPowerlist(false);
+      setSelectedContactIds([]);
+    } catch (err) {
+      setDbError(err.message || "Could not add to the powerlist.");
+    } finally {
+      setAddingToPowerlist(false);
+    }
+  };
+
+  const handleCreatePowerlistFromSelection = async (e) => {
+    e.preventDefault();
+    if (!newPowerlistName.trim() || !selectedContactIds.length) return;
+    setAddingToPowerlist(true);
+    try {
+      const created = await api.post("/api/dial-lists", {
+        name: newPowerlistName.trim(),
+        leadIds: selectedContactIds,
+      });
+      setDialLists((lists) => [...lists, created]);
+      setNewPowerlistName("");
+      setShowAddToPowerlist(false);
+      setSelectedContactIds([]);
+    } catch (err) {
+      setDbError(err.message || "Could not create the powerlist.");
+    } finally {
+      setAddingToPowerlist(false);
+    }
+  };
+
   // Secondary sidebar (Powerdialler) — narrows the queue below to one
   // saved powerlist at a time, "all" shows every lead.
   const [dialListFilter, setDialListFilter] = useState("all");
@@ -1931,6 +1973,14 @@ export default function SimpleCRM() {
                 )}
               </div>
               <div className="flex gap-3">
+                {selectedContactIds.length > 0 && (
+                  <button
+                    onClick={() => setShowAddToPowerlist(true)}
+                    className="flex items-center gap-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <ListChecks size={15} /> Add to Powerlist
+                  </button>
+                )}
                 {selectedContactIds.length > 0 && (
                   <button
                     onClick={deleteSelectedContacts}
@@ -2998,6 +3048,77 @@ export default function SimpleCRM() {
           </div>
         )}
       </main>
+
+      {/* Add to Powerlist modal — from Contacts bulk-select */}
+      {showAddToPowerlist && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddToPowerlist(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div>
+                <h2 className="text-lg font-bold">Add to Powerlist</h2>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  {selectedContactIds.length} contact{selectedContactIds.length === 1 ? "" : "s"} selected
+                </div>
+              </div>
+              <button
+                onClick={() => setShowAddToPowerlist(false)}
+                className="text-gray-400 hover:text-gray-700"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              {dialLists.length > 0 && (
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-gray-400 block mb-2">
+                    Select powerlist
+                  </label>
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    {dialLists.map((list) => (
+                      <button
+                        key={list.id}
+                        disabled={addingToPowerlist}
+                        onClick={() => handleAddSelectedToExistingPowerlist(list.id)}
+                        className="w-full flex items-center justify-between gap-2 border border-gray-200 rounded-lg px-3.5 py-2.5 text-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <span className="font-medium truncate">{list.name}</span>
+                        <span className="text-xs text-gray-400 shrink-0">{list.leadIds.length} leads</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <form onSubmit={handleCreatePowerlistFromSelection}>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-400 block mb-2">
+                  {dialLists.length > 0 ? "Or create a new one" : "New powerlist name"}
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    autoFocus={dialLists.length === 0}
+                    value={newPowerlistName}
+                    onChange={(e) => setNewPowerlistName(e.target.value)}
+                    placeholder="e.g. Follow up this week"
+                    className="flex-1 border border-gray-200 rounded-lg px-3.5 py-2.5 text-sm outline-none focus:border-gray-400"
+                  />
+                  <button
+                    type="submit"
+                    disabled={addingToPowerlist || !newPowerlistName.trim()}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {addingToPowerlist && <Loader2 size={14} className="animate-spin" />}
+                    Create
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add contact modal */}
       {showAddContact && (
