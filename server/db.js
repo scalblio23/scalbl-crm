@@ -6,6 +6,7 @@
 // Postgres, Supabase, RDS, …) — whichever one POSTGRES_URL points at.
 import pg from "pg";
 import { CLIENT_COLUMNS, IMPORTED_CLIENTS } from "./clientImportData.js";
+import { CONTACT_COLUMNS, IMPORTED_CONTACTS } from "./contactImportData.js";
 
 const { Pool } = pg;
 
@@ -647,6 +648,55 @@ export async function importContactsBulk(records) {
   }
 
   return { imported, columnsCreated: createdColumns.length };
+}
+
+// Wipes existing contacts + column definitions and replaces them with
+// the real lead data imported from the team's spreadsheet. Safe to
+// re-run — it's a full reset, not an incremental merge (same pattern
+// as importClientData). Inserts in batches rather than one row at a
+// time — this is a few thousand rows, and one query per row would be
+// needlessly slow.
+export async function importContactData() {
+  await query("DELETE FROM contacts");
+  await query("DELETE FROM contact_columns");
+  for (let i = 0; i < CONTACT_COLUMNS.length; i++) {
+    const c = CONTACT_COLUMNS[i];
+    await query(
+      "INSERT INTO contact_columns (key, label, type, options, position) VALUES ($1,$2,$3,$4,$5)",
+      [c.key, c.label, c.type, JSON.stringify(c.options || []), i]
+    );
+  }
+
+  const COLS_PER_ROW = 10;
+  const BATCH_SIZE = 300;
+  for (let i = 0; i < IMPORTED_CONTACTS.length; i += BATCH_SIZE) {
+    const batch = IMPORTED_CONTACTS.slice(i, i + BATCH_SIZE);
+    const placeholders = [];
+    const params = [];
+    batch.forEach((c, idx) => {
+      const base = idx * COLS_PER_ROW;
+      const ph = Array.from({ length: COLS_PER_ROW }, (_, k) => `$${base + k + 1}`).join(",");
+      placeholders.push(`(${ph})`);
+      params.push(
+        c.name || "Unknown",
+        c.email || "",
+        c.phone || "",
+        c.client || "",
+        c.status || "New Lead",
+        c.lastContact || "",
+        c.notes || "",
+        JSON.stringify(c.fields || {}),
+        c.leadDate || null,
+        c.tag || null
+      );
+    });
+    await query(
+      `INSERT INTO contacts (name, email, phone, client, status, last_contact, notes, fields, lead_date, tag) VALUES ${placeholders.join(",")}`,
+      params
+    );
+  }
+
+  return { contacts: IMPORTED_CONTACTS.length, columns: CONTACT_COLUMNS.length };
 }
 
 // Strips a phone number down to just its Australian local digits

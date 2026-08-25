@@ -713,6 +713,34 @@ export default function SimpleCRM() {
     }
   };
 
+  // Bulk lead import — a few thousand rows, can take a while, hence
+  // the loading state (the button disables + shows a spinner rather
+  // than looking hung).
+  const [importingContacts, setImportingContacts] = useState(false);
+  const handleImportContacts = async () => {
+    if (
+      !window.confirm(
+        "Import the real lead list? This replaces every current contact and column with the imported data. This can take a minute for a few thousand leads."
+      )
+    )
+      return;
+    setImportingContacts(true);
+    try {
+      await api.post("/api/contacts-import", {});
+      const [contactsData, columnsData] = await Promise.all([
+        api.get("/api/contacts"),
+        api.get("/api/contact-columns"),
+      ]);
+      setContacts(contactsData);
+      setContactColumns(columnsData);
+      setSelectedContactIds([]);
+    } catch (err) {
+      setDbError(err.message || "Could not import the lead list.");
+    } finally {
+      setImportingContacts(false);
+    }
+  };
+
   const selectOptionColor = (col, value) => {
     const opt = (col.options || []).find((o) => o.value === value);
     return SELECT_COLORS[opt?.color] || SELECT_COLORS.gray;
@@ -1791,6 +1819,18 @@ export default function SimpleCRM() {
                     className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-64"
                   />
                 </div>
+                <button
+                  onClick={handleImportContacts}
+                  disabled={importingContacts}
+                  className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {importingContacts ? (
+                    <Loader2 size={15} className="animate-spin" />
+                  ) : (
+                    <Upload size={15} />
+                  )}
+                  {importingContacts ? "Importing…" : "Import leads"}
+                </button>
                 <button
                   onClick={() => setShowAddContact(true)}
                   className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"

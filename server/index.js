@@ -17,6 +17,7 @@ import {
   createClientColumn,
   deleteClientColumn,
   importClientData,
+  importContactData,
   getContacts,
   createContact,
   updateContact,
@@ -336,6 +337,11 @@ app.delete(
 app.post(
   "/api/clients-import",
   dbRoute(async (req, res) => res.json(await importClientData()))
+);
+
+app.post(
+  "/api/contacts-import",
+  dbRoute(async (req, res) => res.json(await importContactData()))
 );
 
 app.get("/api/contacts", dbRoute(async (req, res) => res.json(await getContacts())));
