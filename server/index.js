@@ -155,9 +155,15 @@ app.post(
 
 // Twilio's "A message comes in" webhook — set this as the number's
 // Messaging webhook (POST http://<ngrok-url>/api/sms-inbound in dev).
-app.post(
-  "/api/sms-inbound",
-  dbRoute(async (req, res) => {
+// Deliberately NOT wrapped in dbRoute: Twilio gives up on this
+// webhook after ~15s, and the database can be slower than that to
+// wake up from idle. Respond with the TwiML immediately — it needs
+// no database access — then do the contact-matching and logging
+// after Twilio's already got its 200.
+app.post("/api/sms-inbound", async (req, res) => {
+  res.type("text/xml").send("<Response></Response>");
+  try {
+    await ensureSchema();
     const from = req.body?.From;
     const body = req.body?.Body || "";
     if (from) {
@@ -172,9 +178,10 @@ app.post(
         outgoing: false,
       });
     }
-    res.type("text/xml").send("<Response></Response>");
-  })
-);
+  } catch (err) {
+    console.error("[db] /api/sms-inbound", err);
+  }
+});
 
 // ---------- Database ----------
 
