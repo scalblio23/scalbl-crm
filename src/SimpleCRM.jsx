@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   MessageSquare,
   Users,
@@ -12,7 +12,9 @@ import {
   Circle,
   ExternalLink,
   X,
+  AlertTriangle,
 } from "lucide-react";
+import { placeCall, hangUp } from "./lib/twilioDevice";
 
 // ---------- Sample data ----------
 const initialContacts = [
@@ -224,6 +226,52 @@ export default function SimpleCRM() {
   );
   const activeLead = dialQueue.find((l) => l.id === activeLeadId) || null;
 
+  // Live calling — same model as GoHighLevel's power dialler: the
+  // browser registers as a Twilio Voice "device" and calls ring
+  // through the rep's mic/speakers via the backend in /server.
+  const [callStatus, setCallStatus] = useState("idle"); // idle | connecting | in-progress
+  const [callError, setCallError] = useState("");
+  const activeCallRef = useRef(null);
+
+  const startCall = async (lead) => {
+    setCallError("");
+    setActiveLeadId(lead.id);
+    setCalling(true);
+    setCallStatus("connecting");
+    try {
+      const call = await placeCall(lead.phone);
+      activeCallRef.current = call;
+      call.on("accept", () => setCallStatus("in-progress"));
+      call.on("disconnect", () => {
+        setCalling(false);
+        setCallStatus("idle");
+        activeCallRef.current = null;
+      });
+      call.on("cancel", () => {
+        setCalling(false);
+        setCallStatus("idle");
+        activeCallRef.current = null;
+      });
+      call.on("error", (err) => {
+        setCallError(err.message || "The call failed.");
+        setCalling(false);
+        setCallStatus("idle");
+        activeCallRef.current = null;
+      });
+    } catch (err) {
+      setCallError(err.message || "Could not start the call — check your Twilio setup.");
+      setCalling(false);
+      setCallStatus("idle");
+    }
+  };
+
+  const endCall = () => {
+    hangUp();
+    activeCallRef.current = null;
+    setCalling(false);
+    setCallStatus("idle");
+  };
+
   return (
     <div className="flex h-screen bg-white text-gray-900" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
       {/* Sidebar */}
@@ -373,6 +421,16 @@ export default function SimpleCRM() {
               )}
             </div>
 
+            {callError && (
+              <div className="mx-8 mt-6 flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
+                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                <div className="flex-1">{callError}</div>
+                <button onClick={() => setCallError("")} className="text-red-400 hover:text-red-600">
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
             {/* Hotseat — the live call in progress */}
             <div className="px-8 pt-6">
               {calling && activeLead ? (
@@ -380,15 +438,27 @@ export default function SimpleCRM() {
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex items-center gap-3">
                       <span className="relative flex h-3 w-3 shrink-0">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-                        <span className="relative inline-flex rounded-full h-3 w-3 bg-green-600" />
+                        <span
+                          className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                            callStatus === "connecting" ? "bg-amber-400" : "bg-green-400"
+                          }`}
+                        />
+                        <span
+                          className={`relative inline-flex rounded-full h-3 w-3 ${
+                            callStatus === "connecting" ? "bg-amber-500" : "bg-green-600"
+                          }`}
+                        />
                       </span>
-                      <div className="text-xs font-semibold uppercase tracking-widest text-green-700">
-                        Live call
+                      <div
+                        className={`text-xs font-semibold uppercase tracking-widest ${
+                          callStatus === "connecting" ? "text-amber-700" : "text-green-700"
+                        }`}
+                      >
+                        {callStatus === "connecting" ? "Connecting…" : "Live call"}
                       </div>
                     </div>
                     <button
-                      onClick={() => setCalling(false)}
+                      onClick={endCall}
                       className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
                     >
                       <PhoneOff size={15} /> End call
@@ -569,18 +639,16 @@ export default function SimpleCRM() {
                         <td className="px-5 py-3.5 text-right">
                           {calling && activeLead?.id === lead.id ? (
                             <button
-                              onClick={() => setCalling(false)}
+                              onClick={endCall}
                               className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-600 hover:text-red-700"
                             >
                               <PhoneOff size={14} /> End
                             </button>
                           ) : (
                             <button
-                              onClick={() => {
-                                setActiveLeadId(lead.id);
-                                setCalling(true);
-                              }}
-                              className="inline-flex items-center gap-1.5 text-xs font-semibold text-green-600 hover:text-green-700"
+                              disabled={calling}
+                              onClick={() => startCall(lead)}
+                              className="inline-flex items-center gap-1.5 text-xs font-semibold text-green-600 hover:text-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               <PhoneCall size={14} /> Call
                             </button>
