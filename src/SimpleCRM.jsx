@@ -217,6 +217,35 @@ function formatCallDuration(ms) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+// ---------- Persistence ----------
+// A useState that reads its initial value from localStorage and
+// writes back to it on every change, so data the user creates
+// (contacts, dialler lists, call history…) survives a page refresh
+// instead of resetting to the sample data. Falls back to `initialValue`
+// if storage is empty, unavailable (private browsing), or corrupted.
+const STORAGE_PREFIX = "scalbl-crm:";
+function usePersistentState(key, initialValue) {
+  const storageKey = STORAGE_PREFIX + key;
+  const [state, setState] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      return stored ? JSON.parse(stored) : initialValue;
+    } catch {
+      return initialValue;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(state));
+    } catch {
+      // storage unavailable or full — nothing more we can do here
+    }
+  }, [storageKey, state]);
+
+  return [state, setState];
+}
+
 // ---------- Sidebar ----------
 const navItems = [
   { key: "conversation", label: "Conversation", icon: MessageSquare },
@@ -229,9 +258,9 @@ const navItems = [
 
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
-  const [contacts, setContacts] = useState(initialContacts);
+  const [contacts, setContacts] = usePersistentState("contacts", initialContacts);
   const [clients] = useState(initialClients);
-  const [conversations, setConversations] = useState(initialConversations);
+  const [conversations, setConversations] = usePersistentState("conversations", initialConversations);
   const [activeConvo, setActiveConvo] = useState(1);
   const [search, setSearch] = useState("");
 
@@ -358,14 +387,14 @@ export default function SimpleCRM() {
   };
 
   // ----- Power Dialler session (auto-dial through a list) -----
-  const [dialLists, setDialLists] = useState([]); // [{ id, name, leadIds }]
+  const [dialLists, setDialLists] = usePersistentState("dialLists", []); // [{ id, name, leadIds }]
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
   const [newListName, setNewListName] = useState("");
-  const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
+  const [calledLeadIds, setCalledLeadIds] = usePersistentState("calledLeadIds", []); // leads already worked, across all lists
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
   const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, secondsLeft }
-  const [callLog, setCallLog] = useState([]);
+  const [callLog, setCallLog] = usePersistentState("callLog", []);
 
   // Kept in sync with `session` so the long-lived Twilio call event
   // handlers below (registered once per call, not re-created each
