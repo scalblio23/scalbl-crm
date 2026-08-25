@@ -23,6 +23,9 @@ import {
   Loader2,
   LogOut,
   Lock,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -502,6 +505,71 @@ export default function SimpleCRM() {
       contactMatchesTagFilter(c)
   );
 
+  // Sortable by clicking any column header — Date and every other
+  // fixed/custom column. null key = whatever order the database
+  // returned (newest-created first).
+  const [contactSort, setContactSort] = useState({ key: null, dir: "asc" });
+  const toggleContactSort = (key) =>
+    setContactSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+
+  // "24/11/2025" -> Date. Falls back to a plain Date() parse for
+  // anything not in that shape, so a manually-typed date still sorts.
+  const parseAuDate = (str) => {
+    if (!str) return null;
+    const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(str).trim());
+    if (m) {
+      const [, dd, mm, yyyy] = m;
+      const d = new Date(Number(yyyy), Number(mm) - 1, Number(dd));
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const d = new Date(str);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const FIXED_SORT_KEYS = {
+    __leadDate: (c) => parseAuDate(c.leadDate),
+    __name: (c) => c.name?.toLowerCase() || null,
+    __phone: (c) => c.phone?.toLowerCase() || null,
+    __client: (c) => c.client?.toLowerCase() || null,
+    __tag: (c) => c.tag?.toLowerCase() || null,
+    __status: (c) => c.status?.toLowerCase() || null,
+    __lastContact: (c) => c.lastContact?.toLowerCase() || null,
+  };
+  const getContactSortValue = (c, key) => {
+    if (FIXED_SORT_KEYS[key]) return FIXED_SORT_KEYS[key](c);
+    const col = contactColumns.find((cc) => cc.key === key);
+    const v = c.fields?.[key];
+    if (v === null || v === undefined || v === "") return null;
+    if (col?.type === "number" || col?.type === "currency") return Number(v);
+    if (col?.type === "date") return parseAuDate(v);
+    return String(v).toLowerCase();
+  };
+
+  const sortedContacts = contactSort.key
+    ? [...filteredContacts].sort((a, b) => {
+        const va = getContactSortValue(a, contactSort.key);
+        const vb = getContactSortValue(b, contactSort.key);
+        // Blanks always sink to the bottom, regardless of direction.
+        if (va === null && vb === null) return 0;
+        if (va === null) return 1;
+        if (vb === null) return -1;
+        let cmp;
+        if (va instanceof Date && vb instanceof Date) cmp = va.getTime() - vb.getTime();
+        else if (typeof va === "number" && typeof vb === "number") cmp = va - vb;
+        else cmp = String(va).localeCompare(String(vb), undefined, { numeric: true });
+        return contactSort.dir === "asc" ? cmp : -cmp;
+      })
+    : filteredContacts;
+
+  const sortIndicator = (key) => {
+    if (contactSort.key !== key) return <ArrowUpDown size={11} className="text-gray-300 shrink-0" />;
+    return contactSort.dir === "asc" ? (
+      <ArrowUp size={11} className="text-gray-700 shrink-0" />
+    ) : (
+      <ArrowDown size={11} className="text-gray-700 shrink-0" />
+    );
+  };
+
   // Paginated — with thousands of imported leads, rendering every
   // matching row (some tags alone run to 800+) froze the tab. This
   // caps what actually hits the DOM at once; filteredContacts above
@@ -510,9 +578,9 @@ export default function SimpleCRM() {
   const [contactsPage, setContactsPage] = useState(0);
   useEffect(() => {
     setContactsPage(0);
-  }, [contactsTagFilter, search]);
-  const totalContactsPages = Math.max(1, Math.ceil(filteredContacts.length / CONTACTS_PAGE_SIZE));
-  const pagedContacts = filteredContacts.slice(
+  }, [contactsTagFilter, contactsTagMode, search, contactSort.key, contactSort.dir]);
+  const totalContactsPages = Math.max(1, Math.ceil(sortedContacts.length / CONTACTS_PAGE_SIZE));
+  const pagedContacts = sortedContacts.slice(
     contactsPage * CONTACTS_PAGE_SIZE,
     (contactsPage + 1) * CONTACTS_PAGE_SIZE
   );
@@ -1733,31 +1801,15 @@ export default function SimpleCRM() {
               <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
                 Tags
               </div>
-              <div className="px-4 pb-2">
-                <div
-                  className={`flex border border-gray-200 rounded-lg overflow-hidden text-xs font-medium ${
-                    contactsTagFilter === "All" ? "opacity-40 pointer-events-none" : ""
-                  }`}
+              <div className={`px-4 pb-2 ${contactsTagFilter === "All" ? "opacity-40 pointer-events-none" : ""}`}>
+                <select
+                  value={contactsTagMode}
+                  onChange={(e) => setContactsTagMode(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs font-medium outline-none focus:border-gray-400 bg-white"
                 >
-                  <button
-                    onClick={() => setContactsTagMode("is")}
-                    className={`flex-1 px-2 py-1.5 ${
-                      contactsTagMode === "is" ? "bg-gray-900 text-white" : "bg-white text-gray-500 hover:bg-gray-50"
-                    }`}
-                  >
-                    Is
-                  </button>
-                  <button
-                    onClick={() => setContactsTagMode("is not")}
-                    className={`flex-1 px-2 py-1.5 border-l border-gray-200 ${
-                      contactsTagMode === "is not"
-                        ? "bg-gray-900 text-white"
-                        : "bg-white text-gray-500 hover:bg-gray-50"
-                    }`}
-                  >
-                    Is not
-                  </button>
-                </div>
+                  <option value="is">Tag is</option>
+                  <option value="is not">Tag is not</option>
+                </select>
               </div>
               <nav className="flex-1 pb-4">
                 <button
@@ -2072,17 +2124,72 @@ export default function SimpleCRM() {
                         className="w-4 h-4 rounded border-gray-300"
                       />
                     </th>
-                    <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
-                    <th className="px-5 py-3 font-medium whitespace-nowrap">Name</th>
-                    <th className="py-3 font-medium whitespace-nowrap">Phone</th>
-                    <th className="py-3 font-medium whitespace-nowrap">Client</th>
-                    <th className="py-3 font-medium whitespace-nowrap">Tag</th>
-                    <th className="py-3 font-medium whitespace-nowrap">Status</th>
-                    <th className="py-3 font-medium whitespace-nowrap">Last contact</th>
+                    <th className="px-5 py-3 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__leadDate")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Date {sortIndicator("__leadDate")}
+                      </button>
+                    </th>
+                    <th className="px-5 py-3 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__name")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Name {sortIndicator("__name")}
+                      </button>
+                    </th>
+                    <th className="py-3 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__phone")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Phone {sortIndicator("__phone")}
+                      </button>
+                    </th>
+                    <th className="py-3 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__client")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Client {sortIndicator("__client")}
+                      </button>
+                    </th>
+                    <th className="py-3 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__tag")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Tag {sortIndicator("__tag")}
+                      </button>
+                    </th>
+                    <th className="py-3 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__status")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Status {sortIndicator("__status")}
+                      </button>
+                    </th>
+                    <th className="py-3 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__lastContact")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Last contact {sortIndicator("__lastContact")}
+                      </button>
+                    </th>
                     {visibleContactColumns.map((col) => (
                       <th key={col.id} className="px-3 py-3 font-medium whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
-                          <span>{col.label}</span>
+                          <button
+                            onClick={() => toggleContactSort(col.key)}
+                            className="flex items-center gap-1 hover:text-gray-700"
+                          >
+                            <span>{col.label}</span>
+                            {sortIndicator(col.key)}
+                          </button>
                           <button
                             onClick={() => handleDeleteContactColumn(col.id)}
                             className="text-gray-300 hover:text-red-500"
