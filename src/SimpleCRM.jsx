@@ -420,6 +420,8 @@ export default function SimpleCRM() {
     status: "New Lead",
     notes: "",
     fields: {},
+    leadDate: "",
+    tag: "",
   };
   const [showAddContact, setShowAddContact] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
@@ -460,26 +462,34 @@ export default function SimpleCRM() {
   };
   const [dialFilters, setDialFilters] = useState(emptyDialFilters);
 
-  // Secondary sidebar (Contacts) — filters the table down to one
-  // status tag at a time, "All" shows everyone.
+  // Secondary sidebar (Contacts) — filters the table down to one tag
+  // at a time, "All" shows everyone. A contact's tag is free text —
+  // for imported leads, the name of the sheet tab/client they came
+  // from (e.g. "9. Khan Legal"); for anything else it's whatever was
+  // typed into the Add Contact modal, or left blank ("Untagged").
   const [contactsTagFilter, setContactsTagFilter] = useState("All");
   const contactTagCounts = contacts.reduce((acc, c) => {
-    acc[c.status] = (acc[c.status] || 0) + 1;
+    const t = c.tag || "Untagged";
+    acc[t] = (acc[t] || 0) + 1;
     return acc;
   }, {});
-  // The fixed status tags first (in their usual order), then any
-  // status value that shows up on a contact but isn't one of the
-  // fixed ones — still a valid thing to filter by.
-  const contactTagNames = [
-    ...Object.keys(statusColors),
-    ...Array.from(new Set(contacts.map((c) => c.status))).filter((s) => s && !statusColors[s]),
-  ];
+  const contactTagNames = Array.from(new Set(contacts.map((c) => c.tag).filter(Boolean))).sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true })
+  );
+  // Stable color per tag — cycles through the same palette used for
+  // client-column select options, keyed by each tag's position in the
+  // sorted list so a given tag always gets the same color this session.
+  const tagColorClasses = (tag) => {
+    const idx = contactTagNames.indexOf(tag);
+    if (idx === -1) return SELECT_COLORS.gray;
+    return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
+  };
 
   const filteredContacts = contacts.filter(
     (c) =>
       (c.name.toLowerCase().includes(search.toLowerCase()) ||
         c.client.toLowerCase().includes(search.toLowerCase())) &&
-      (contactsTagFilter === "All" || c.status === contactsTagFilter)
+      (contactsTagFilter === "All" || (contactsTagFilter === "Untagged" ? !c.tag : c.tag === contactsTagFilter))
   );
 
   // Bulk-select + delete on the Contacts table
@@ -1536,17 +1546,28 @@ export default function SimpleCRM() {
                         : "hover:bg-gray-100"
                     }`}
                   >
-                    <span
-                      className={`truncate text-xs px-2.5 py-1 rounded-full border ${
-                        statusColors[tag] || "bg-gray-50 text-gray-500 border-gray-200"
-                      }`}
-                    >
+                    <span className={`truncate text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
                       {tag}
                     </span>
                     <span className="text-xs text-gray-400 shrink-0">{contactTagCounts[tag] || 0}</span>
                   </button>
                 ))}
-                {contactTagNames.length === 0 && (
+                {contactTagCounts["Untagged"] > 0 && (
+                  <button
+                    onClick={() => setContactsTagFilter("Untagged")}
+                    className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
+                      contactsTagFilter === "Untagged"
+                        ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                        : "hover:bg-gray-100"
+                    }`}
+                  >
+                    <span className="truncate text-xs px-2.5 py-1 rounded-full border bg-gray-50 text-gray-400 border-gray-200">
+                      Untagged
+                    </span>
+                    <span className="text-xs text-gray-400 shrink-0">{contactTagCounts["Untagged"]}</span>
+                  </button>
+                )}
+                {contactTagNames.length === 0 && !contactTagCounts["Untagged"] && (
                   <div className="px-4 py-2 text-xs text-gray-400">No tags yet</div>
                 )}
               </nav>
@@ -1790,9 +1811,11 @@ export default function SimpleCRM() {
                         className="w-4 h-4 rounded border-gray-300"
                       />
                     </th>
+                    <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
                     <th className="px-5 py-3 font-medium whitespace-nowrap">Name</th>
                     <th className="py-3 font-medium whitespace-nowrap">Phone</th>
                     <th className="py-3 font-medium whitespace-nowrap">Client</th>
+                    <th className="py-3 font-medium whitespace-nowrap">Tag</th>
                     <th className="py-3 font-medium whitespace-nowrap">Status</th>
                     <th className="py-3 font-medium whitespace-nowrap">Last contact</th>
                     {contactColumns.map((col) => (
@@ -1830,9 +1853,19 @@ export default function SimpleCRM() {
                           className="w-4 h-4 rounded border-gray-300"
                         />
                       </td>
+                      <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{c.leadDate || "—"}</td>
                       <td className="px-5 py-3.5 font-medium whitespace-nowrap">{c.name}</td>
                       <td className="py-3.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
                       <td className="py-3.5 text-gray-600 whitespace-nowrap">{c.client}</td>
+                      <td className="py-3.5 whitespace-nowrap">
+                        {c.tag ? (
+                          <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(c.tag)}`}>
+                            {c.tag}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300 text-xs">—</span>
+                        )}
+                      </td>
                       <td className="py-3.5 whitespace-nowrap">
                         <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[c.status]}`}>
                           {c.status}
@@ -1849,7 +1882,7 @@ export default function SimpleCRM() {
                   ))}
                   {filteredContacts.length === 0 && (
                     <tr>
-                      <td colSpan={contactColumns.length + 7} className="px-8 py-10 text-center text-sm text-gray-400">
+                      <td colSpan={contactColumns.length + 9} className="px-8 py-10 text-center text-sm text-gray-400">
                         No contacts{contactsTagFilter !== "All" ? ` tagged ${contactsTagFilter}` : ""}
                         {search ? ` match "${search}"` : ""}
                       </td>
@@ -2686,6 +2719,26 @@ export default function SimpleCRM() {
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Lead date</label>
+                  <input
+                    value={contactForm.leadDate}
+                    onChange={(e) => updateContactForm("leadDate", e.target.value)}
+                    placeholder="e.g. 24/11/2025"
+                    className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Tag</label>
+                  <input
+                    value={contactForm.tag}
+                    onChange={(e) => updateContactForm("tag", e.target.value)}
+                    placeholder="e.g. Khan Legal"
+                    className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                  />
                 </div>
               </div>
               <div>

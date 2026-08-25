@@ -24,6 +24,7 @@ import {
   getContactColumns,
   createContactColumn,
   deleteContactColumn,
+  importContactsBulk,
   getConversations,
   logCall,
   logMessage,
@@ -58,7 +59,9 @@ const app = express();
 // sent/accepted — browsers refuse credentialed requests against "*".
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+// Raised from Express's 100kb default — a bulk lead import batch
+// (see /api/contacts-bulk-import) can run to a few MB of JSON.
+app.use(express.json({ limit: "10mb" }));
 
 // Twilio webhooks and the auth endpoints themselves are the only
 // routes reachable without a session cookie.
@@ -379,6 +382,18 @@ app.delete(
     if (!id) return res.status(400).json({ error: "Missing id" });
     await deleteContactColumn(id);
     res.status(204).end();
+  })
+);
+
+// Bulk-loads leads from an external source — see api/contacts-bulk-import.js.
+app.post(
+  "/api/contacts-bulk-import",
+  dbRoute(async (req, res) => {
+    const records = Array.isArray(req.body) ? req.body : req.body?.records;
+    if (!Array.isArray(records) || !records.length) {
+      return res.status(400).json({ error: "Expected a non-empty array of contact records" });
+    }
+    res.json(await importContactsBulk(records));
   })
 );
 

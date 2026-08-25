@@ -86,12 +86,20 @@ export async function ensureSchema() {
         last_contact TEXT,
         notes TEXT,
         fields JSONB DEFAULT '{}',
+        lead_date TEXT,
+        tag TEXT,
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
-    // Table already existed before `fields` was added — safe no-op if
-    // it's already there.
+    // Table already existed before these were added — safe no-op once
+    // they're there. lead_date is the original date the lead came in
+    // (e.g. from an imported sheet), separate from last_contact which
+    // tracks outreach. tag is the free-text label shown in the
+    // Contacts secondary sidebar — for imported leads, the name of the
+    // sheet tab/client they came from.
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS fields JSONB DEFAULT '{}'`);
+    await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS lead_date TEXT`);
+    await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS tag TEXT`);
     await query(`
       CREATE TABLE IF NOT EXISTS contact_columns (
         id SERIAL PRIMARY KEY,
@@ -451,6 +459,8 @@ function contactFromRow(r) {
     lastContact: r.last_contact,
     notes: r.notes,
     fields: r.fields || {},
+    leadDate: r.lead_date,
+    tag: r.tag,
     createdAt: r.created_at,
   };
 }
@@ -462,7 +472,7 @@ export async function getContacts() {
 
 export async function createContact(c) {
   const rows = await query(
-    "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes, fields) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+    "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes, fields, lead_date, tag) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
     [
       c.name,
       c.email || "",
@@ -472,6 +482,8 @@ export async function createContact(c) {
       c.lastContact || "Today",
       c.notes || "",
       JSON.stringify(c.fields || {}),
+      c.leadDate || null,
+      c.tag || null,
     ]
   );
   return contactFromRow(rows[0]);
@@ -485,10 +497,20 @@ export async function updateContact(id, patch) {
        status = COALESCE($2, status),
        notes = COALESCE($3, notes),
        last_contact = COALESCE($4, last_contact),
-       fields = fields || $5::jsonb
+       fields = fields || $5::jsonb,
+       lead_date = COALESCE($6, lead_date),
+       tag = COALESCE($7, tag)
      WHERE id = $1
      RETURNING *`,
-    [id, patch.status ?? null, patch.notes ?? null, patch.lastContact ?? null, JSON.stringify(patch.fields || {})]
+    [
+      id,
+      patch.status ?? null,
+      patch.notes ?? null,
+      patch.lastContact ?? null,
+      JSON.stringify(patch.fields || {}),
+      patch.leadDate ?? null,
+      patch.tag ?? null,
+    ]
   );
   return rows[0] ? contactFromRow(rows[0]) : null;
 }
@@ -528,6 +550,103 @@ export async function createContactColumn({ label, type, options }) {
 
 export async function deleteContactColumn(id) {
   await query("DELETE FROM contact_columns WHERE id = $1", [id]);
+}
+
+const IMPORT_SELECT_COLOR_CYCLE = ["blue", "green", "amber", "red", "purple", "gray"];
+
+// Looks at the actual values a column took across an import batch and
+// picks a reasonable column type for it — used so a bulk import of
+// leads with wildly different question sets per source doesn't dump
+// everything into generic text columns. Conservative on purpose: only
+// promotes to "select" or "number" when the data clearly supports it,
+// otherwise falls back to "text" (never guesses at date/currency/url,
+// which are easy to get wrong from free-form sheet data).
+function inferColumnType(values) {
+  const nonEmpty = values.map((v) => String(v ?? "").trim()).filter(Boolean);
+  if (nonEmpty.length === 0) return { type: "text", options: [] };
+
+  const distinct = Array.from(new Set(nonEmpty));
+  if (distinct.length <= 8 && nonEmpty.length >= 3 && distinct.length < nonEmpty.length) {
+    return {
+      type: "select",
+      options: distinct.map((value, i) => ({ value, color: IMPORT_SELECT_COLOR_CYCLE[i % IMPORT_SELECT_COLOR_CYCLE.length] })),
+    };
+  }
+  if (nonEmpty.every((v) => /^-?\d+(\.\d+)?$/.test(v))) {
+    return { type: "number", options: [] };
+  }
+  return { type: "text", options: [] };
+}
+
+// Bulk-imports contacts from an external source (e.g. a leads
+// spreadsheet). Each record's `fields` keys become contact_columns
+// automatically — reusing an existing column by key when the label
+// matches one already created (so shared questions like "Notes"
+// collapse onto one column instead of duplicating per source), and
+// inferring a type for genuinely new ones from the values seen in
+// this batch. Runs as plain sequential inserts, which is fine for a
+// one-off admin import rather than a hot request path.
+export async function importContactsBulk(records) {
+  const existingColumns = await getContactColumns();
+  const columnByKey = new Map(existingColumns.map((c) => [c.key, c]));
+
+  // Collect every field key -> its values across the whole batch, for
+  // columns that don't exist yet.
+  const valuesByNewKey = new Map();
+  for (const r of records) {
+    for (const [label, value] of Object.entries(r.fields || {})) {
+      const key = slugifyColumnKey(label);
+      if (columnByKey.has(key)) continue;
+      if (!valuesByNewKey.has(key)) valuesByNewKey.set(key, { label, values: [] });
+      valuesByNewKey.get(key).values.push(value);
+    }
+  }
+
+  const createdColumns = [];
+  const [{ next_position }] = await query(
+    "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM contact_columns"
+  );
+  let position = next_position;
+  for (const [key, { label, values }] of valuesByNewKey) {
+    const { type, options } = inferColumnType(values);
+    const rows = await query(
+      "INSERT INTO contact_columns (key, label, type, options, position) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (key) DO NOTHING RETURNING *",
+      [key, label, type, JSON.stringify(options), position]
+    );
+    if (rows[0]) {
+      const col = { id: rows[0].id, key, label, type, options, position };
+      columnByKey.set(key, col);
+      createdColumns.push(col);
+      position += 1;
+    }
+  }
+
+  let imported = 0;
+  for (const r of records) {
+    const fields = {};
+    for (const [label, value] of Object.entries(r.fields || {})) {
+      const col = columnByKey.get(slugifyColumnKey(label));
+      if (col) fields[col.key] = value;
+    }
+    await query(
+      "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes, fields, lead_date, tag) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+      [
+        r.name || "Unknown",
+        r.email || "",
+        r.phone || "",
+        r.client || "",
+        r.status || "New Lead",
+        r.lastContact || "",
+        r.notes || "",
+        JSON.stringify(fields),
+        r.leadDate || null,
+        r.tag || null,
+      ]
+    );
+    imported += 1;
+  }
+
+  return { imported, columnsCreated: createdColumns.length };
 }
 
 // Strips a phone number down to just its Australian local digits
