@@ -88,3 +88,53 @@ separate backend hosting needed. Two things to set up in the Vercel project:
 Redeploy after changing env vars (Vercel only picks them up on a fresh
 build). You can sanity-check they're set correctly by visiting
 `https://<your-vercel-domain>/api/health` — it should return `{"ok":true}`.
+
+## Database (Postgres / Neon)
+
+Contacts, conversations, dialler lists, and the call log are stored in a
+Postgres database, not the browser — so they persist across devices and
+survive a redeploy. Same setup pattern as Twilio: one database, wherever the
+app is running (locally or on Vercel).
+
+### 1. Create the database
+
+1. Open your project on **vercel.com** → **Storage** tab → **Create Database**.
+2. Choose **Postgres** (this provisions a Neon database and connects it to
+   your project automatically).
+3. Vercel injects `POSTGRES_URL` (and a couple of related vars) into your
+   project's environment variables for you — no manual copy-paste needed for
+   the deployed site.
+
+### 2. Configure local dev
+
+Copy the `POSTGRES_URL` value from **Project Settings → Environment
+Variables** in the Vercel dashboard into your local `.env`:
+
+```bash
+POSTGRES_URL=postgres://...
+```
+
+The same database works for both local dev and production — there's no
+separate "local database" to set up.
+
+### 3. That's it — the schema creates itself
+
+The first API request creates the tables if they don't exist yet and seeds
+them with the app's sample data (same contacts/clients you saw before). No
+manual migration step. Restart `npm run dev:all` (or redeploy on Vercel) and
+the app will start reading and writing through the database automatically.
+
+Check it worked by visiting `/api/health` — the `database` field should say
+`"connected"` instead of `"not configured — set POSTGRES_URL"`.
+
+### How it fits together
+
+- `server/db.js` — shared database layer (schema, seed data, queries), used
+  by both `server/index.js` (local dev) and the Vercel functions below.
+- `api/contacts.js`, `api/clients.js`, `api/conversations.js`,
+  `api/dial-lists.js`, `api/called-leads.js`, `api/call-log.js` — one
+  serverless function per resource, deployed automatically with the app.
+- `src/lib/api.js` — frontend fetch wrapper the app uses to read/write these.
+- If the database isn't reachable, the app falls back to its built-in sample
+  data and shows a dismissible banner explaining that changes won't be saved
+  until it's fixed — it won't just show a blank screen.

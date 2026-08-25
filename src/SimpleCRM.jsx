@@ -18,6 +18,7 @@ import {
   ClipboardList,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
+import { api } from "./lib/api";
 
 // ---------- Sample data ----------
 const initialContacts = [
@@ -217,35 +218,6 @@ function formatCallDuration(ms) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-// ---------- Persistence ----------
-// A useState that reads its initial value from localStorage and
-// writes back to it on every change, so data the user creates
-// (contacts, dialler lists, call history…) survives a page refresh
-// instead of resetting to the sample data. Falls back to `initialValue`
-// if storage is empty, unavailable (private browsing), or corrupted.
-const STORAGE_PREFIX = "scalbl-crm:";
-function usePersistentState(key, initialValue) {
-  const storageKey = STORAGE_PREFIX + key;
-  const [state, setState] = useState(() => {
-    try {
-      const stored = window.localStorage.getItem(storageKey);
-      return stored ? JSON.parse(stored) : initialValue;
-    } catch {
-      return initialValue;
-    }
-  });
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(state));
-    } catch {
-      // storage unavailable or full — nothing more we can do here
-    }
-  }, [storageKey, state]);
-
-  return [state, setState];
-}
-
 // ---------- Sidebar ----------
 const navItems = [
   { key: "conversation", label: "Conversation", icon: MessageSquare },
@@ -258,11 +230,54 @@ const navItems = [
 
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
-  const [contacts, setContacts] = usePersistentState("contacts", initialContacts);
-  const [clients] = useState(initialClients);
-  const [conversations, setConversations] = usePersistentState("conversations", initialConversations);
+  const [contacts, setContacts] = useState(initialContacts);
+  const [clients, setClients] = useState(initialClients);
+  const [conversations, setConversations] = useState(initialConversations);
   const [activeConvo, setActiveConvo] = useState(1);
   const [search, setSearch] = useState("");
+
+  // Loads everything from the database on mount. If the request fails
+  // (database not configured yet, network issue, …) the sample data
+  // above stays in place so the app is still usable, and a banner
+  // explains that changes won't be saved until it's fixed.
+  const [dbLoading, setDbLoading] = useState(true);
+  const [dbError, setDbError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [clientsData, contactsData, conversationsData, dialListsData, calledLeadIdsData, callLogData] =
+          await Promise.all([
+            api.get("/api/clients"),
+            api.get("/api/contacts"),
+            api.get("/api/conversations"),
+            api.get("/api/dial-lists"),
+            api.get("/api/called-leads"),
+            api.get("/api/call-log"),
+          ]);
+        if (cancelled) return;
+        setClients(clientsData);
+        setContacts(contactsData);
+        setConversations(conversationsData);
+        setDialLists(dialListsData);
+        setCalledLeadIds(calledLeadIdsData);
+        setCallLog(callLogData);
+      } catch (err) {
+        if (!cancelled) {
+          setDbError(
+            err.message ||
+              "Could not load data from the database — showing sample data instead. Changes won't be saved."
+          );
+        }
+      } finally {
+        if (!cancelled) setDbLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Add-contact modal
   const emptyContactForm = {
@@ -278,20 +293,23 @@ export default function SimpleCRM() {
   const updateContactForm = (key, value) =>
     setContactForm((f) => ({ ...f, [key]: value }));
 
-  const handleAddContact = (e) => {
+  const handleAddContact = async (e) => {
     e.preventDefault();
     if (!contactForm.name.trim() || !contactForm.phone.trim()) return;
-    const newContact = {
-      id: Math.max(0, ...contacts.map((c) => c.id)) + 1,
+    const payload = {
       ...contactForm,
       name: contactForm.name.trim(),
       phone: contactForm.phone.trim(),
       lastContact: "Today",
-      createdAt: new Date().toISOString(),
     };
-    setContacts((cs) => [...cs, newContact]);
-    setContactForm(emptyContactForm);
-    setShowAddContact(false);
+    try {
+      const created = await api.post("/api/contacts", payload);
+      setContacts((cs) => [...cs, created]);
+      setContactForm(emptyContactForm);
+      setShowAddContact(false);
+    } catch (err) {
+      setDbError(err.message || "Could not save the new contact — try again.");
+    }
   };
 
   // Powerdialler state
@@ -360,6 +378,7 @@ export default function SimpleCRM() {
     const message = { id: `call-${lead.id}-${now.getTime()}`, type: "call", text: summary, time: timeLabel };
 
     const existing = conversations.find((c) => c.leadId === lead.id);
+    let tempId = existing?.id;
     if (existing) {
       const updated = {
         ...existing,
@@ -371,9 +390,9 @@ export default function SimpleCRM() {
       setConversations((cs) => [updated, ...cs.filter((c) => c.id !== existing.id)]);
       setActiveConvo(updated.id);
     } else {
-      const newId = conversations.length ? Math.max(...conversations.map((c) => c.id)) + 1 : 1;
+      tempId = conversations.length ? Math.max(...conversations.map((c) => c.id)) + 1 : 1;
       const newConvo = {
-        id: newId,
+        id: tempId,
         leadId: lead.id,
         name: lead.name,
         preview: summary,
@@ -382,19 +401,31 @@ export default function SimpleCRM() {
         messages: [message],
       };
       setConversations((cs) => [newConvo, ...cs]);
-      setActiveConvo(newId);
+      setActiveConvo(tempId);
     }
+
+    // Persist to the database. For a brand-new conversation, reconcile
+    // our locally-guessed id with the real one the server generated.
+    api
+      .post("/api/conversations", { leadId: lead.id, name: lead.name, text: summary, time: timeLabel })
+      .then(({ conversationId }) => {
+        if (!existing && conversationId && conversationId !== tempId) {
+          setConversations((cs) => cs.map((c) => (c.id === tempId ? { ...c, id: conversationId } : c)));
+          setActiveConvo((prev) => (prev === tempId ? conversationId : prev));
+        }
+      })
+      .catch((err) => setDbError(err.message || "Could not save the call to the conversation."));
   };
 
   // ----- Power Dialler session (auto-dial through a list) -----
-  const [dialLists, setDialLists] = usePersistentState("dialLists", []); // [{ id, name, leadIds }]
+  const [dialLists, setDialLists] = useState([]); // [{ id, name, leadIds }]
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
   const [newListName, setNewListName] = useState("");
-  const [calledLeadIds, setCalledLeadIds] = usePersistentState("calledLeadIds", []); // leads already worked, across all lists
+  const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
   const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, secondsLeft }
-  const [callLog, setCallLog] = usePersistentState("callLog", []);
+  const [callLog, setCallLog] = useState([]);
 
   // Kept in sync with `session` so the long-lived Twilio call event
   // handlers below (registered once per call, not re-created each
@@ -413,14 +444,24 @@ export default function SimpleCRM() {
   const remainingInList = (leadIds) =>
     leadIds.filter((id) => !calledLeadIds.includes(id) && dialQueue.some((l) => l.id === id));
 
-  const saveSelectedAsList = () => {
+  const saveSelectedAsList = async () => {
     if (!newListName.trim() || selectedLeadIds.length === 0) return;
-    setDialLists((ls) => [...ls, { id: `list-${Date.now()}`, name: newListName.trim(), leadIds: selectedLeadIds }]);
+    const name = newListName.trim();
+    const leadIds = selectedLeadIds;
     setSelectedLeadIds([]);
     setNewListName("");
+    try {
+      const created = await api.post("/api/dial-lists", { name, leadIds });
+      setDialLists((ls) => [...ls, created]);
+    } catch (err) {
+      setDbError(err.message || "Could not save the list.");
+    }
   };
 
-  const deleteDialList = (id) => setDialLists((ls) => ls.filter((l) => l.id !== id));
+  const deleteDialList = (id) => {
+    setDialLists((ls) => ls.filter((l) => l.id !== id));
+    api.delete(`/api/dial-lists?id=${id}`).catch((err) => setDbError(err.message || "Could not delete the list."));
+  };
 
   // Kicks off a Power Dialler session: works through `leadIds` in
   // order, top to bottom, placing the first call immediately.
@@ -478,21 +519,26 @@ export default function SimpleCRM() {
     setContacts((cs) =>
       cs.map((c) => (c.id === lead.id ? { ...c, status, notes, lastContact: "Today" } : c))
     );
+    const tempLogId = `${lead.id}-${Date.now()}`;
     setCallLog((log) => [
-      {
-        id: `${lead.id}-${Date.now()}`,
-        leadId: lead.id,
-        name: lead.name,
-        phone: lead.phone,
-        client: lead.client,
-        status,
-        notes,
-        calledAt: new Date().toISOString(),
-      },
+      { id: tempLogId, leadId: lead.id, name: lead.name, phone: lead.phone, client: lead.client, status, notes, calledAt: new Date().toISOString() },
       ...log,
     ]);
     setCalledLeadIds((ids) => [...ids, lead.id]);
     setWrapUp(null);
+
+    // Persist to the database — fire-and-forget, surfaced as a banner
+    // on failure rather than blocking the session from moving on.
+    api
+      .patch("/api/contacts", { id: lead.id, status, notes, lastContact: "Today" })
+      .catch((err) => setDbError(err.message || "Could not save the updated lead."));
+    api
+      .post("/api/call-log", { leadId: lead.id, name: lead.name, phone: lead.phone, client: lead.client, status, notes })
+      .then((saved) => {
+        if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
+      })
+      .catch((err) => setDbError(err.message || "Could not save the call log entry."));
+    api.post("/api/called-leads", { leadId: lead.id }).catch(() => {});
 
     if (!session) return;
     const remainingQueue = session.queue.filter((id) => id !== lead.id);
@@ -598,6 +644,16 @@ export default function SimpleCRM() {
 
       {/* Main */}
       <main className="flex-1 overflow-hidden flex flex-col">
+        {dbError && (
+          <div className="flex items-start gap-2.5 bg-red-50 border-b border-red-200 px-4 py-2.5 text-sm text-red-700 shrink-0">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            <div className="flex-1">{dbError}</div>
+            <button onClick={() => setDbError("")} className="text-red-400 hover:text-red-600">
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Conversation */}
         {page === "conversation" && (
           <div className="flex flex-1 overflow-hidden">
