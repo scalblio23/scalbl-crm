@@ -713,10 +713,13 @@ export default function SimpleCRM() {
     }
   };
 
-  // Bulk lead import — a few thousand rows, can take a while, hence
-  // the loading state (the button disables + shows a spinner rather
-  // than looking hung).
+  // Bulk lead import — a few thousand rows. A single request trying
+  // to insert all of them at once was hitting Vercel's serverless
+  // request timeout (504), so this drives its own paging loop instead
+  // — each call only imports a few hundred rows and returns where to
+  // resume from, well inside any timeout.
   const [importingContacts, setImportingContacts] = useState(false);
+  const [importProgress, setImportProgress] = useState(null); // { inserted, total } or null
   const handleImportContacts = async () => {
     if (
       !window.confirm(
@@ -725,8 +728,16 @@ export default function SimpleCRM() {
     )
       return;
     setImportingContacts(true);
+    setImportProgress(null);
     try {
-      await api.post("/api/contacts-import", {});
+      let offset = 0;
+      let done = false;
+      while (!done) {
+        const result = await api.post("/api/contacts-import", { offset, limit: 500 });
+        offset = result.nextOffset;
+        done = result.done;
+        setImportProgress({ inserted: offset, total: result.total });
+      }
       const [contactsData, columnsData] = await Promise.all([
         api.get("/api/contacts"),
         api.get("/api/contact-columns"),
@@ -738,6 +749,7 @@ export default function SimpleCRM() {
       setDbError(err.message || "Could not import the lead list.");
     } finally {
       setImportingContacts(false);
+      setImportProgress(null);
     }
   };
 
@@ -1829,7 +1841,11 @@ export default function SimpleCRM() {
                   ) : (
                     <Upload size={15} />
                   )}
-                  {importingContacts ? "Importing…" : "Import leads"}
+                  {importingContacts
+                    ? importProgress
+                      ? `Importing ${importProgress.inserted}/${importProgress.total}…`
+                      : "Importing…"
+                    : "Import leads"}
                 </button>
                 <button
                   onClick={() => setShowAddContact(true)}

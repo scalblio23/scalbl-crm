@@ -650,15 +650,7 @@ export async function importContactsBulk(records) {
   return { imported, columnsCreated: createdColumns.length };
 }
 
-// Wipes existing contacts + column definitions and replaces them with
-// the real lead data imported from the team's spreadsheet. Safe to
-// re-run — it's a full reset, not an incremental merge (same pattern
-// as importClientData). Inserts in batches rather than one row at a
-// time — this is a few thousand rows, and one query per row would be
-// needlessly slow.
-export async function importContactData() {
-  await query("DELETE FROM contacts");
-  await query("DELETE FROM contact_columns");
+async function seedContactColumnsForImport() {
   for (let i = 0; i < CONTACT_COLUMNS.length; i++) {
     const c = CONTACT_COLUMNS[i];
     await query(
@@ -666,11 +658,15 @@ export async function importContactData() {
       [c.key, c.label, c.type, JSON.stringify(c.options || []), i]
     );
   }
+}
 
+// Inserts a batch of already-shaped contact rows in chunks of 300 —
+// one query per row would be needlessly slow for a few thousand rows.
+async function insertContactRows(rows) {
   const COLS_PER_ROW = 10;
   const BATCH_SIZE = 300;
-  for (let i = 0; i < IMPORTED_CONTACTS.length; i += BATCH_SIZE) {
-    const batch = IMPORTED_CONTACTS.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
     const placeholders = [];
     const params = [];
     batch.forEach((c, idx) => {
@@ -695,8 +691,40 @@ export async function importContactData() {
       params
     );
   }
+}
 
-  return { contacts: IMPORTED_CONTACTS.length, columns: CONTACT_COLUMNS.length };
+// Wipes existing contacts + column definitions and replaces them with
+// the real lead data imported from the team's spreadsheet, one page
+// at a time. Safe to re-run — it's a full reset, not an incremental
+// merge (same pattern as importClientData) — the wipe + column setup
+// only happens on the first page (offset 0), so calling this
+// repeatedly with increasing offsets resumes correctly rather than
+// re-wiping every call. Paginated specifically so each call finishes
+// well inside Vercel's serverless request timeout — a single request
+// trying to insert all ~6,500 rows in one go was hitting a 504.
+export async function importContactDataBatch({ offset = 0, limit = 500 } = {}) {
+  if (offset <= 0) {
+    await query("DELETE FROM contacts");
+    await query("DELETE FROM contact_columns");
+    await seedContactColumnsForImport();
+  }
+  const slice = IMPORTED_CONTACTS.slice(offset, offset + limit);
+  await insertContactRows(slice);
+  const nextOffset = offset + slice.length;
+  return {
+    inserted: slice.length,
+    nextOffset,
+    total: IMPORTED_CONTACTS.length,
+    done: nextOffset >= IMPORTED_CONTACTS.length,
+    columns: CONTACT_COLUMNS.length,
+  };
+}
+
+// Full, single-shot import — fine for local dev (no request timeout
+// to worry about), but risks a 504 if called against the deployed
+// site for a batch this large. Prefer importContactDataBatch there.
+export async function importContactData() {
+  return importContactDataBatch({ offset: 0, limit: IMPORTED_CONTACTS.length });
 }
 
 // Strips a phone number down to just its Australian local digits
