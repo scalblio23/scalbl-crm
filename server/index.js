@@ -68,6 +68,25 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// Everything the app needs on first load, in one request — see
+// api/bootstrap.js for why this matters more than it might look.
+app.get(
+  "/api/bootstrap",
+  dbRoute(async (req, res) => {
+    const [clients, clientColumnsData, contacts, conversations, dialLists, calledLeadIds, callLog] = await Promise.all([
+      getClients(),
+      getClientColumns(),
+      getContacts(),
+      getConversations(),
+      getDialLists(),
+      getCalledLeadIds(),
+      getCallLog(),
+    ]);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ clients, clientColumns: clientColumnsData, contacts, conversations, dialLists, calledLeadIds, callLog });
+  })
+);
+
 // ---------- Twilio calling ----------
 
 // Mints a short-lived Access Token so the browser can register as a

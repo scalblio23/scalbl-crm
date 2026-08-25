@@ -223,10 +223,16 @@ const navItems = [
 
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
-  const [contacts, setContacts] = useState(initialContacts);
-  const [clients, setClients] = useState(initialClients);
+  // Start empty rather than pre-filled with the sample data — that
+  // data is only ever a fallback for when the database fetch below
+  // genuinely fails, not something to flash on screen while it's
+  // still loading (that made deleted leads look like they'd come
+  // back, and real conversations look like they'd disappeared, for
+  // however long the initial fetch took).
+  const [contacts, setContacts] = useState([]);
+  const [clients, setClients] = useState([]);
   const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
-  const [conversations, setConversations] = useState(initialConversations);
+  const [conversations, setConversations] = useState([]);
   const [activeConvo, setActiveConvo] = useState(null);
   const [selectedConvoIds, setSelectedConvoIds] = useState([]);
   const [search, setSearch] = useState("");
@@ -241,16 +247,8 @@ export default function SimpleCRM() {
     let cancelled = false;
     (async () => {
       try {
-        const [clientsData, clientColumnsData, contactsData, conversationsData, dialListsData, calledLeadIdsData, callLogData] =
-          await Promise.all([
-            api.get("/api/clients"),
-            api.get("/api/client-columns"),
-            api.get("/api/contacts"),
-            api.get("/api/conversations"),
-            api.get("/api/dial-lists"),
-            api.get("/api/called-leads"),
-            api.get("/api/call-log"),
-          ]);
+        const { clients: clientsData, clientColumns: clientColumnsData, contacts: contactsData, conversations: conversationsData, dialLists: dialListsData, calledLeadIds: calledLeadIdsData, callLog: callLogData } =
+          await api.get("/api/bootstrap");
         if (cancelled) return;
         setClients(clientsData);
         setClientColumns(clientColumnsData);
@@ -261,6 +259,12 @@ export default function SimpleCRM() {
         setCallLog(callLogData);
       } catch (err) {
         if (!cancelled) {
+          // Genuine failure (DB not configured, network issue, …) —
+          // fall back to the built-in sample data so the app is still
+          // usable, rather than sitting empty.
+          setClients(initialClients);
+          setContacts(initialContacts);
+          setConversations(initialConversations);
           setDbError(
             err.message ||
               "Could not load data from the database — showing sample data instead. Changes won't be saved."
@@ -978,6 +982,17 @@ export default function SimpleCRM() {
     // it only ever happens once no matter how the call ends.
     hangUp();
   };
+
+  if (dbLoading) {
+    return (
+      <div
+        className="flex h-screen items-center justify-center gap-2 bg-white text-sm text-gray-400"
+        style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
+      >
+        <Loader2 size={16} className="animate-spin" /> Loading…
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-white text-gray-900" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
