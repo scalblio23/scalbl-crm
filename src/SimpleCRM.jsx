@@ -10,6 +10,8 @@ import {
   PhoneCall,
   PhoneOff,
   Circle,
+  ExternalLink,
+  X,
 } from "lucide-react";
 
 // ---------- Sample data ----------
@@ -83,10 +85,38 @@ const initialContacts = [
 ];
 
 const initialClients = [
-  { id: 1, name: "Lux Solar", industry: "Solar", leads: 42, adsLive: true },
-  { id: 2, name: "Stoprent Properties", industry: "Property", leads: 31, adsLive: true },
-  { id: 3, name: "Silverloom Advisory", industry: "Finance", leads: 18, adsLive: true },
-  { id: 4, name: "Lasertronics", industry: "Office Equipment", leads: 9, adsLive: false },
+  {
+    id: 1,
+    name: "Lux Solar",
+    industry: "Solar",
+    leads: 42,
+    adsLive: true,
+    script: "https://scripts.scalbl.io/lux-solar",
+  },
+  {
+    id: 2,
+    name: "Stoprent Properties",
+    industry: "Property",
+    leads: 31,
+    adsLive: true,
+    script: "https://scripts.scalbl.io/stoprent-properties",
+  },
+  {
+    id: 3,
+    name: "Silverloom Advisory",
+    industry: "Finance",
+    leads: 18,
+    adsLive: true,
+    script: "https://scripts.scalbl.io/silverloom-advisory",
+  },
+  {
+    id: 4,
+    name: "Lasertronics",
+    industry: "Office Equipment",
+    leads: 9,
+    adsLive: false,
+    script: "https://scripts.scalbl.io/lasertronics",
+  },
 ];
 
 const initialConversations = [
@@ -123,7 +153,15 @@ export default function SimpleCRM() {
   // Powerdialler state
   const [calling, setCalling] = useState(false);
   const [activeLeadId, setActiveLeadId] = useState(null);
-  const [dialSearch, setDialSearch] = useState("");
+  const emptyDialFilters = {
+    name: "",
+    email: "",
+    phone: "",
+    client: "All",
+    notes: "",
+    status: "All",
+  };
+  const [dialFilters, setDialFilters] = useState(emptyDialFilters);
 
   const filteredContacts = contacts.filter(
     (c) =>
@@ -131,16 +169,30 @@ export default function SimpleCRM() {
       c.client.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Leads for the powerdialler, newest first, filterable by any field
+  // A client's call script, derived from the Client column: look up the
+  // client by name in the client list, then read its script link.
+  const getClientScript = (clientName) =>
+    clients.find((cl) => cl.name === clientName)?.script;
+
+  // Leads for the powerdialler, newest first, filterable by every column
   const dialQueue = [...contacts].sort(
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
   );
-  const dialQuery = dialSearch.toLowerCase();
-  const filteredDialQueue = dialQueue.filter((l) =>
-    [l.name, l.email, l.phone, l.client, l.status, l.notes]
-      .join(" ")
-      .toLowerCase()
-      .includes(dialQuery)
+  const dialClientOptions = ["All", ...clients.map((cl) => cl.name)];
+  const dialStatusOptions = ["All", ...Object.keys(statusColors)];
+  const dialFiltersActive = Object.entries(dialFilters).some(
+    ([key, value]) => value !== emptyDialFilters[key]
+  );
+  const updateDialFilter = (key, value) =>
+    setDialFilters((f) => ({ ...f, [key]: value }));
+  const filteredDialQueue = dialQueue.filter(
+    (l) =>
+      l.name.toLowerCase().includes(dialFilters.name.toLowerCase()) &&
+      l.email.toLowerCase().includes(dialFilters.email.toLowerCase()) &&
+      l.phone.toLowerCase().includes(dialFilters.phone.toLowerCase()) &&
+      (dialFilters.client === "All" || l.client === dialFilters.client) &&
+      l.notes.toLowerCase().includes(dialFilters.notes.toLowerCase()) &&
+      (dialFilters.status === "All" || l.status === dialFilters.status)
   );
   const activeLead = dialQueue.find((l) => l.id === activeLeadId) || null;
 
@@ -283,15 +335,14 @@ export default function SimpleCRM() {
                   {filteredDialQueue.length} lead{filteredDialQueue.length === 1 ? "" : "s"} · newest first
                 </div>
               </div>
-              <div className="relative">
-                <Search size={15} className="absolute left-3 top-2.5 text-gray-400" />
-                <input
-                  value={dialSearch}
-                  onChange={(e) => setDialSearch(e.target.value)}
-                  placeholder="Filter leads"
-                  className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-64"
-                />
-              </div>
+              {dialFiltersActive && (
+                <button
+                  onClick={() => setDialFilters(emptyDialFilters)}
+                  className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
+                >
+                  <X size={14} /> Clear filters
+                </button>
+              )}
             </div>
 
             {/* Hotseat — the live call in progress */}
@@ -321,12 +372,24 @@ export default function SimpleCRM() {
                         )}
                       </div>
                     </div>
-                    <button
-                      onClick={() => setCalling(false)}
-                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
-                    >
-                      <PhoneOff size={15} /> End call
-                    </button>
+                    <div className="flex flex-col items-end gap-2 shrink-0">
+                      <button
+                        onClick={() => setCalling(false)}
+                        className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold"
+                      >
+                        <PhoneOff size={15} /> End call
+                      </button>
+                      {getClientScript(activeLead.client) && (
+                        <a
+                          href={getClientScript(activeLead.client)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 text-sm font-medium text-green-700 hover:text-green-800"
+                        >
+                          <ExternalLink size={14} /> {activeLead.client} script
+                        </a>
+                      )}
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -350,7 +413,70 @@ export default function SimpleCRM() {
                       <th className="px-5 py-3 font-medium">Client</th>
                       <th className="px-5 py-3 font-medium">Notes</th>
                       <th className="px-5 py-3 font-medium">Status</th>
+                      <th className="px-5 py-3 font-medium">Script</th>
                       <th className="px-5 py-3 font-medium text-right">Action</th>
+                    </tr>
+                    <tr className="border-b border-gray-100 bg-gray-50/60">
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.name}
+                          onChange={(e) => updateDialFilter("name", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.email}
+                          onChange={(e) => updateDialFilter("email", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.phone}
+                          onChange={(e) => updateDialFilter("phone", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <select
+                          value={dialFilters.client}
+                          onChange={(e) => updateDialFilter("client", e.target.value)}
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        >
+                          {dialClientOptions.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.notes}
+                          onChange={(e) => updateDialFilter("notes", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <select
+                          value={dialFilters.status}
+                          onChange={(e) => updateDialFilter("status", e.target.value)}
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        >
+                          {dialStatusOptions.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                      </th>
+                      <th className="px-5 pb-3" />
+                      <th className="px-5 pb-3" />
                     </tr>
                   </thead>
                   <tbody>
@@ -372,6 +498,20 @@ export default function SimpleCRM() {
                           <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[lead.status]}`}>
                             {lead.status}
                           </span>
+                        </td>
+                        <td className="px-5 py-3.5">
+                          {getClientScript(lead.client) ? (
+                            <a
+                              href={getClientScript(lead.client)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"
+                            >
+                              <ExternalLink size={13} /> Script
+                            </a>
+                          ) : (
+                            <span className="text-xs text-gray-300">—</span>
+                          )}
                         </td>
                         <td className="px-5 py-3.5 text-right">
                           {calling && activeLead?.id === lead.id ? (
@@ -397,8 +537,8 @@ export default function SimpleCRM() {
                     ))}
                     {filteredDialQueue.length === 0 && (
                       <tr>
-                        <td colSpan={7} className="px-5 py-10 text-center text-sm text-gray-400">
-                          No leads match "{dialSearch}"
+                        <td colSpan={8} className="px-5 py-10 text-center text-sm text-gray-400">
+                          No leads match the current filters
                         </td>
                       </tr>
                     )}
@@ -436,8 +576,20 @@ export default function SimpleCRM() {
                       {cl.adsLive ? "Ads live" : "Not live"}
                     </span>
                   </div>
-                  <div className="mt-4 text-sm text-gray-600">
-                    <span className="font-semibold text-gray-900">{cl.leads}</span> leads this month
+                  <div className="mt-4 flex items-center justify-between">
+                    <div className="text-sm text-gray-600">
+                      <span className="font-semibold text-gray-900">{cl.leads}</span> leads this month
+                    </div>
+                    {cl.script && (
+                      <a
+                        href={cl.script}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"
+                      >
+                        <ExternalLink size={13} /> Call script
+                      </a>
+                    )}
                   </div>
                 </div>
               ))}
