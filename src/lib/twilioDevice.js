@@ -51,12 +51,25 @@ async function getDevice(identity) {
   return deviceReady;
 }
 
+// Twilio requires E.164 (e.g. +61412334556) to actually route a call —
+// a locally-formatted number like "0412 334 556" gets rejected almost
+// instantly (the dial-on/dial-off sound with no ringing). Our sample
+// data uses Australian local format, so normalize 0-prefixed numbers
+// to +61 here rather than trusting every caller to pass E.164.
+function toE164(rawPhone) {
+  const cleaned = rawPhone.replace(/[^\d+]/g, "");
+  if (cleaned.startsWith("+")) return cleaned;
+  if (cleaned.startsWith("0")) return `+61${cleaned.slice(1)}`;
+  if (cleaned.startsWith("61")) return `+${cleaned}`;
+  return cleaned;
+}
+
 // Places an outbound call to `phoneNumber` and returns the live Call
 // object — attach 'accept' / 'disconnect' / 'cancel' / 'error'
 // listeners to it to drive UI state.
 export async function placeCall(phoneNumber, identity = "rep") {
   const dev = await getDevice(identity);
-  return dev.connect({ params: { To: phoneNumber } });
+  return dev.connect({ params: { To: toE164(phoneNumber) } });
 }
 
 // Ends whatever call is currently in progress on this device, if any.
