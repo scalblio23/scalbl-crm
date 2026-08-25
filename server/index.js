@@ -5,7 +5,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { missingTwilioEnv, mintAccessToken, buildVoiceTwiml } from "./twilioCore.js";
+import { missingTwilioEnv, mintAccessToken, buildVoiceTwiml, sendSms } from "./twilioCore.js";
 import {
   isDbConfigured,
   ensureSchema,
@@ -23,6 +23,8 @@ import {
   deleteContacts,
   getConversations,
   logCall,
+  logMessage,
+  findContactByPhone,
   deleteConversations,
   getDialLists,
   createDialList,
@@ -105,6 +107,55 @@ app.post("/api/status", (req, res) => {
   );
   res.sendStatus(204);
 });
+
+// ---------- SMS ----------
+
+// Sends an outbound SMS and logs it onto the lead's conversation.
+app.post(
+  "/api/sms-send",
+  dbRoute(async (req, res) => {
+    const missing = missingTwilioEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const { leadId, name, phone, text } = req.body || {};
+    if (!phone || !text) return res.status(400).json({ error: "Missing phone or text" });
+    await sendSms({ to: phone, body: text });
+    const timeLabel = new Date().toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
+    const conversationId = await logMessage({
+      leadId: leadId || null,
+      name: name || phone,
+      text,
+      time: timeLabel,
+      type: "text",
+      outgoing: true,
+    });
+    res.status(201).json({ conversationId });
+  })
+);
+
+// Twilio's "A message comes in" webhook — set this as the number's
+// Messaging webhook (POST http://<ngrok-url>/api/sms-inbound in dev).
+app.post(
+  "/api/sms-inbound",
+  dbRoute(async (req, res) => {
+    const from = req.body?.From;
+    const body = req.body?.Body || "";
+    if (from) {
+      const contact = await findContactByPhone(from);
+      const timeLabel = new Date().toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
+      await logMessage({
+        leadId: contact ? contact.id : null,
+        name: contact ? contact.name : from,
+        text: body,
+        time: timeLabel,
+        type: "text",
+        outgoing: false,
+      });
+    }
+    res.type("text/xml").send("<Response></Response>");
+  })
+);
 
 // ---------- Database ----------
 

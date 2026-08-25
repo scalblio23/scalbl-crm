@@ -56,3 +56,25 @@ export function buildVoiceTwiml(to, env = process.env) {
 
   return twiml.toString();
 }
+
+// Same API Key credentials used to mint Voice tokens also work as a
+// REST client for sending SMS — no separate Twilio setup needed.
+function restClient(env = process.env) {
+  return twilio(env.TWILIO_API_KEY_SID, env.TWILIO_API_KEY_SECRET, { accountSid: env.TWILIO_ACCOUNT_SID });
+}
+
+// Sends an outbound SMS. Uses TWILIO_MESSAGING_SERVICE_SID if set
+// (recommended by Twilio — better deliverability, required for some
+// inbound routing setups); otherwise falls back to sending straight
+// from TWILIO_CALLER_ID.
+export async function sendSms({ to, body }, env = process.env) {
+  const client = restClient(env);
+  const params = { to, body };
+  if (env.TWILIO_MESSAGING_SERVICE_SID) {
+    params.messagingServiceSid = env.TWILIO_MESSAGING_SERVICE_SID;
+  } else {
+    params.from = env.TWILIO_CALLER_ID;
+  }
+  const message = await client.messages.create(params);
+  return { sid: message.sid, status: message.status };
+}

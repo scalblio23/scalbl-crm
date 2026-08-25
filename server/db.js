@@ -441,6 +441,26 @@ export async function deleteContacts(ids) {
   await query("DELETE FROM contacts WHERE id = ANY($1::int[])", [ids]);
 }
 
+// Strips a phone number down to just its Australian local digits
+// (drops the country code / leading 0) so a locally-formatted number
+// like "0412 334 556" and Twilio's E.164 "+61412334556" compare equal.
+function normalizeAuPhoneDigits(raw) {
+  const digits = String(raw || "").replace(/\D/g, "");
+  if (digits.startsWith("61")) return digits.slice(2);
+  if (digits.startsWith("0")) return digits.slice(1);
+  return digits;
+}
+
+// Matches an inbound SMS's From number to a contact, for logging it
+// onto the right conversation.
+export async function findContactByPhone(rawPhone) {
+  const target = normalizeAuPhoneDigits(rawPhone);
+  if (!target) return null;
+  const rows = await query("SELECT * FROM contacts");
+  const match = rows.find((r) => normalizeAuPhoneDigits(r.phone) === target);
+  return match ? contactFromRow(match) : null;
+}
+
 export async function getConversations() {
   const convos = await query("SELECT * FROM conversations ORDER BY updated_at DESC");
   const messages = await query("SELECT * FROM messages ORDER BY id ASC");
@@ -457,29 +477,42 @@ export async function getConversations() {
   }));
 }
 
-// Logs a call onto a lead's conversation — creates the conversation if
-// one doesn't exist yet, otherwise appends a message and bumps it.
-export async function logCall({ leadId, name, text, time }) {
-  const existingRows = await query("SELECT id FROM conversations WHERE lead_id = $1", [leadId]);
+// Logs one message onto a lead's conversation — creates the
+// conversation if one doesn't exist yet, otherwise appends and bumps
+// it. Shared by call logging, outbound SMS, and inbound SMS.
+// `leadId` may be null (SMS from a number with no matching contact) —
+// in that case conversations are matched/created by `name` instead.
+export async function logMessage({ leadId, name, text, time, type = "text", outgoing = false }) {
+  const existingRows = leadId
+    ? await query("SELECT id FROM conversations WHERE lead_id = $1", [leadId])
+    : await query("SELECT id FROM conversations WHERE lead_id IS NULL AND name = $1", [name]);
   let conversationId = existingRows[0]?.id;
   if (!conversationId) {
     const rows = await query(
-      "INSERT INTO conversations (lead_id, name, preview, time_label, unread) VALUES ($1,$2,$3,$4,false) RETURNING id",
-      [leadId, name, text, time]
+      "INSERT INTO conversations (lead_id, name, preview, time_label, unread) VALUES ($1,$2,$3,$4,$5) RETURNING id",
+      [leadId, name, text, time, !outgoing]
     );
     conversationId = rows[0].id;
   } else {
     await query(
-      "UPDATE conversations SET preview = $2, time_label = $3, unread = false, updated_at = now() WHERE id = $1",
-      [conversationId, text, time]
+      "UPDATE conversations SET preview = $2, time_label = $3, unread = $4, updated_at = now() WHERE id = $1",
+      [conversationId, text, time, !outgoing]
     );
   }
-  await query("INSERT INTO messages (conversation_id, type, text, time_label, outgoing) VALUES ($1,'call',$2,$3,true)", [
+  await query("INSERT INTO messages (conversation_id, type, text, time_label, outgoing) VALUES ($1,$2,$3,$4,$5)", [
     conversationId,
+    type,
     text,
     time,
+    outgoing,
   ]);
   return conversationId;
+}
+
+// Logs a call onto a lead's conversation — thin wrapper around
+// logMessage kept for backwards-compat call sites.
+export async function logCall({ leadId, name, text, time }) {
+  return logMessage({ leadId, name, text, time, type: "call", outgoing: true });
 }
 
 export async function deleteConversations(ids) {

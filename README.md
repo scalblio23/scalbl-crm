@@ -89,6 +89,27 @@ Redeploy after changing env vars (Vercel only picks them up on a fresh
 build). You can sanity-check they're set correctly by visiting
 `https://<your-vercel-domain>/api/health` — it should return `{"ok":true}`.
 
+## SMS (Twilio)
+
+Uses the same Twilio account and credentials as calling — no separate setup.
+
+- **Outbound**: the message box in the Conversation view sends a real SMS via
+  `POST /api/sms-send`, and logs it onto that lead's conversation. Click
+  **New** above the conversation list to text a contact who doesn't have a
+  thread yet.
+- **Inbound**: replies show up automatically — Twilio posts to
+  `POST /api/sms-inbound`, which matches the sender's number to a contact (by
+  phone, ignoring formatting) and logs it onto their conversation, creating
+  one if it's the first message from them.
+
+To receive inbound texts, set the **Messaging** webhook on your Twilio
+number: Console → Phone Numbers → your number → **Messaging Configuration** →
+**A message comes in** → `https://<your-domain>/api/sms-inbound` (method
+`POST`). In local dev, use the same ngrok URL as the voice webhook.
+
+The app currently only picks up new inbound messages on page refresh — there's
+no live push yet.
+
 ## Database (Postgres)
 
 Contacts, conversations, dialler lists, and the call log are stored in a

@@ -369,7 +369,65 @@ export default function SimpleCRM() {
     }
   };
 
+  // Starts a text thread with a contact who doesn't have one yet. Just
+  // a client-side placeholder — it becomes a real, saved conversation
+  // the moment the first message actually sends.
+  const [showNewMessage, setShowNewMessage] = useState(false);
+  const startNewConversation = (contactId) => {
+    const contact = contacts.find((c) => c.id === Number(contactId));
+    if (!contact) return;
+    const existing = conversations.find((c) => c.leadId === contact.id);
+    setShowNewMessage(false);
+    if (existing) {
+      setActiveConvo(existing.id);
+      return;
+    }
+    const tempId = `new-${contact.id}`;
+    setConversations((cs) => [
+      { id: tempId, leadId: contact.id, name: contact.name, preview: "", time: "", unread: false, messages: [] },
+      ...cs,
+    ]);
+    setActiveConvo(tempId);
+  };
+
   const activeConversation = conversations.find((c) => c.id === activeConvo) || null;
+
+  // Outbound SMS — the phone to send to is the linked contact's, or
+  // (for a conversation started by an inbound text from an unknown
+  // number) the raw number that texted in, which we stash as `name`.
+  const activeConversationPhone = activeConversation
+    ? contacts.find((c) => c.id === activeConversation.leadId)?.phone ||
+      (!activeConversation.leadId ? activeConversation.name : null)
+    : null;
+  const [messageDraft, setMessageDraft] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
+
+  const handleSendMessage = async () => {
+    const text = messageDraft.trim();
+    if (!text || !activeConversation || !activeConversationPhone || sendingMessage) return;
+    const leadId = activeConversation.leadId;
+    setMessageDraft("");
+    setSendingMessage(true);
+    try {
+      await api.post("/api/sms-send", {
+        leadId,
+        name: activeConversation.name,
+        phone: activeConversationPhone,
+        text,
+      });
+      const updated = await api.get("/api/conversations");
+      setConversations(updated);
+      // A brand-new conversation (started via "New message") had a
+      // client-side-only temp id — swap it for the real one the
+      // server just created so the thread stays selected.
+      const real = leadId ? updated.find((c) => c.leadId === leadId) : null;
+      if (real) setActiveConvo(real.id);
+    } catch (err) {
+      setDbError(err.message || "Could not send the message.");
+    } finally {
+      setSendingMessage(false);
+    }
+  };
 
   // ----- Client table (Grid / List view, dynamic column types) -----
   const [clientView, setClientView] = useState("list"); // 'list' | 'grid'
@@ -967,19 +1025,46 @@ export default function SimpleCRM() {
             <div className="w-80 border-r border-gray-200 flex flex-col">
               <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
                 <span className="font-semibold">Conversations</span>
-                {selectedConvoIds.length > 0 && (
+                <div className="flex items-center gap-3">
+                  {selectedConvoIds.length > 0 && (
+                    <button
+                      onClick={deleteSelectedConvos}
+                      className="flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-800"
+                    >
+                      <Trash2 size={13} /> Delete {selectedConvoIds.length}
+                    </button>
+                  )}
                   <button
-                    onClick={deleteSelectedConvos}
-                    className="flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-800"
+                    onClick={() => setShowNewMessage((v) => !v)}
+                    className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900"
                   >
-                    <Trash2 size={13} /> Delete {selectedConvoIds.length}
+                    <Plus size={13} /> New
                   </button>
-                )}
+                </div>
               </div>
+              {showNewMessage && (
+                <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
+                  <select
+                    autoFocus
+                    defaultValue=""
+                    onChange={(e) => e.target.value && startNewConversation(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    <option value="" disabled>
+                      Text a contact…
+                    </option>
+                    {contacts.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} — {c.phone}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="flex-1 overflow-y-auto">
                 {conversations.length === 0 && (
                   <div className="px-4 py-10 text-center text-sm text-gray-400">
-                    No conversations yet — they'll appear here automatically after a call.
+                    No conversations yet — they'll appear automatically after a call or text, or start one with "New".
                   </div>
                 )}
                 {conversations.map((c) => (
@@ -1035,18 +1120,33 @@ export default function SimpleCRM() {
                       )
                     )}
                   </div>
-                  <div className="p-4 border-t border-gray-100 flex gap-2">
-                    <input
-                      placeholder="Type a message…"
-                      className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-                    />
-                    <button className="bg-gray-900 text-white text-sm px-5 rounded-lg font-medium">Send</button>
+                  <div className="p-4 border-t border-gray-100 flex flex-col gap-1.5">
+                    <div className="flex gap-2">
+                      <input
+                        value={messageDraft}
+                        onChange={(e) => setMessageDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleSendMessage();
+                        }}
+                        disabled={!activeConversationPhone}
+                        placeholder={activeConversationPhone ? "Type a message…" : "No phone number on file"}
+                        className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 disabled:bg-gray-50 disabled:text-gray-400"
+                      />
+                      <button
+                        onClick={handleSendMessage}
+                        disabled={!messageDraft.trim() || !activeConversationPhone || sendingMessage}
+                        className="bg-gray-900 text-white text-sm px-5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {sendingMessage ? "Sending…" : "Send"}
+                      </button>
+                    </div>
+                    <div className="text-xs text-gray-400">Sent as a real SMS via Twilio to {activeConversationPhone || "—"}</div>
                   </div>
                 </>
               ) : (
                 <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
                   {conversations.length === 0
-                    ? "No conversations yet — they'll appear here automatically after a call."
+                    ? 'No conversations yet — they\'ll appear automatically after a call or text, or start one with "New".'
                     : "Select a conversation"}
                 </div>
               )}
