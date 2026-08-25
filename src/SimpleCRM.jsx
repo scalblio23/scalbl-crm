@@ -391,10 +391,27 @@ export default function SimpleCRM() {
   };
   const [dialFilters, setDialFilters] = useState(emptyDialFilters);
 
+  // Secondary sidebar (Contacts) — filters the table down to one
+  // client at a time, "All" shows everyone.
+  const [contactsClientFilter, setContactsClientFilter] = useState("All");
+  const contactClientCounts = contacts.reduce((acc, c) => {
+    acc[c.client] = (acc[c.client] || 0) + 1;
+    return acc;
+  }, {});
+  // Union of clients from the Clients list and any client name that
+  // shows up on a contact but isn't a real client record yet — either
+  // way it's a valid thing to filter by.
+  const contactClientNames = Array.from(
+    new Set([...clients.map((cl) => cl.name), ...contacts.map((c) => c.client)])
+  )
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+
   const filteredContacts = contacts.filter(
     (c) =>
-      c.name.toLowerCase().includes(search.toLowerCase()) ||
-      c.client.toLowerCase().includes(search.toLowerCase())
+      (c.name.toLowerCase().includes(search.toLowerCase()) ||
+        c.client.toLowerCase().includes(search.toLowerCase())) &&
+      (contactsClientFilter === "All" || c.client === contactsClientFilter)
   );
 
   // Bulk-select + delete on the Contacts table
@@ -782,7 +799,7 @@ export default function SimpleCRM() {
   );
   const updateDialFilter = (key, value) =>
     setDialFilters((f) => ({ ...f, [key]: value }));
-  const filteredDialQueue = dialQueue.filter(
+  const filteredDialQueueBase = dialQueue.filter(
     (l) =>
       l.name.toLowerCase().includes(dialFilters.name.toLowerCase()) &&
       l.email.toLowerCase().includes(dialFilters.email.toLowerCase()) &&
@@ -854,6 +871,16 @@ export default function SimpleCRM() {
 
   // ----- Power Dialler session (auto-dial through a list) -----
   const [dialLists, setDialLists] = useState([]); // [{ id, name, leadIds }]
+
+  // Secondary sidebar (Powerdialler) — narrows the queue below to one
+  // saved powerlist at a time, "all" shows every lead.
+  const [dialListFilter, setDialListFilter] = useState("all");
+  const filteredDialQueue = filteredDialQueueBase.filter(
+    (l) =>
+      dialListFilter === "all" ||
+      (dialLists.find((dl) => dl.id === dialListFilter)?.leadIds || []).includes(l.id)
+  );
+
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
   const [newListName, setNewListName] = useState("");
   const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
@@ -1193,6 +1220,89 @@ export default function SimpleCRM() {
         </div>
       </aside>
 
+      {/* Secondary sidebar — narrower + a touch darker than the main
+          nav, lets you browse Contacts by client and Powerdialler by
+          saved powerlist without leaving the page. */}
+      {(page === "contacts" || page === "powerdialler") && (
+        <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
+          {page === "contacts" && (
+            <>
+              <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
+                Clients
+              </div>
+              <nav className="flex-1 pb-4">
+                <button
+                  onClick={() => setContactsClientFilter("All")}
+                  className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
+                    contactsClientFilter === "All"
+                      ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                      : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                  }`}
+                >
+                  <span className="truncate">All contacts</span>
+                  <span className="text-xs text-gray-400 shrink-0">{contacts.length}</span>
+                </button>
+                {contactClientNames.map((name) => (
+                  <button
+                    key={name}
+                    onClick={() => setContactsClientFilter(name)}
+                    className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
+                      contactsClientFilter === name
+                        ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                        : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                    }`}
+                  >
+                    <span className="truncate">{name}</span>
+                    <span className="text-xs text-gray-400 shrink-0">{contactClientCounts[name] || 0}</span>
+                  </button>
+                ))}
+                {contactClientNames.length === 0 && (
+                  <div className="px-4 py-2 text-xs text-gray-400">No clients yet</div>
+                )}
+              </nav>
+            </>
+          )}
+
+          {page === "powerdialler" && (
+            <>
+              <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
+                Powerlists
+              </div>
+              <nav className="flex-1 pb-4">
+                <button
+                  onClick={() => setDialListFilter("all")}
+                  className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
+                    dialListFilter === "all"
+                      ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                      : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                  }`}
+                >
+                  <span className="truncate">All leads</span>
+                  <span className="text-xs text-gray-400 shrink-0">{dialQueue.length}</span>
+                </button>
+                {dialLists.map((list) => (
+                  <button
+                    key={list.id}
+                    onClick={() => setDialListFilter(list.id)}
+                    className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
+                      dialListFilter === list.id
+                        ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                        : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                    }`}
+                  >
+                    <span className="truncate">{list.name}</span>
+                    <span className="text-xs text-gray-400 shrink-0">{list.leadIds.length}</span>
+                  </button>
+                ))}
+                {dialLists.length === 0 && (
+                  <div className="px-4 py-2 text-xs text-gray-400">No saved powerlists yet</div>
+                )}
+              </nav>
+            </>
+          )}
+        </aside>
+      )}
+
       {/* Main */}
       <main className="flex-1 overflow-hidden flex flex-col">
         {dbError && (
@@ -1346,7 +1456,12 @@ export default function SimpleCRM() {
         {page === "contacts" && (
           <div className="flex-1 overflow-y-auto">
             <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
-              <h1 className="text-xl font-bold">Contacts</h1>
+              <div>
+                <h1 className="text-xl font-bold">Contacts</h1>
+                {contactsClientFilter !== "All" && (
+                  <div className="text-sm text-gray-400 mt-0.5">Filtered to {contactsClientFilter}</div>
+                )}
+              </div>
               <div className="flex gap-3">
                 {selectedContactIds.length > 0 && (
                   <button
@@ -1416,7 +1531,8 @@ export default function SimpleCRM() {
                 {filteredContacts.length === 0 && (
                   <tr>
                     <td colSpan={6} className="px-8 py-10 text-center text-sm text-gray-400">
-                      No contacts match "{search}"
+                      No contacts{contactsClientFilter !== "All" ? ` for ${contactsClientFilter}` : ""}
+                      {search ? ` match "${search}"` : ""}
                     </td>
                   </tr>
                 )}
@@ -1433,16 +1549,28 @@ export default function SimpleCRM() {
                 <h1 className="text-xl font-bold">Powerdialler</h1>
                 <div className="text-sm text-gray-400 mt-0.5">
                   {filteredDialQueue.length} lead{filteredDialQueue.length === 1 ? "" : "s"} · newest first
+                  {dialListFilter !== "all" &&
+                    ` · ${dialLists.find((dl) => dl.id === dialListFilter)?.name || "list"}`}
                 </div>
               </div>
-              {dialFiltersActive && (
-                <button
-                  onClick={() => setDialFilters(emptyDialFilters)}
-                  className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
-                >
-                  <X size={14} /> Clear filters
-                </button>
-              )}
+              <div className="flex items-center gap-3">
+                {dialListFilter !== "all" && (
+                  <button
+                    onClick={() => setDialListFilter("all")}
+                    className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
+                  >
+                    <X size={14} /> Clear powerlist
+                  </button>
+                )}
+                {dialFiltersActive && (
+                  <button
+                    onClick={() => setDialFilters(emptyDialFilters)}
+                    className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
+                  >
+                    <X size={14} /> Clear filters
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Dialler lists — segments the Power Dialler can run through */}
