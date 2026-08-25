@@ -6,7 +6,11 @@
 // reach the browser.
 import { Device } from "@twilio/voice-sdk";
 
-const CALL_SERVER_URL = import.meta.env.VITE_CALL_SERVER_URL || "http://localhost:3001";
+// Empty string = same-origin, i.e. /api/token — correct for the
+// deployed site, where the /api functions live alongside the
+// frontend. Local dev overrides this via VITE_CALL_SERVER_URL in
+// .env to point at the separate Express server on :3001 instead.
+const CALL_SERVER_URL = import.meta.env.VITE_CALL_SERVER_URL || "";
 
 let device = null;
 let deviceReady = null;
@@ -17,7 +21,9 @@ async function fetchToken(identity) {
     res = await fetch(`${CALL_SERVER_URL}/api/token?identity=${encodeURIComponent(identity)}`);
   } catch {
     throw new Error(
-      `Can't reach the calling server at ${CALL_SERVER_URL}. Is \`npm run server\` running?`
+      CALL_SERVER_URL
+        ? `Can't reach the calling server at ${CALL_SERVER_URL}. Is \`npm run server\` running?`
+        : "Can't reach /api/token on this deployment. Check the Vercel Functions logs."
     );
   }
   const body = await res.json().catch(() => ({}));

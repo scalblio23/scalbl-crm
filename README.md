@@ -61,8 +61,30 @@ resulting URL + `/api/voice` into the TwiML App's Voice webhook (method
 
 - `src/lib/twilioDevice.js` — frontend wrapper around the Twilio Voice SDK;
   fetches a token, registers the browser as a calling device, places/ends calls.
-- `server/index.js` — mints Access Tokens (`GET /api/token`), answers Twilio's
-  voice webhook (`POST /api/voice`) with who to dial, and logs call status
-  events (`POST /api/status`).
+- `server/index.js` — **local dev only** (used by `npm run dev:all`). Mints
+  Access Tokens (`GET /api/token`), answers Twilio's voice webhook
+  (`POST /api/voice`), and logs call status (`POST /api/status`).
+- `api/*.js` — the same three endpoints as Vercel serverless functions,
+  deployed automatically alongside the frontend when you deploy to Vercel.
+  Both paths share their Twilio logic from `server/twilioCore.js`.
 - If Twilio isn't configured yet, the Call button surfaces a clear error in
   the Powerdialler instead of failing silently.
+
+### Deploying to Vercel
+
+The `/api` functions deploy automatically with the rest of the app — no
+separate backend hosting needed. Two things to set up in the Vercel project:
+
+1. **Environment variables** — Project Settings → Environment Variables, add
+   `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`,
+   `TWILIO_TWIML_APP_SID`, `TWILIO_CALLER_ID` (same values as your local
+   `.env`). Do **not** set `VITE_CALL_SERVER_URL` here — leaving it unset
+   makes the frontend call `/api/token` on the same domain, which is what
+   you want in production.
+2. **TwiML App Voice webhook** — once deployed, point it at
+   `https://<your-vercel-domain>/api/voice` (method `POST`) in the Twilio
+   Console (Voice → TwiML → TwiML Apps).
+
+Redeploy after changing env vars (Vercel only picks them up on a fresh
+build). You can sanity-check they're set correctly by visiting
+`https://<your-vercel-domain>/api/health` — it should return `{"ok":true}`.
