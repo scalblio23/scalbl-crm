@@ -153,10 +153,52 @@ const initialClients = [
 ];
 
 const initialConversations = [
-  { id: 1, name: "Sarah Mitchell", preview: "Yes I'm interested in the battery rebate", time: "10:32 AM", unread: true },
-  { id: 2, name: "Tom Nguyen", preview: "What deposit do I need?", time: "9:15 AM", unread: true },
-  { id: 3, name: "Emma Taylor", preview: "Confirmed for Thursday 2pm", time: "Yesterday", unread: false },
-  { id: 4, name: "David Chen", preview: "Can you call me after 5?", time: "Yesterday", unread: false },
+  {
+    id: 1,
+    leadId: 1,
+    name: "Sarah Mitchell",
+    preview: "Yes I'm interested in the battery rebate",
+    time: "10:32 AM",
+    unread: true,
+    messages: [
+      { id: 1, type: "text", text: "Yes I'm interested in the battery rebate", time: "10:32 AM", outgoing: false },
+      { id: 2, type: "text", text: "No worries — I'll give you a call shortly to run through it.", time: "10:35 AM", outgoing: true },
+    ],
+  },
+  {
+    id: 2,
+    leadId: 6,
+    name: "Tom Nguyen",
+    preview: "What deposit do I need?",
+    time: "9:15 AM",
+    unread: true,
+    messages: [
+      { id: 1, type: "text", text: "What deposit do I need?", time: "9:15 AM", outgoing: false },
+      { id: 2, type: "text", text: "No worries — I'll give you a call shortly to run through it.", time: "9:20 AM", outgoing: true },
+    ],
+  },
+  {
+    id: 3,
+    leadId: 3,
+    name: "Emma Taylor",
+    preview: "Confirmed for Thursday 2pm",
+    time: "Yesterday",
+    unread: false,
+    messages: [
+      { id: 1, type: "text", text: "Confirmed for Thursday 2pm", time: "Yesterday", outgoing: false },
+    ],
+  },
+  {
+    id: 4,
+    leadId: 2,
+    name: "David Chen",
+    preview: "Can you call me after 5?",
+    time: "Yesterday",
+    unread: false,
+    messages: [
+      { id: 1, type: "text", text: "Can you call me after 5?", time: "Yesterday", outgoing: false },
+    ],
+  },
 ];
 
 const statusColors = {
@@ -165,6 +207,15 @@ const statusColors = {
   Booked: "bg-green-50 text-green-700 border-green-200",
   "No Answer": "bg-gray-50 text-gray-500 border-gray-200",
 };
+
+const CURRENT_USER = "Henry";
+
+function formatCallDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
 
 // ---------- Sidebar ----------
 const navItems = [
@@ -180,7 +231,7 @@ export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
   const [contacts, setContacts] = useState(initialContacts);
   const [clients] = useState(initialClients);
-  const [conversations] = useState(initialConversations);
+  const [conversations, setConversations] = useState(initialConversations);
   const [activeConvo, setActiveConvo] = useState(1);
   const [search, setSearch] = useState("");
 
@@ -266,6 +317,45 @@ export default function SimpleCRM() {
   const [callStatus, setCallStatus] = useState("idle"); // idle | connecting | in-progress
   const [callError, setCallError] = useState("");
   const activeCallRef = useRef(null);
+  const callStartRef = useRef(null); // when the current call was placed, for duration
+  const callEndedRef = useRef(false); // guards against double-processing one call's end
+
+  // Logs a completed call into that lead's conversation thread — creates
+  // a new thread if one doesn't exist yet, otherwise appends to it and
+  // bumps it to the top of the list. Applies to every call, whether
+  // placed ad hoc or as part of a Power Dialler session.
+  const logCallToConversation = (lead, durationMs) => {
+    const now = new Date();
+    const timeLabel = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const summary = `Outgoing call · ${timeLabel} · ${formatCallDuration(durationMs)} · by ${CURRENT_USER}`;
+    const message = { id: `call-${lead.id}-${now.getTime()}`, type: "call", text: summary, time: timeLabel };
+
+    const existing = conversations.find((c) => c.leadId === lead.id);
+    if (existing) {
+      const updated = {
+        ...existing,
+        preview: summary,
+        time: timeLabel,
+        unread: false,
+        messages: [...(existing.messages || []), message],
+      };
+      setConversations((cs) => [updated, ...cs.filter((c) => c.id !== existing.id)]);
+      setActiveConvo(updated.id);
+    } else {
+      const newId = conversations.length ? Math.max(...conversations.map((c) => c.id)) + 1 : 1;
+      const newConvo = {
+        id: newId,
+        leadId: lead.id,
+        name: lead.name,
+        preview: summary,
+        time: timeLabel,
+        unread: false,
+        messages: [message],
+      };
+      setConversations((cs) => [newConvo, ...cs]);
+      setActiveConvo(newId);
+    }
+  };
 
   // ----- Power Dialler session (auto-dial through a list) -----
   const [dialLists, setDialLists] = useState([]); // [{ id, name, leadIds }]
@@ -408,29 +498,32 @@ export default function SimpleCRM() {
     setActiveLeadId(lead.id);
     setCalling(true);
     setCallStatus("connecting");
+    callEndedRef.current = false;
     try {
       const call = await placeCall(lead.phone);
       activeCallRef.current = call;
+      callStartRef.current = Date.now();
+
+      // Shared end-of-call handling for disconnect/cancel/error alike —
+      // guarded so it only ever runs once per call, however it ends
+      // (Twilio's own event, or the user hitting "End call" below).
+      const onCallEnded = (err) => {
+        if (callEndedRef.current) return;
+        callEndedRef.current = true;
+        setCalling(false);
+        setCallStatus("idle");
+        activeCallRef.current = null;
+        if (err) setCallError(err.message || "The call failed.");
+        const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
+        callStartRef.current = null;
+        logCallToConversation(lead, durationMs);
+        handleCallEnded(lead);
+      };
+
       call.on("accept", () => setCallStatus("in-progress"));
-      call.on("disconnect", () => {
-        setCalling(false);
-        setCallStatus("idle");
-        activeCallRef.current = null;
-        handleCallEnded(lead);
-      });
-      call.on("cancel", () => {
-        setCalling(false);
-        setCallStatus("idle");
-        activeCallRef.current = null;
-        handleCallEnded(lead);
-      });
-      call.on("error", (err) => {
-        setCallError(err.message || "The call failed.");
-        setCalling(false);
-        setCallStatus("idle");
-        activeCallRef.current = null;
-        handleCallEnded(lead);
-      });
+      call.on("disconnect", () => onCallEnded());
+      call.on("cancel", () => onCallEnded());
+      call.on("error", (err) => onCallEnded(err));
     } catch (err) {
       setCallError(err.message || "Could not start the call — check your Twilio setup.");
       setCalling(false);
@@ -439,12 +532,10 @@ export default function SimpleCRM() {
   };
 
   const endCall = () => {
-    const lead = activeLead;
+    // Just hang up — the call's own 'disconnect' event (registered in
+    // startCall) does the actual state reset, logging, and wrap-up, so
+    // it only ever happens once no matter how the call ends.
     hangUp();
-    activeCallRef.current = null;
-    setCalling(false);
-    setCallStatus("idle");
-    handleCallEnded(lead);
   };
 
   return (
@@ -472,7 +563,7 @@ export default function SimpleCRM() {
           ))}
         </nav>
         <div className="px-5 py-4 border-t border-gray-100 text-xs text-gray-400">
-          Henry · Admin
+          {CURRENT_USER} · Admin
         </div>
       </aside>
 
@@ -509,12 +600,26 @@ export default function SimpleCRM() {
                 {conversations.find((c) => c.id === activeConvo)?.name}
               </div>
               <div className="flex-1 p-6 space-y-3 overflow-y-auto bg-gray-50/50">
-                <div className="max-w-xs bg-gray-100 rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm">
-                  {conversations.find((c) => c.id === activeConvo)?.preview}
-                </div>
-                <div className="max-w-xs bg-gray-900 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm ml-auto">
-                  No worries — I'll give you a call shortly to run through it.
-                </div>
+                {(conversations.find((c) => c.id === activeConvo)?.messages || []).map((m) =>
+                  m.type === "call" ? (
+                    <div key={m.id} className="flex justify-center">
+                      <div className="flex items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-3 py-1.5 rounded-full">
+                        <PhoneCall size={12} /> {m.text}
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      key={m.id}
+                      className={`max-w-xs rounded-2xl px-4 py-2.5 text-sm ${
+                        m.outgoing
+                          ? "bg-gray-900 text-white rounded-tr-sm ml-auto"
+                          : "bg-gray-100 rounded-tl-sm"
+                      }`}
+                    >
+                      {m.text}
+                    </div>
+                  )
+                )}
               </div>
               <div className="p-4 border-t border-gray-100 flex gap-2">
                 <input
