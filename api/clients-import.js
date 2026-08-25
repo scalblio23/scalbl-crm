@@ -6,7 +6,7 @@ import { requireAuth } from "../server/auth.js";
 // the team's CSV. Triggered by the "Import client list" button on
 // the Clients page. Safe to re-run.
 export default async function handler(req, res) {
-  const user = requireAuth(req, res);
+  const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();

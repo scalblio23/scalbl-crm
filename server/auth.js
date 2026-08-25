@@ -7,6 +7,8 @@
 // an arbitrary email.
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import { findApiKeyByHash, touchApiKeyLastUsed } from "./db.js";
 
 export const COOKIE_NAME = "scalbl_session";
 const SESSION_DAYS = 30;
@@ -104,14 +106,65 @@ export function getUserFromRequest(req) {
   }
 }
 
-// For Vercel functions: call at the top of any handler that needs a
-// logged-in user. Returns the user, or null after already writing a
-// 401 response (so the caller can just `if (!user) return;`).
-export function requireAuth(req, res) {
-  const user = getUserFromRequest(req);
-  if (!user) {
-    res.status(401).json({ error: "Not authenticated" });
+// ---------- API keys (programmatic/agent access) ----------
+// A key is a bearer credential equivalent to being logged in — it's
+// meant for scripts and agents that can't hold a session cookie, not
+// as a separate permission tier. Format: "sk_" + 32 random bytes as
+// hex, e.g. sk_3f9a1c... Only its SHA-256 hash is ever stored — a
+// fast hash is correct here (unlike a password) because the raw key
+// already has 256 bits of entropy, nothing to brute-force.
+const API_KEY_PREFIX = "sk_";
+
+export function generateApiKey() {
+  return API_KEY_PREFIX + crypto.randomBytes(32).toString("hex");
+}
+
+export function hashApiKey(rawKey) {
+  return crypto.createHash("sha256").update(rawKey).digest("hex");
+}
+
+// Extracts a bearer key from `Authorization: Bearer <key>` or the
+// `X-Api-Key` header, verifies it against the database, and — if
+// valid — returns a synthetic "user" so the rest of the app doesn't
+// need to know the difference. Updates last_used_at in the
+// background (never blocks or fails the request over it).
+async function getUserFromApiKey(req) {
+  const authHeader = req.headers?.authorization || "";
+  const bearerMatch = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+  const rawKey = (bearerMatch ? bearerMatch[1] : req.headers?.["x-api-key"] || "").trim();
+  if (!rawKey || !rawKey.startsWith(API_KEY_PREFIX)) return null;
+
+  // A DB error here (not configured, connection dropped, …) should
+  // just mean "can't verify this key right now" — the caller falls
+  // through to the normal 401, not a crashed request. requireAuth is
+  // called from Express's global middleware with no surrounding
+  // try/catch, so letting this throw would take the whole request
+  // down with it.
+  let row;
+  try {
+    row = await findApiKeyByHash(hashApiKey(rawKey));
+  } catch (err) {
+    console.error("[auth] API key lookup failed", err);
     return null;
   }
-  return user;
+  if (!row) return null;
+
+  touchApiKeyLastUsed(row.id).catch(() => {});
+  return { id: `api-key:${row.id}`, name: `API key (${row.label})`, email: null, isApiKey: true };
+}
+
+// For Vercel functions: call at the top of any handler that needs a
+// logged-in user OR a valid API key. Returns the user, or null after
+// already writing a 401 response (so the caller can just
+// `if (!user) return;`). Async because the API-key path needs a
+// database lookup — every caller must `await` this now.
+export async function requireAuth(req, res) {
+  const sessionUser = getUserFromRequest(req);
+  if (sessionUser) return sessionUser;
+
+  const apiUser = await getUserFromApiKey(req);
+  if (apiUser) return apiUser;
+
+  res.status(401).json({ error: "Not authenticated" });
+  return null;
 }

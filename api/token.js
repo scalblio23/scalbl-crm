@@ -4,8 +4,8 @@
 import { missingTwilioEnv, mintAccessToken } from "../server/twilioCore.js";
 import { requireAuth } from "../server/auth.js";
 
-export default function handler(req, res) {
-  const user = requireAuth(req, res);
+export default async function handler(req, res) {
+  const user = await requireAuth(req, res);
   if (!user) return;
   const missing = missingTwilioEnv();
   if (missing.length) {

@@ -5,7 +5,7 @@ import { requireAuth } from "../server/auth.js";
 // POST /api/sms-send — sends an outbound SMS via Twilio and logs it
 // onto the lead's conversation. Body: { leadId, name, phone, text }.
 export default async function handler(req, res) {
-  const user = requireAuth(req, res);
+  const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();

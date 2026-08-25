@@ -18,7 +18,7 @@ import { requireAuth } from "../server/auth.js";
 // tiers), that compounded into a very slow first paint. One request
 // only pays that cold-start/wake-up cost once.
 export default async function handler(req, res) {
-  const user = requireAuth(req, res);
+  const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();

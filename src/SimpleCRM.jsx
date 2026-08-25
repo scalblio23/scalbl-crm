@@ -753,6 +753,71 @@ export default function SimpleCRM() {
     }
   };
 
+  // ----- API keys (Settings page) — lets a script or agent read/
+  // write this CRM without a browser login. Loaded lazily since
+  // they're only needed while actually on the Settings page. -----
+  const [apiKeys, setApiKeys] = useState([]);
+  const [apiKeysLoading, setApiKeysLoading] = useState(false);
+  const [newKeyLabel, setNewKeyLabel] = useState("");
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [revealedKey, setRevealedKey] = useState(null); // { key, label } — shown once, right after creation
+
+  useEffect(() => {
+    if (page !== "settings" || !authUser) return;
+    let cancelled = false;
+    setApiKeysLoading(true);
+    api
+      .get("/api/api-keys")
+      .then((keys) => {
+        if (!cancelled) setApiKeys(keys);
+      })
+      .catch((err) => {
+        if (!cancelled) setDbError(err.message || "Could not load API keys.");
+      })
+      .finally(() => {
+        if (!cancelled) setApiKeysLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page, authUser]);
+
+  const handleCreateApiKey = async (e) => {
+    e.preventDefault();
+    if (!newKeyLabel.trim()) return;
+    setCreatingKey(true);
+    try {
+      const created = await api.post("/api/api-keys", { label: newKeyLabel.trim() });
+      setApiKeys((keys) => [
+        {
+          id: created.id,
+          label: created.label,
+          keyPrefix: created.keyPrefix,
+          createdAt: created.createdAt,
+          lastUsedAt: null,
+          createdByName: authUser?.name,
+        },
+        ...keys,
+      ]);
+      setRevealedKey({ key: created.key, label: created.label });
+      setNewKeyLabel("");
+    } catch (err) {
+      setDbError(err.message || "Could not create the API key.");
+    } finally {
+      setCreatingKey(false);
+    }
+  };
+
+  const handleDeleteApiKey = async (id) => {
+    if (!window.confirm("Revoke this API key? Anything using it will stop working immediately.")) return;
+    setApiKeys((keys) => keys.filter((k) => k.id !== id));
+    try {
+      await api.delete(`/api/api-keys?id=${id}`);
+    } catch (err) {
+      setDbError(err.message || "Could not revoke the API key.");
+    }
+  };
+
   const selectOptionColor = (col, value) => {
     const opt = (col.options || []).find((o) => o.value === value);
     return SELECT_COLORS[opt?.color] || SELECT_COLORS.gray;
@@ -2692,6 +2757,132 @@ export default function SimpleCRM() {
                 <input defaultValue="+61 8 1234 5678" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400" />
               </div>
               <button className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">Save changes</button>
+            </div>
+
+            <div className="px-8 pb-10 max-w-2xl">
+              <div className="border-t border-gray-100 pt-8">
+                <h2 className="text-base font-bold">API keys</h2>
+                <p className="text-sm text-gray-500 mt-1 max-w-lg">
+                  Let a script or agent read and write this CRM's data without a browser login — e.g. to run a
+                  bulk lead import. A key works exactly like being logged in, so treat it like a password:
+                  anyone with it has full access to this shared CRM.
+                </p>
+
+                {revealedKey && (
+                  <div className="mt-4 border border-amber-200 bg-amber-50 rounded-xl p-4">
+                    <div className="text-sm font-semibold text-amber-800">
+                      "{revealedKey.label}" created — copy this now
+                    </div>
+                    <div className="text-xs text-amber-700 mt-0.5 mb-2.5">
+                      This is the only time the full key is shown. If you lose it, revoke it and create a new one.
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 bg-white border border-amber-200 rounded-lg px-3 py-2 text-xs font-mono overflow-x-auto whitespace-nowrap">
+                        {revealedKey.key}
+                      </code>
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(revealedKey.key)}
+                        className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-2 rounded-lg font-medium"
+                      >
+                        Copy
+                      </button>
+                      <button
+                        onClick={() => setRevealedKey(null)}
+                        className="shrink-0 text-amber-700 hover:text-amber-900 text-xs px-2 py-2 font-medium"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <form onSubmit={handleCreateApiKey} className="flex items-end gap-2 mt-4">
+                  <div className="flex-1 max-w-xs">
+                    <label className="text-xs font-medium block mb-1.5 text-gray-500">Label</label>
+                    <input
+                      value={newKeyLabel}
+                      onChange={(e) => setNewKeyLabel(e.target.value)}
+                      placeholder="e.g. Lead import agent"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={creatingKey || !newKeyLabel.trim()}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {creatingKey && <Loader2 size={14} className="animate-spin" />}
+                    Create key
+                  </button>
+                </form>
+
+                <div className="mt-5 border border-gray-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                        <th className="px-4 py-2.5 font-medium">Label</th>
+                        <th className="px-4 py-2.5 font-medium">Key</th>
+                        <th className="px-4 py-2.5 font-medium">Created</th>
+                        <th className="px-4 py-2.5 font-medium">Last used</th>
+                        <th className="px-4 py-2.5"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {apiKeys.map((k) => (
+                        <tr key={k.id} className="border-b border-gray-50 last:border-0">
+                          <td className="px-4 py-3 font-medium">{k.label}</td>
+                          <td className="px-4 py-3 font-mono text-xs text-gray-500">{k.keyPrefix}…</td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {k.createdAt ? new Date(k.createdAt).toLocaleDateString() : "—"}
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "Never"}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              onClick={() => handleDeleteApiKey(k.id)}
+                              className="text-gray-300 hover:text-red-500"
+                              title="Revoke key"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {!apiKeysLoading && apiKeys.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
+                            No API keys yet
+                          </td>
+                        </tr>
+                      )}
+                      {apiKeysLoading && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
+                            <Loader2 size={14} className="animate-spin inline" />
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-5">
+                  <div className="text-xs font-medium text-gray-500 mb-1.5">How an agent uses it</div>
+                  <pre className="bg-gray-900 text-gray-100 text-xs rounded-xl p-4 overflow-x-auto">
+{`curl -X POST ${window.location.origin}/api/contacts-import \\
+  -H "Authorization: Bearer <the key>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"offset": 0, "limit": 500}'`}
+                  </pre>
+                  <p className="text-xs text-gray-400 mt-1.5">
+                    Same header works on every endpoint — e.g. POST /api/contacts-bulk-import to add leads from
+                    any other source, or GET /api/contacts to read them back. Keep paging with the returned{" "}
+                    <code className="bg-gray-100 px-1 rounded">nextOffset</code> until{" "}
+                    <code className="bg-gray-100 px-1 rounded">done</code> is true.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         )}

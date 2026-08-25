@@ -2,7 +2,7 @@ import { ensureSchema, getClients, createClient, updateClient, deleteClients } f
 import { requireAuth } from "../server/auth.js";
 
 export default async function handler(req, res) {
-  const user = requireAuth(req, res);
+  const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();

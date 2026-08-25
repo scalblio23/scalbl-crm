@@ -8,7 +8,7 @@ import { requireAuth } from "../server/auth.js";
 // should be sent in batches (a few hundred records at a time) rather
 // than one huge request, to stay under the serverless body-size limit.
 export default async function handler(req, res) {
-  const user = requireAuth(req, res);
+  const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();

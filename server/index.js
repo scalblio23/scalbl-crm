@@ -40,6 +40,9 @@ import {
   addCallLogEntry,
   getUserByEmail,
   claimUserPassword,
+  createApiKey,
+  getApiKeys,
+  deleteApiKey,
 } from "./db.js";
 import {
   getUserFromRequest,
@@ -48,6 +51,8 @@ import {
   verifyPassword,
   createSessionCookie,
   clearSessionCookie,
+  generateApiKey,
+  hashApiKey,
 } from "./auth.js";
 
 dotenv.config();
@@ -77,9 +82,9 @@ const PUBLIC_PATHS = new Set([
   "/api/auth-me",
 ]);
 
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   if (PUBLIC_PATHS.has(req.path)) return next();
-  const user = requireAuth(req, res);
+  const user = await requireAuth(req, res);
   if (!user) return; // requireAuth already sent the 401
   req.user = user;
   next();
@@ -158,6 +163,48 @@ app.post("/api/auth-logout", (req, res) => {
   res.setHeader("Set-Cookie", clearSessionCookie());
   res.status(204).end();
 });
+
+// ---------- API keys (programmatic/agent access) ----------
+// Session-only on purpose — a key should never be able to mint more
+// keys or see/revoke anyone else's, so this checks getUserFromRequest
+// directly rather than the global middleware's requireAuth (which
+// also accepts a key).
+app.get(
+  "/api/api-keys",
+  dbRoute(async (req, res) => {
+    const user = getUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Log in to manage API keys." });
+    res.json(await getApiKeys());
+  })
+);
+app.post(
+  "/api/api-keys",
+  dbRoute(async (req, res) => {
+    const user = getUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Log in to manage API keys." });
+    const label = String(req.body?.label || "").trim();
+    if (!label) return res.status(400).json({ error: "Give the key a label (e.g. what agent it's for)." });
+    const rawKey = generateApiKey();
+    const row = await createApiKey({
+      label,
+      keyHash: hashApiKey(rawKey),
+      keyPrefix: rawKey.slice(0, 11),
+      createdBy: user.id,
+    });
+    res.status(201).json({ id: row.id, label: row.label, key: rawKey, keyPrefix: row.key_prefix, createdAt: row.created_at });
+  })
+);
+app.delete(
+  "/api/api-keys",
+  dbRoute(async (req, res) => {
+    const user = getUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: "Log in to manage API keys." });
+    const id = req.query.id;
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    await deleteApiKey(id);
+    res.status(204).end();
+  })
+);
 
 // Everything the app needs on first load, in one request — see
 // api/bootstrap.js for why this matters more than it might look.

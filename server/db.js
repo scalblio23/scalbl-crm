@@ -168,6 +168,17 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id SERIAL PRIMARY KEY,
+        label TEXT NOT NULL,
+        key_hash TEXT UNIQUE NOT NULL,
+        key_prefix TEXT NOT NULL,
+        created_by INTEGER,
+        created_at TIMESTAMPTZ DEFAULT now(),
+        last_used_at TIMESTAMPTZ
+      )
+    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
   })();
@@ -880,4 +891,46 @@ export async function claimUserPassword(email, passwordHash) {
     [String(email).toLowerCase().trim(), passwordHash]
   );
   return rows[0] || null;
+}
+
+// ---------- API keys (for programmatic/agent access) ----------
+// The raw key is only ever known at creation time — only its hash is
+// stored, same principle as a password. key_prefix is a few
+// characters of the raw key kept in the clear purely so the UI can
+// show which key is which without ever displaying the full secret.
+
+export async function createApiKey({ label, keyHash, keyPrefix, createdBy }) {
+  const rows = await query(
+    "INSERT INTO api_keys (label, key_hash, key_prefix, created_by) VALUES ($1,$2,$3,$4) RETURNING *",
+    [label, keyHash, keyPrefix, createdBy || null]
+  );
+  return rows[0];
+}
+
+export async function getApiKeys() {
+  const rows = await query(
+    "SELECT ak.id, ak.label, ak.key_prefix, ak.created_at, ak.last_used_at, u.name AS created_by_name " +
+      "FROM api_keys ak LEFT JOIN users u ON u.id = ak.created_by ORDER BY ak.created_at DESC"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    label: r.label,
+    keyPrefix: r.key_prefix,
+    createdAt: r.created_at,
+    lastUsedAt: r.last_used_at,
+    createdByName: r.created_by_name,
+  }));
+}
+
+export async function findApiKeyByHash(keyHash) {
+  const rows = await query("SELECT * FROM api_keys WHERE key_hash = $1", [keyHash]);
+  return rows[0] || null;
+}
+
+export async function touchApiKeyLastUsed(id) {
+  await query("UPDATE api_keys SET last_used_at = now() WHERE id = $1", [id]);
+}
+
+export async function deleteApiKey(id) {
+  await query("DELETE FROM api_keys WHERE id = $1", [id]);
 }

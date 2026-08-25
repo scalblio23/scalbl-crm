@@ -16,7 +16,7 @@ export const config = { maxDuration: 60 };
 // timeout (504) for a batch this size, so this only ever does a
 // few hundred rows per call.
 export default async function handler(req, res) {
-  const user = requireAuth(req, res);
+  const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();
