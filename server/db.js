@@ -5,6 +5,7 @@
 // it works with any Postgres-compatible provider (Neon, Prisma
 // Postgres, Supabase, RDS, …) — whichever one POSTGRES_URL points at.
 import pg from "pg";
+import { CLIENT_COLUMNS, IMPORTED_CLIENTS } from "./clientImportData.js";
 
 const { Pool } = pg;
 
@@ -56,7 +57,22 @@ export async function ensureSchema() {
         leads INTEGER DEFAULT 0,
         ads_live BOOLEAN DEFAULT false,
         script TEXT,
-        script_steps JSONB DEFAULT '[]'
+        script_steps JSONB DEFAULT '[]',
+        fields JSONB DEFAULT '{}'
+      )
+    `);
+    // Table already existed before `fields` was added — safe no-op if
+    // it's already there.
+    await query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS fields JSONB DEFAULT '{}'`);
+    await query(`
+      CREATE TABLE IF NOT EXISTS client_columns (
+        id SERIAL PRIMARY KEY,
+        key TEXT UNIQUE NOT NULL,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options JSONB DEFAULT '[]',
+        position INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
     await query(`
@@ -265,9 +281,8 @@ async function seedIfEmpty() {
 
 // ---------- Queries used by the API routes ----------
 
-export async function getClients() {
-  const rows = await query("SELECT * FROM clients ORDER BY id");
-  return rows.map((r) => ({
+function clientFromRow(r) {
+  return {
     id: r.id,
     name: r.name,
     industry: r.industry,
@@ -275,7 +290,111 @@ export async function getClients() {
     adsLive: r.ads_live,
     script: r.script,
     scriptSteps: r.script_steps || [],
+    fields: r.fields || {},
+  };
+}
+
+export async function getClients() {
+  const rows = await query("SELECT * FROM clients ORDER BY id");
+  return rows.map(clientFromRow);
+}
+
+export async function createClient(c) {
+  const rows = await query(
+    "INSERT INTO clients (name, industry, leads, ads_live, script, script_steps, fields) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+    [
+      c.name,
+      c.industry || null,
+      c.leads || 0,
+      c.adsLive || false,
+      c.script || null,
+      JSON.stringify(c.scriptSteps || []),
+      JSON.stringify(c.fields || {}),
+    ]
+  );
+  return clientFromRow(rows[0]);
+}
+
+// Patches a client's name and/or custom fields. `fields` is shallow-
+// merged onto the existing JSONB blob so updating one cell doesn't
+// clobber the others.
+export async function updateClient(id, patch) {
+  const rows = await query(
+    `UPDATE clients SET
+       name = COALESCE($2, name),
+       fields = fields || $3::jsonb
+     WHERE id = $1
+     RETURNING *`,
+    [id, patch.name ?? null, JSON.stringify(patch.fields || {})]
+  );
+  return rows[0] ? clientFromRow(rows[0]) : null;
+}
+
+export async function deleteClients(ids) {
+  await query("DELETE FROM clients WHERE id = ANY($1::int[])", [ids]);
+}
+
+// ---------- Client table columns (dynamic schema) ----------
+
+export async function getClientColumns() {
+  const rows = await query("SELECT * FROM client_columns ORDER BY position, id");
+  return rows.map((r) => ({
+    id: r.id,
+    key: r.key,
+    label: r.label,
+    type: r.type,
+    options: r.options || [],
+    position: r.position,
   }));
+}
+
+const COLUMN_TYPES = ["text", "long_text", "number", "currency", "url", "date", "select", "checkbox"];
+
+function slugifyColumnKey(label) {
+  return (
+    label
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") || `field_${Date.now()}`
+  );
+}
+
+export async function createClientColumn({ label, type, options }) {
+  if (!COLUMN_TYPES.includes(type)) throw new Error(`Unknown column type: ${type}`);
+  const key = slugifyColumnKey(label);
+  const [{ next_position }] = await query(
+    "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM client_columns"
+  );
+  const rows = await query(
+    "INSERT INTO client_columns (key, label, type, options, position) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+    [key, label, type, JSON.stringify(options || []), next_position]
+  );
+  const r = rows[0];
+  return { id: r.id, key: r.key, label: r.label, type: r.type, options: r.options || [], position: r.position };
+}
+
+export async function deleteClientColumn(id) {
+  await query("DELETE FROM client_columns WHERE id = $1", [id]);
+}
+
+// Wipes existing clients + column definitions and replaces them with
+// the real client-list data imported from the team's CSV. Safe to
+// re-run — it's a full reset, not an incremental merge.
+export async function importClientData() {
+  await query("DELETE FROM clients");
+  await query("DELETE FROM client_columns");
+  for (let i = 0; i < CLIENT_COLUMNS.length; i++) {
+    const c = CLIENT_COLUMNS[i];
+    await query(
+      "INSERT INTO client_columns (key, label, type, options, position) VALUES ($1,$2,$3,$4,$5)",
+      [c.key, c.label, c.type, JSON.stringify(c.options || []), i]
+    );
+  }
+  for (const c of IMPORTED_CLIENTS) {
+    await query("INSERT INTO clients (name, fields) VALUES ($1,$2)", [c.name, JSON.stringify(c.fields || {})]);
+  }
+  return { clients: IMPORTED_CLIENTS.length, columns: CLIENT_COLUMNS.length };
 }
 
 function contactFromRow(r) {

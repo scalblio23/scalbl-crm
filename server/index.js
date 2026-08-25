@@ -10,6 +10,13 @@ import {
   isDbConfigured,
   ensureSchema,
   getClients,
+  createClient,
+  updateClient,
+  deleteClients,
+  getClientColumns,
+  createClientColumn,
+  deleteClientColumn,
+  importClientData,
   getContacts,
   createContact,
   updateContact,
@@ -102,6 +109,56 @@ app.post("/api/status", (req, res) => {
 // ---------- Database ----------
 
 app.get("/api/clients", dbRoute(async (req, res) => res.json(await getClients())));
+app.post(
+  "/api/clients",
+  dbRoute(async (req, res) => res.status(201).json(await createClient(req.body || {})))
+);
+app.patch(
+  "/api/clients",
+  dbRoute(async (req, res) => {
+    const { id, ...patch } = req.body || {};
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    const client = await updateClient(id, patch);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+    res.json(client);
+  })
+);
+app.delete(
+  "/api/clients",
+  dbRoute(async (req, res) => {
+    const ids = String(req.query.ids || "")
+      .split(",")
+      .map((id) => Number(id.trim()))
+      .filter(Boolean);
+    if (!ids.length) return res.status(400).json({ error: "Missing ids" });
+    await deleteClients(ids);
+    res.status(204).end();
+  })
+);
+
+app.get("/api/client-columns", dbRoute(async (req, res) => res.json(await getClientColumns())));
+app.post(
+  "/api/client-columns",
+  dbRoute(async (req, res) => {
+    const { label, type, options } = req.body || {};
+    if (!label || !type) return res.status(400).json({ error: "Missing label or type" });
+    res.status(201).json(await createClientColumn({ label, type, options }));
+  })
+);
+app.delete(
+  "/api/client-columns",
+  dbRoute(async (req, res) => {
+    const id = req.query.id;
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    await deleteClientColumn(id);
+    res.status(204).end();
+  })
+);
+
+app.post(
+  "/api/clients-import",
+  dbRoute(async (req, res) => res.json(await importClientData()))
+);
 
 app.get("/api/contacts", dbRoute(async (req, res) => res.json(await getContacts())));
 app.post(

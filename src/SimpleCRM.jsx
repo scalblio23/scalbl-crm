@@ -16,6 +16,10 @@ import {
   ListChecks,
   Trash2,
   ClipboardList,
+  Pencil,
+  LayoutGrid,
+  Table2,
+  Upload,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -162,6 +166,41 @@ const statusColors = {
   "No Answer": "bg-gray-50 text-gray-500 border-gray-200",
 };
 
+// ---------- Client table (dynamic columns) ----------
+const CLIENT_COLUMN_TYPES = [
+  { value: "text", label: "Text" },
+  { value: "long_text", label: "Long text" },
+  { value: "number", label: "Number" },
+  { value: "currency", label: "Currency ($)" },
+  { value: "url", label: "URL" },
+  { value: "date", label: "Date" },
+  { value: "select", label: "Dropdown select" },
+  { value: "checkbox", label: "Checkbox" },
+];
+
+const SELECT_COLORS = {
+  gray: "bg-gray-50 text-gray-600 border-gray-200",
+  blue: "bg-blue-50 text-blue-700 border-blue-200",
+  green: "bg-green-50 text-green-700 border-green-200",
+  amber: "bg-amber-50 text-amber-700 border-amber-200",
+  red: "bg-red-50 text-red-700 border-red-200",
+  purple: "bg-purple-50 text-purple-700 border-purple-200",
+};
+const SELECT_COLOR_CYCLE = ["blue", "green", "amber", "red", "purple", "gray"];
+
+function formatClientCellDisplay(col, value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (col.type === "currency") {
+    const n = Number(value);
+    return Number.isNaN(n) ? String(value) : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+  if (col.type === "date") {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  }
+  return String(value);
+}
+
 const CURRENT_USER = "Henry";
 
 function formatCallDuration(ms) {
@@ -185,6 +224,7 @@ export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
   const [contacts, setContacts] = useState(initialContacts);
   const [clients, setClients] = useState(initialClients);
+  const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
   const [conversations, setConversations] = useState(initialConversations);
   const [activeConvo, setActiveConvo] = useState(null);
   const [selectedConvoIds, setSelectedConvoIds] = useState([]);
@@ -200,9 +240,10 @@ export default function SimpleCRM() {
     let cancelled = false;
     (async () => {
       try {
-        const [clientsData, contactsData, conversationsData, dialListsData, calledLeadIdsData, callLogData] =
+        const [clientsData, clientColumnsData, contactsData, conversationsData, dialListsData, calledLeadIdsData, callLogData] =
           await Promise.all([
             api.get("/api/clients"),
+            api.get("/api/client-columns"),
             api.get("/api/contacts"),
             api.get("/api/conversations"),
             api.get("/api/dial-lists"),
@@ -211,6 +252,7 @@ export default function SimpleCRM() {
           ]);
         if (cancelled) return;
         setClients(clientsData);
+        setClientColumns(clientColumnsData);
         setContacts(contactsData);
         setConversations(conversationsData);
         setDialLists(dialListsData);
@@ -328,6 +370,273 @@ export default function SimpleCRM() {
   };
 
   const activeConversation = conversations.find((c) => c.id === activeConvo) || null;
+
+  // ----- Client table (Grid / List view, dynamic column types) -----
+  const [clientView, setClientView] = useState("list"); // 'list' | 'grid'
+  const [selectedClientIds, setSelectedClientIds] = useState([]);
+  const [editingClientCell, setEditingClientCell] = useState(null); // `${clientId}:${key}` or null
+  const [clientEditValue, setClientEditValue] = useState("");
+
+  const toggleClientSelected = (id) =>
+    setSelectedClientIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+
+  const deleteSelectedClients = async () => {
+    if (!selectedClientIds.length) return;
+    const count = selectedClientIds.length;
+    if (!window.confirm(`Delete ${count} client${count === 1 ? "" : "s"}? This can't be undone.`)) return;
+    const ids = selectedClientIds;
+    setSelectedClientIds([]);
+    setClients((cs) => cs.filter((c) => !ids.includes(c.id)));
+    try {
+      await api.delete(`/api/clients?ids=${ids.join(",")}`);
+    } catch (err) {
+      setDbError(err.message || "Could not delete the selected clients.");
+    }
+  };
+
+  const updateClientField = async (clientId, key, value) => {
+    setClients((cs) => cs.map((c) => (c.id === clientId ? { ...c, fields: { ...c.fields, [key]: value } } : c)));
+    try {
+      await api.patch("/api/clients", { id: clientId, fields: { [key]: value } });
+    } catch (err) {
+      setDbError(err.message || "Could not save the change.");
+    }
+  };
+
+  const updateClientName = async (clientId, name) => {
+    setClients((cs) => cs.map((c) => (c.id === clientId ? { ...c, name } : c)));
+    try {
+      await api.patch("/api/clients", { id: clientId, name });
+    } catch (err) {
+      setDbError(err.message || "Could not save the change.");
+    }
+  };
+
+  const startEditClientCell = (clientId, key, currentValue) => {
+    setEditingClientCell(`${clientId}:${key}`);
+    setClientEditValue(currentValue === null || currentValue === undefined ? "" : String(currentValue));
+  };
+
+  const commitEditClientCell = (client, col) => {
+    let value = clientEditValue;
+    if (col.type === "number" || col.type === "currency") {
+      value = value === "" ? null : Number(value);
+      if (Number.isNaN(value)) value = null;
+    } else if (value === "") {
+      value = null;
+    }
+    setEditingClientCell(null);
+    updateClientField(client.id, col.key, value);
+  };
+
+  // Add-column modal
+  const emptyColumnForm = { label: "", type: "text", options: "" };
+  const [showAddColumn, setShowAddColumn] = useState(false);
+  const [columnForm, setColumnForm] = useState(emptyColumnForm);
+
+  const handleAddColumn = async (e) => {
+    e.preventDefault();
+    if (!columnForm.label.trim()) return;
+    const options =
+      columnForm.type === "select"
+        ? columnForm.options
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((value, i) => ({ value, color: SELECT_COLOR_CYCLE[i % SELECT_COLOR_CYCLE.length] }))
+        : [];
+    try {
+      const created = await api.post("/api/client-columns", {
+        label: columnForm.label.trim(),
+        type: columnForm.type,
+        options,
+      });
+      setClientColumns((cols) => [...cols, created]);
+      setColumnForm(emptyColumnForm);
+      setShowAddColumn(false);
+    } catch (err) {
+      setDbError(err.message || "Could not create the column.");
+    }
+  };
+
+  const handleDeleteColumn = async (id) => {
+    if (!window.confirm("Delete this column? It will be removed from every client.")) return;
+    setClientColumns((cols) => cols.filter((c) => c.id !== id));
+    try {
+      await api.delete(`/api/client-columns?id=${id}`);
+    } catch (err) {
+      setDbError(err.message || "Could not delete the column.");
+    }
+  };
+
+  const handleImportClients = async () => {
+    if (
+      !window.confirm(
+        "Import the real client list? This replaces every current client and column with the data from the CSV."
+      )
+    )
+      return;
+    try {
+      await api.post("/api/clients-import", {});
+      const [clientsData, columnsData] = await Promise.all([
+        api.get("/api/clients"),
+        api.get("/api/client-columns"),
+      ]);
+      setClients(clientsData);
+      setClientColumns(columnsData);
+      setSelectedClientIds([]);
+    } catch (err) {
+      setDbError(err.message || "Could not import the client list.");
+    }
+  };
+
+  const selectOptionColor = (col, value) => {
+    const opt = (col.options || []).find((o) => o.value === value);
+    return SELECT_COLORS[opt?.color] || SELECT_COLORS.gray;
+  };
+
+  // Renders one cell of the client table, in view or edit mode
+  // depending on the column's type — this is what makes columns
+  // behave like text / dropdown / url / etc.
+  const renderClientCell = (client, col) => {
+    const cellKey = `${client.id}:${col.key}`;
+    const value = client.fields?.[col.key];
+    const isEditing = editingClientCell === cellKey;
+
+    if (col.type === "checkbox") {
+      return (
+        <input
+          type="checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => updateClientField(client.id, col.key, e.target.checked)}
+          className="w-4 h-4 rounded border-gray-300"
+        />
+      );
+    }
+
+    if (col.type === "select") {
+      if (isEditing) {
+        return (
+          <select
+            autoFocus
+            defaultValue={value || ""}
+            onChange={(e) => {
+              setEditingClientCell(null);
+              updateClientField(client.id, col.key, e.target.value || null);
+            }}
+            onBlur={() => setEditingClientCell(null)}
+            className="w-full border border-gray-300 rounded-md px-2 py-1 text-xs outline-none bg-white"
+          >
+            <option value="">—</option>
+            {(col.options || []).map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.value}
+              </option>
+            ))}
+          </select>
+        );
+      }
+      return (
+        <button onClick={() => setEditingClientCell(cellKey)} className="w-full text-left">
+          {value ? (
+            <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(col, value)}`}>
+              {value}
+            </span>
+          ) : (
+            <span className="text-gray-300 text-xs">—</span>
+          )}
+        </button>
+      );
+    }
+
+    if (col.type === "url") {
+      if (isEditing) {
+        return (
+          <input
+            autoFocus
+            type="text"
+            value={clientEditValue}
+            onChange={(e) => setClientEditValue(e.target.value)}
+            onBlur={() => commitEditClientCell(client, col)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitEditClientCell(client, col);
+              if (e.key === "Escape") setEditingClientCell(null);
+            }}
+            className="w-full border border-gray-300 rounded-md px-2 py-1 text-xs outline-none"
+          />
+        );
+      }
+      return (
+        <div className="flex items-center gap-1.5 group/cell">
+          {value ? (
+            <a
+              href={value}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-xs text-blue-600 hover:text-blue-700 truncate max-w-[140px] inline-block"
+            >
+              {value}
+            </a>
+          ) : (
+            <span className="text-gray-300 text-xs">—</span>
+          )}
+          <button
+            onClick={() => startEditClientCell(client.id, col.key, value)}
+            className="opacity-0 group-hover/cell:opacity-100 text-gray-300 hover:text-gray-600 shrink-0"
+          >
+            <Pencil size={11} />
+          </button>
+        </div>
+      );
+    }
+
+    if (isEditing) {
+      if (col.type === "long_text") {
+        return (
+          <textarea
+            autoFocus
+            rows={3}
+            value={clientEditValue}
+            onChange={(e) => setClientEditValue(e.target.value)}
+            onBlur={() => commitEditClientCell(client, col)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setEditingClientCell(null);
+            }}
+            className="w-full min-w-[200px] border border-gray-300 rounded-md px-2 py-1 text-xs outline-none resize-y"
+          />
+        );
+      }
+      const inputType = col.type === "number" || col.type === "currency" ? "number" : col.type === "date" ? "date" : "text";
+      return (
+        <input
+          autoFocus
+          type={inputType}
+          step={col.type === "currency" ? "0.01" : undefined}
+          value={clientEditValue}
+          onChange={(e) => setClientEditValue(e.target.value)}
+          onBlur={() => commitEditClientCell(client, col)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitEditClientCell(client, col);
+            if (e.key === "Escape") setEditingClientCell(null);
+          }}
+          className="w-full border border-gray-300 rounded-md px-2 py-1 text-xs outline-none"
+        />
+      );
+    }
+
+    const display = formatClientCellDisplay(col, value);
+    const isNumeric = col.type === "number" || col.type === "currency";
+    return (
+      <button
+        onClick={() => startEditClientCell(client.id, col.key, value ?? "")}
+        title={typeof display === "string" && display.length > 30 ? display : undefined}
+        className={`w-full text-left text-xs truncate ${isNumeric ? "text-right tabular-nums" : ""}`}
+      >
+        {display !== null ? display : <span className="text-gray-300">—</span>}
+      </button>
+    );
+  };
 
   // A lead's client record, derived from the Client column: look up the
   // client by name in the client list to read its script link/content.
@@ -1345,47 +1654,190 @@ export default function SimpleCRM() {
         {page === "clients" && (
           <div className="flex-1 overflow-y-auto">
             <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
-              <h1 className="text-xl font-bold">Clients</h1>
-              <button className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium">
-                <Plus size={15} /> Add client
-              </button>
-            </div>
-            <div className="p-8 grid grid-cols-2 gap-4">
-              {clients.map((cl) => (
-                <div key={cl.id} className="border border-gray-200 rounded-xl p-5 hover:shadow-sm transition-shadow">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <div className="font-semibold">{cl.name}</div>
-                      <div className="text-sm text-gray-500">{cl.industry}</div>
-                    </div>
-                    <span
-                      className={`text-xs px-2.5 py-1 rounded-full border ${
-                        cl.adsLive
-                          ? "bg-green-50 text-green-700 border-green-200"
-                          : "bg-gray-50 text-gray-500 border-gray-200"
-                      }`}
-                    >
-                      {cl.adsLive ? "Ads live" : "Not live"}
-                    </span>
-                  </div>
-                  <div className="mt-4 flex items-center justify-between">
-                    <div className="text-sm text-gray-600">
-                      <span className="font-semibold text-gray-900">{cl.leads}</span> leads this month
-                    </div>
-                    {cl.script && (
-                      <a
-                        href={cl.script}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"
-                      >
-                        <ExternalLink size={13} /> Call script
-                      </a>
-                    )}
-                  </div>
+              <div>
+                <h1 className="text-xl font-bold">Clients</h1>
+                <div className="text-sm text-gray-400 mt-0.5">
+                  {clients.length} client{clients.length === 1 ? "" : "s"}
                 </div>
-              ))}
+              </div>
+              <div className="flex items-center gap-3">
+                {selectedClientIds.length > 0 && (
+                  <button
+                    onClick={deleteSelectedClients}
+                    className="flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Trash2 size={15} /> Delete {selectedClientIds.length} selected
+                  </button>
+                )}
+                <div className="flex border border-gray-200 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setClientView("list")}
+                    className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium ${
+                      clientView === "list" ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    <Table2 size={15} /> List
+                  </button>
+                  <button
+                    onClick={() => setClientView("grid")}
+                    className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium ${
+                      clientView === "grid" ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    <LayoutGrid size={15} /> Grid
+                  </button>
+                </div>
+                <button
+                  onClick={handleImportClients}
+                  className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
+                >
+                  <Upload size={15} /> Import client list
+                </button>
+                <button className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium">
+                  <Plus size={15} /> Add client
+                </button>
+              </div>
             </div>
+
+            {clientView === "list" ? (
+              <div className="p-8">
+                <div className="border border-gray-200 rounded-xl overflow-x-auto">
+                  <table className="text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                        <th className="pl-5 pr-2 py-3 font-medium w-8">
+                          <input
+                            type="checkbox"
+                            checked={clients.length > 0 && clients.every((c) => selectedClientIds.includes(c.id))}
+                            onChange={() =>
+                              setSelectedClientIds(
+                                clients.length > 0 && clients.every((c) => selectedClientIds.includes(c.id))
+                                  ? []
+                                  : clients.map((c) => c.id)
+                              )
+                            }
+                            className="w-4 h-4 rounded border-gray-300"
+                          />
+                        </th>
+                        <th className="px-3 py-3 font-medium whitespace-nowrap">Name</th>
+                        {clientColumns.map((col) => (
+                          <th key={col.id} className="px-3 py-3 font-medium whitespace-nowrap">
+                            <div className="flex items-center gap-1.5">
+                              <span>{col.label}</span>
+                              <button
+                                onClick={() => handleDeleteColumn(col.id)}
+                                className="text-gray-300 hover:text-red-500"
+                                title="Delete column"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          </th>
+                        ))}
+                        <th className="px-3 py-3">
+                          <button
+                            onClick={() => setShowAddColumn(true)}
+                            className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-800 whitespace-nowrap"
+                          >
+                            <Plus size={13} /> Add column
+                          </button>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {clients.map((client) => (
+                        <tr key={client.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
+                          <td className="pl-5 pr-2 py-2.5">
+                            <input
+                              type="checkbox"
+                              checked={selectedClientIds.includes(client.id)}
+                              onChange={() => toggleClientSelected(client.id)}
+                              className="w-4 h-4 rounded border-gray-300"
+                            />
+                          </td>
+                          <td className="px-3 py-2.5 min-w-[160px]">
+                            {editingClientCell === `${client.id}:__name` ? (
+                              <input
+                                autoFocus
+                                value={clientEditValue}
+                                onChange={(e) => setClientEditValue(e.target.value)}
+                                onBlur={() => {
+                                  setEditingClientCell(null);
+                                  updateClientName(client.id, clientEditValue.trim() || client.name);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") e.currentTarget.blur();
+                                  if (e.key === "Escape") setEditingClientCell(null);
+                                }}
+                                className="w-full border border-gray-300 rounded-md px-2 py-1 text-xs font-semibold outline-none"
+                              />
+                            ) : (
+                              <button
+                                onClick={() => startEditClientCell(client.id, "__name", client.name)}
+                                className="text-left font-semibold text-xs"
+                              >
+                                {client.name}
+                              </button>
+                            )}
+                          </td>
+                          {clientColumns.map((col) => (
+                            <td key={col.id} className="px-3 py-2.5 min-w-[130px] max-w-[220px]">
+                              {renderClientCell(client, col)}
+                            </td>
+                          ))}
+                          <td />
+                        </tr>
+                      ))}
+                      {clients.length === 0 && (
+                        <tr>
+                          <td colSpan={clientColumns.length + 3} className="px-5 py-10 text-center text-sm text-gray-400">
+                            No clients yet — click "Import client list" to bring in the CSV data, or "Add client" to
+                            start fresh.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="p-8 grid grid-cols-2 gap-4">
+                {clients.map((cl) => (
+                  <div key={cl.id} className="border border-gray-200 rounded-xl p-5 hover:shadow-sm transition-shadow">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <div className="font-semibold">{cl.name}</div>
+                        <div className="text-sm text-gray-500">{cl.industry}</div>
+                      </div>
+                      <span
+                        className={`text-xs px-2.5 py-1 rounded-full border ${
+                          cl.adsLive
+                            ? "bg-green-50 text-green-700 border-green-200"
+                            : "bg-gray-50 text-gray-500 border-gray-200"
+                        }`}
+                      >
+                        {cl.adsLive ? "Ads live" : "Not live"}
+                      </span>
+                    </div>
+                    <div className="mt-4 flex items-center justify-between">
+                      <div className="text-sm text-gray-600">
+                        <span className="font-semibold text-gray-900">{cl.leads}</span> leads this month
+                      </div>
+                      {cl.script && (
+                        <a
+                          href={cl.script}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"
+                        >
+                          <ExternalLink size={13} /> Call script
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1523,6 +1975,74 @@ export default function SimpleCRM() {
                   className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium"
                 >
                   Save
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add client column modal */}
+      {showAddColumn && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddColumn(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add column</h2>
+              <button onClick={() => setShowAddColumn(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddColumn} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Column name</label>
+                <input
+                  required
+                  autoFocus
+                  value={columnForm.label}
+                  onChange={(e) => setColumnForm((f) => ({ ...f, label: e.target.value }))}
+                  placeholder="e.g. Renewal Date"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Type</label>
+                <select
+                  value={columnForm.type}
+                  onChange={(e) => setColumnForm((f) => ({ ...f, type: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+                >
+                  {CLIENT_COLUMN_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {columnForm.type === "select" && (
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Options</label>
+                  <input
+                    value={columnForm.options}
+                    onChange={(e) => setColumnForm((f) => ({ ...f, options: e.target.value }))}
+                    placeholder="Comma-separated, e.g. Hot, Warm, Cold"
+                    className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                  />
+                  <div className="text-xs text-gray-400 mt-1">Each one becomes a colored option in the dropdown.</div>
+                </div>
+              )}
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddColumn(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">
+                  Add column
                 </button>
               </div>
             </form>
