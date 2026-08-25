@@ -252,57 +252,15 @@ async function seedIfEmpty() {
     );
   }
 
-  const contactIds = {};
   for (const c of SEED_CONTACTS) {
-    const [row] = await query(
-      "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+    await query(
+      "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes) VALUES ($1,$2,$3,$4,$5,$6,$7)",
       [c.name, c.email, c.phone, c.client, c.status, c.lastContact, c.notes]
     );
-    contactIds[c.name] = row.id;
   }
-
-  const seedConvos = [
-    {
-      leadId: contactIds["Sarah Mitchell"],
-      name: "Sarah Mitchell",
-      messages: [
-        { text: "Yes I'm interested in the battery rebate", time: "10:32 AM", outgoing: false },
-        { text: "No worries — I'll give you a call shortly to run through it.", time: "10:35 AM", outgoing: true },
-      ],
-    },
-    {
-      leadId: contactIds["Tom Nguyen"],
-      name: "Tom Nguyen",
-      messages: [
-        { text: "What deposit do I need?", time: "9:15 AM", outgoing: false },
-        { text: "No worries — I'll give you a call shortly to run through it.", time: "9:20 AM", outgoing: true },
-      ],
-    },
-    {
-      leadId: contactIds["Emma Taylor"],
-      name: "Emma Taylor",
-      messages: [{ text: "Confirmed for Thursday 2pm", time: "Yesterday", outgoing: false }],
-    },
-    {
-      leadId: contactIds["David Chen"],
-      name: "David Chen",
-      messages: [{ text: "Can you call me after 5?", time: "Yesterday", outgoing: false }],
-    },
-  ];
-
-  for (const convo of seedConvos) {
-    const last = convo.messages[convo.messages.length - 1];
-    const [row] = await query(
-      "INSERT INTO conversations (lead_id, name, preview, time_label, unread) VALUES ($1,$2,$3,$4,true) RETURNING id",
-      [convo.leadId, convo.name, convo.messages[0].text, last.time]
-    );
-    for (const m of convo.messages) {
-      await query(
-        "INSERT INTO messages (conversation_id, type, text, time_label, outgoing) VALUES ($1,'text',$2,$3,$4)",
-        [row.id, m.text, m.time, m.outgoing]
-      );
-    }
-  }
+  // Conversations are NOT seeded — they only appear once a real call
+  // is logged, so the inbox starts empty rather than full of sample
+  // chatter.
 }
 
 // ---------- Queries used by the API routes ----------
@@ -403,6 +361,10 @@ export async function logCall({ leadId, name, text, time }) {
     time,
   ]);
   return conversationId;
+}
+
+export async function deleteConversations(ids) {
+  await query("DELETE FROM conversations WHERE id = ANY($1::int[])", [ids]);
 }
 
 export async function getDialLists() {

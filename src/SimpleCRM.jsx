@@ -153,54 +153,7 @@ const initialClients = [
   },
 ];
 
-const initialConversations = [
-  {
-    id: 1,
-    leadId: 1,
-    name: "Sarah Mitchell",
-    preview: "Yes I'm interested in the battery rebate",
-    time: "10:32 AM",
-    unread: true,
-    messages: [
-      { id: 1, type: "text", text: "Yes I'm interested in the battery rebate", time: "10:32 AM", outgoing: false },
-      { id: 2, type: "text", text: "No worries — I'll give you a call shortly to run through it.", time: "10:35 AM", outgoing: true },
-    ],
-  },
-  {
-    id: 2,
-    leadId: 6,
-    name: "Tom Nguyen",
-    preview: "What deposit do I need?",
-    time: "9:15 AM",
-    unread: true,
-    messages: [
-      { id: 1, type: "text", text: "What deposit do I need?", time: "9:15 AM", outgoing: false },
-      { id: 2, type: "text", text: "No worries — I'll give you a call shortly to run through it.", time: "9:20 AM", outgoing: true },
-    ],
-  },
-  {
-    id: 3,
-    leadId: 3,
-    name: "Emma Taylor",
-    preview: "Confirmed for Thursday 2pm",
-    time: "Yesterday",
-    unread: false,
-    messages: [
-      { id: 1, type: "text", text: "Confirmed for Thursday 2pm", time: "Yesterday", outgoing: false },
-    ],
-  },
-  {
-    id: 4,
-    leadId: 2,
-    name: "David Chen",
-    preview: "Can you call me after 5?",
-    time: "Yesterday",
-    unread: false,
-    messages: [
-      { id: 1, type: "text", text: "Can you call me after 5?", time: "Yesterday", outgoing: false },
-    ],
-  },
-];
+const initialConversations = [];
 
 const statusColors = {
   "New Lead": "bg-blue-50 text-blue-700 border-blue-200",
@@ -233,7 +186,8 @@ export default function SimpleCRM() {
   const [contacts, setContacts] = useState(initialContacts);
   const [clients, setClients] = useState(initialClients);
   const [conversations, setConversations] = useState(initialConversations);
-  const [activeConvo, setActiveConvo] = useState(1);
+  const [activeConvo, setActiveConvo] = useState(null);
+  const [selectedConvoIds, setSelectedConvoIds] = useState([]);
   const [search, setSearch] = useState("");
 
   // Loads everything from the database on mount. If the request fails
@@ -353,6 +307,27 @@ export default function SimpleCRM() {
       setDbError(err.message || "Could not delete the selected contacts.");
     }
   };
+
+  // Bulk-select + delete on the Conversation list
+  const toggleConvoSelected = (id) =>
+    setSelectedConvoIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+
+  const deleteSelectedConvos = async () => {
+    if (!selectedConvoIds.length) return;
+    const count = selectedConvoIds.length;
+    if (!window.confirm(`Delete ${count} conversation${count === 1 ? "" : "s"}? This can't be undone.`)) return;
+    const ids = selectedConvoIds;
+    setSelectedConvoIds([]);
+    setConversations((cs) => cs.filter((c) => !ids.includes(c.id)));
+    setActiveConvo((prev) => (ids.includes(prev) ? null : prev));
+    try {
+      await api.delete(`/api/conversations?ids=${ids.join(",")}`);
+    } catch (err) {
+      setDbError(err.message || "Could not delete the selected conversations.");
+    }
+  };
+
+  const activeConversation = conversations.find((c) => c.id === activeConvo) || null;
 
   // A lead's client record, derived from the Client column: look up the
   // client by name in the client list to read its script link/content.
@@ -681,61 +656,91 @@ export default function SimpleCRM() {
         {page === "conversation" && (
           <div className="flex flex-1 overflow-hidden">
             <div className="w-80 border-r border-gray-200 flex flex-col">
-              <div className="px-4 py-4 border-b border-gray-100 font-semibold">Conversations</div>
-              <div className="flex-1 overflow-y-auto">
-                {conversations.map((c) => (
+              <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
+                <span className="font-semibold">Conversations</span>
+                {selectedConvoIds.length > 0 && (
                   <button
+                    onClick={deleteSelectedConvos}
+                    className="flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-800"
+                  >
+                    <Trash2 size={13} /> Delete {selectedConvoIds.length}
+                  </button>
+                )}
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {conversations.length === 0 && (
+                  <div className="px-4 py-10 text-center text-sm text-gray-400">
+                    No conversations yet — they'll appear here automatically after a call.
+                  </div>
+                )}
+                {conversations.map((c) => (
+                  <div
                     key={c.id}
-                    onClick={() => setActiveConvo(c.id)}
-                    className={`w-full text-left px-4 py-3 border-b border-gray-50 hover:bg-gray-50 ${
+                    className={`flex items-start gap-2 px-4 py-3 border-b border-gray-50 hover:bg-gray-50 ${
                       activeConvo === c.id ? "bg-gray-50" : ""
                     }`}
                   >
-                    <div className="flex justify-between items-center">
-                      <span className={`text-sm ${c.unread ? "font-semibold" : "font-medium"}`}>{c.name}</span>
-                      <span className="text-xs text-gray-400">{c.time}</span>
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      {c.unread && <Circle size={7} className="fill-blue-500 text-blue-500 shrink-0" />}
-                      <span className="text-xs text-gray-500 truncate">{c.preview}</span>
-                    </div>
-                  </button>
+                    <input
+                      type="checkbox"
+                      checked={selectedConvoIds.includes(c.id)}
+                      onChange={() => toggleConvoSelected(c.id)}
+                      className="w-4 h-4 rounded border-gray-300 mt-1 shrink-0"
+                    />
+                    <button onClick={() => setActiveConvo(c.id)} className="flex-1 min-w-0 text-left">
+                      <div className="flex justify-between items-center">
+                        <span className={`text-sm ${c.unread ? "font-semibold" : "font-medium"}`}>{c.name}</span>
+                        <span className="text-xs text-gray-400">{c.time}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        {c.unread && <Circle size={7} className="fill-blue-500 text-blue-500 shrink-0" />}
+                        <span className="text-xs text-gray-500 truncate">{c.preview}</span>
+                      </div>
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
             <div className="flex-1 flex flex-col">
-              <div className="px-6 py-4 border-b border-gray-100 font-semibold">
-                {conversations.find((c) => c.id === activeConvo)?.name}
-              </div>
-              <div className="flex-1 p-6 space-y-3 overflow-y-auto bg-gray-50/50">
-                {(conversations.find((c) => c.id === activeConvo)?.messages || []).map((m) =>
-                  m.type === "call" ? (
-                    <div key={m.id} className="flex justify-center">
-                      <div className="flex items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-3 py-1.5 rounded-full">
-                        <PhoneCall size={12} /> {m.text}
-                      </div>
-                    </div>
-                  ) : (
-                    <div
-                      key={m.id}
-                      className={`max-w-xs rounded-2xl px-4 py-2.5 text-sm ${
-                        m.outgoing
-                          ? "bg-gray-900 text-white rounded-tr-sm ml-auto"
-                          : "bg-gray-100 rounded-tl-sm"
-                      }`}
-                    >
-                      {m.text}
-                    </div>
-                  )
-                )}
-              </div>
-              <div className="p-4 border-t border-gray-100 flex gap-2">
-                <input
-                  placeholder="Type a message…"
-                  className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-                />
-                <button className="bg-gray-900 text-white text-sm px-5 rounded-lg font-medium">Send</button>
-              </div>
+              {activeConversation ? (
+                <>
+                  <div className="px-6 py-4 border-b border-gray-100 font-semibold">{activeConversation.name}</div>
+                  <div className="flex-1 p-6 space-y-3 overflow-y-auto bg-gray-50/50">
+                    {(activeConversation.messages || []).map((m) =>
+                      m.type === "call" ? (
+                        <div key={m.id} className="flex justify-center">
+                          <div className="flex items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-3 py-1.5 rounded-full">
+                            <PhoneCall size={12} /> {m.text}
+                          </div>
+                        </div>
+                      ) : (
+                        <div
+                          key={m.id}
+                          className={`max-w-xs rounded-2xl px-4 py-2.5 text-sm ${
+                            m.outgoing
+                              ? "bg-gray-900 text-white rounded-tr-sm ml-auto"
+                              : "bg-gray-100 rounded-tl-sm"
+                          }`}
+                        >
+                          {m.text}
+                        </div>
+                      )
+                    )}
+                  </div>
+                  <div className="p-4 border-t border-gray-100 flex gap-2">
+                    <input
+                      placeholder="Type a message…"
+                      className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                    />
+                    <button className="bg-gray-900 text-white text-sm px-5 rounded-lg font-medium">Send</button>
+                  </div>
+                </>
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
+                  {conversations.length === 0
+                    ? "No conversations yet — they'll appear here automatically after a call."
+                    : "Select a conversation"}
+                </div>
+              )}
             </div>
           </div>
         )}

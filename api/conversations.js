@@ -1,4 +1,4 @@
-import { ensureSchema, getConversations, logCall } from "../server/db.js";
+import { ensureSchema, getConversations, logCall, deleteConversations } from "../server/db.js";
 
 export default async function handler(req, res) {
   try {
@@ -15,7 +15,17 @@ export default async function handler(req, res) {
       return res.status(201).json({ conversationId });
     }
 
-    res.setHeader("Allow", "GET, POST");
+    if (req.method === "DELETE") {
+      const ids = String(req.query.ids || "")
+        .split(",")
+        .map((id) => Number(id.trim()))
+        .filter(Boolean);
+      if (!ids.length) return res.status(400).json({ error: "Missing ids" });
+      await deleteConversations(ids);
+      return res.status(204).end();
+    }
+
+    res.setHeader("Allow", "GET, POST, DELETE");
     return res.status(405).json({ error: "Method not allowed" });
   } catch (err) {
     console.error("[api/conversations]", err);

@@ -16,6 +16,7 @@ import {
   deleteContacts,
   getConversations,
   logCall,
+  deleteConversations,
   getDialLists,
   createDialList,
   deleteDialList,
@@ -138,6 +139,18 @@ app.post(
     if (!leadId || !text) return res.status(400).json({ error: "Missing leadId or text" });
     const conversationId = await logCall({ leadId, name, text, time });
     res.status(201).json({ conversationId });
+  })
+);
+app.delete(
+  "/api/conversations",
+  dbRoute(async (req, res) => {
+    const ids = String(req.query.ids || "")
+      .split(",")
+      .map((id) => Number(id.trim()))
+      .filter(Boolean);
+    if (!ids.length) return res.status(400).json({ error: "Missing ids" });
+    await deleteConversations(ids);
+    res.status(204).end();
   })
 );
 
