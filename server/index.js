@@ -619,7 +619,7 @@ app.get(
 app.post(
   "/api/conversations",
   dbRoute(async (req, res) => {
-    const { leadId, name, text, time } = req.body || {};
+    const { leadId, name, text, time, type } = req.body || {};
     if (!leadId || !text) return res.status(400).json({ error: "Missing leadId or text" });
     const allowedTags = scopeTagsForUser(req.user);
     if (allowedTags) {
@@ -628,7 +628,7 @@ app.post(
         return res.status(403).json({ error: "Not found" });
       }
     }
-    const conversationId = await logCall({ leadId, name, text, time });
+    const conversationId = await logCall({ leadId, name, text, time, type });
     res.status(201).json({ conversationId });
   })
 );

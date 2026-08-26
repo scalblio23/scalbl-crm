@@ -29,6 +29,7 @@ import {
   Filter,
   ChevronDown,
   BarChart3,
+  CheckCircle2,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -1570,22 +1571,22 @@ export default function SimpleCRM() {
   const callStartRef = useRef(null); // when the current call was placed, for duration
   const callEndedRef = useRef(false); // guards against double-processing one call's end
 
-  // Logs a completed call into that lead's conversation thread — creates
-  // a new thread if one doesn't exist yet, otherwise appends to it and
-  // bumps it to the top of the list. Applies to every call, whether
-  // placed ad hoc or as part of a Power Dialler session.
-  const logCallToConversation = (lead, durationMs) => {
+  // Shared by every system message logged into a lead's conversation
+  // thread (call summaries, stage/outcome updates, …) — creates a new
+  // thread if one doesn't exist yet, otherwise appends to it and bumps
+  // it to the top of the list, then persists it.
+  const logSystemMessageToConversation = (lead, { type, text, preview }) => {
     const now = new Date();
     const timeLabel = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const summary = `Outgoing call · ${timeLabel} · ${formatCallDuration(durationMs)} · by ${authUser?.name || "You"}`;
-    const message = { id: `call-${lead.id}-${now.getTime()}`, type: "call", text: summary, time: timeLabel };
+    const previewText = preview ?? text;
+    const message = { id: `${type}-${lead.id}-${now.getTime()}`, type, text, time: timeLabel };
 
     const existing = conversations.find((c) => c.leadId === lead.id);
     let tempId = existing?.id;
     if (existing) {
       const updated = {
         ...existing,
-        preview: summary,
+        preview: previewText,
         time: timeLabel,
         unread: false,
         messages: [...(existing.messages || []), message],
@@ -1598,7 +1599,7 @@ export default function SimpleCRM() {
         id: tempId,
         leadId: lead.id,
         name: lead.name,
-        preview: summary,
+        preview: previewText,
         time: timeLabel,
         unread: false,
         messages: [message],
@@ -1610,14 +1611,32 @@ export default function SimpleCRM() {
     // Persist to the database. For a brand-new conversation, reconcile
     // our locally-guessed id with the real one the server generated.
     api
-      .post("/api/conversations", { leadId: lead.id, name: lead.name, text: summary, time: timeLabel })
+      .post("/api/conversations", { leadId: lead.id, name: lead.name, text, time: timeLabel, type })
       .then(({ conversationId }) => {
         if (!existing && conversationId && conversationId !== tempId) {
           setConversations((cs) => cs.map((c) => (c.id === tempId ? { ...c, id: conversationId } : c)));
           setActiveConvo((prev) => (prev === tempId ? conversationId : prev));
         }
       })
-      .catch((err) => setDbError(err.message || "Could not save the call to the conversation."));
+      .catch((err) => setDbError(err.message || "Could not save this to the conversation."));
+  };
+
+  // Logs a completed call into that lead's conversation thread.
+  // Applies to every call, whether placed ad hoc or as part of a
+  // Power Dialler session.
+  const logCallToConversation = (lead, durationMs) => {
+    const timeLabel = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const summary = `Outgoing call · ${timeLabel} · ${formatCallDuration(durationMs)} · by ${authUser?.name || "You"}`;
+    logSystemMessageToConversation(lead, { type: "call", text: summary });
+  };
+
+  // Logs the wrap-up's chosen STAGE as its own message — separate from
+  // the "Outgoing call" line above, since the outcome isn't known
+  // until wrap-up finishes, a beat after the call itself ends. This is
+  // what makes a "Booked" outcome show up in the Conversation tab.
+  const logStageToConversation = (lead, stage) => {
+    if (!stage) return;
+    logSystemMessageToConversation(lead, { type: "outcome", text: stage, preview: `Outcome: ${stage}` });
   };
 
   // ----- Power Dialler session (auto-dial through a list) -----
@@ -1907,6 +1926,12 @@ export default function SimpleCRM() {
     // status field, which every imported lead defaults to "New Lead".
     const status = customStage;
     const durationSeconds = Math.round((durationMs || 0) / 1000);
+
+    // Only log an outcome message when the stage actually changed in
+    // this session — re-confirming the same stage isn't news.
+    if (customStage && customStage !== (lead.fields?.stage || "")) {
+      logStageToConversation(lead, customStage);
+    }
 
     setContacts((cs) =>
       cs.map((c) =>
@@ -2372,6 +2397,17 @@ export default function SimpleCRM() {
                         <div key={m.id} className="flex justify-center">
                           <div className="flex items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-3 py-1.5 rounded-full">
                             <PhoneCall size={12} /> {m.text}
+                          </div>
+                        </div>
+                      ) : m.type === "outcome" ? (
+                        <div key={m.id} className="flex justify-center">
+                          <div
+                            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border font-medium ${selectOptionColor(
+                              stageColumnDef || {},
+                              m.text
+                            )}`}
+                          >
+                            <CheckCircle2 size={12} /> Outcome: {m.text}
                           </div>
                         </div>
                       ) : (

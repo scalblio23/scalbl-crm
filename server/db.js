@@ -553,7 +553,8 @@ export async function updateContact(id, patch) {
        last_contact = COALESCE($4, last_contact),
        fields = fields || $5::jsonb,
        lead_date = COALESCE($6, lead_date),
-       tag = COALESCE($7, tag)
+       tag = COALESCE($7, tag),
+       phone = COALESCE($8, phone)
      WHERE id = $1
      RETURNING *`,
     [
@@ -564,6 +565,7 @@ export async function updateContact(id, patch) {
       JSON.stringify(patch.fields || {}),
       patch.leadDate ?? null,
       patch.tag ?? null,
+      patch.phone ?? null,
     ]
   );
   return rows[0] ? contactFromRow(rows[0]) : null;
@@ -904,8 +906,8 @@ export async function logMessage({ leadId, name, text, time, type = "text", outg
 
 // Logs a call onto a lead's conversation — thin wrapper around
 // logMessage kept for backwards-compat call sites.
-export async function logCall({ leadId, name, text, time }) {
-  return logMessage({ leadId, name, text, time, type: "call", outgoing: true });
+export async function logCall({ leadId, name, text, time, type = "call" }) {
+  return logMessage({ leadId, name, text, time, type, outgoing: true });
 }
 
 export async function deleteConversations(ids) {

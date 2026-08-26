@@ -13,7 +13,7 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "POST") {
-      const { leadId, name, text, time } = req.body || {};
+      const { leadId, name, text, time, type } = req.body || {};
       if (!leadId || !text) return res.status(400).json({ error: "Missing leadId or text" });
       if (allowedTags) {
         const lead = await getContactById(leadId);
@@ -21,7 +21,7 @@ export default async function handler(req, res) {
           return res.status(403).json({ error: "Not found" });
         }
       }
-      const conversationId = await logCall({ leadId, name, text, time });
+      const conversationId = await logCall({ leadId, name, text, time, type });
       return res.status(201).json({ conversationId });
     }
 
