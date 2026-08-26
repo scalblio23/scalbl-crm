@@ -27,6 +27,7 @@ import {
   ArrowDown,
   ArrowUpDown,
   Filter,
+  ChevronDown,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -481,17 +482,11 @@ export default function SimpleCRM() {
   const updateDialFieldTextFilter = (key, value) => setDialFieldTextFilters((f) => ({ ...f, [key]: value }));
   const [openDialExcludeMenu, setOpenDialExcludeMenu] = useState(null); // column key whose checklist is open, or null
 
-  // Secondary sidebar (Contacts) — filters the table down to one tag
-  // at a time, "All" shows everyone. A contact's tag is free text —
-  // for imported leads, the name of the sheet tab/client they came
-  // from (e.g. "9. Khan Legal"); for anything else it's whatever was
-  // typed into the Add Contact modal, or left blank ("Untagged").
-  const [contactsTagFilter, setContactsTagFilter] = useState("All");
-  // "is" / "is not" (needs a specific tag picked — contactsTagFilter)
-  // or "is empty" / "is not empty" (no tag value needed, just
-  // whether the contact has any tag at all).
-  const [contactsTagOp, setContactsTagOp] = useState("is");
-  const [showTagFilterMenu, setShowTagFilterMenu] = useState(false);
+  // Secondary sidebar (Contacts) — quick-click tag list, "All" shows
+  // everyone. A contact's tag is free text — for imported leads, the
+  // name of the sheet tab/client they came from (e.g. "9. Khan
+  // Legal"); for anything else it's whatever was typed into the Add
+  // Contact modal, or left blank ("Untagged").
   const contactTagCounts = contacts.reduce((acc, c) => {
     const t = c.tag || "Untagged";
     acc[t] = (acc[t] || 0) + 1;
@@ -509,20 +504,78 @@ export default function SimpleCRM() {
     return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
   };
 
-  const contactMatchesTagFilter = (c) => {
-    if (contactsTagOp === "is empty") return !c.tag;
-    if (contactsTagOp === "is not empty") return !!c.tag;
-    if (contactsTagFilter === "All") return true;
-    const isMatch = contactsTagFilter === "Untagged" ? !c.tag : c.tag === contactsTagFilter;
-    return contactsTagOp === "is" ? isMatch : !isMatch;
+  // Filter bar (Contacts) — any number of filters, each on any
+  // column (fixed fields or any of the imported criteria), each with
+  // is / is not / is empty / is not empty. "is"/"is not" means
+  // "equals" for a select/checkbox column and "contains" (substring,
+  // case-insensitive) for anything else, so free-text columns still
+  // get useful search-style filtering. All filters AND together.
+  const contactFilterColumns = [
+    { key: "__name", label: "Name", kind: "text", get: (c) => c.name },
+    { key: "__email", label: "Email", kind: "text", get: (c) => c.email },
+    { key: "__phone", label: "Phone", kind: "text", get: (c) => c.phone },
+    { key: "__client", label: "Client", kind: "text", get: (c) => c.client },
+    { key: "__tag", label: "Tag", kind: "select", options: contactTagNames, get: (c) => c.tag },
+    { key: "__status", label: "Status", kind: "select", options: Object.keys(statusColors), get: (c) => c.status },
+    { key: "__leadDate", label: "Date", kind: "text", get: (c) => c.leadDate },
+    { key: "__notes", label: "Notes", kind: "text", get: (c) => c.notes },
+    { key: "__lastContact", label: "Last contact", kind: "text", get: (c) => c.lastContact },
+    ...contactColumns.map((col) => ({
+      key: col.key,
+      label: col.label,
+      kind: col.type === "select" || col.type === "checkbox" ? "select" : "text",
+      options: col.type === "select" ? (col.options || []).map((o) => o.value) : col.type === "checkbox" ? ["Yes", "No"] : null,
+      get: (c) => (col.type === "checkbox" ? (c.fields?.[col.key] ? "Yes" : "No") : c.fields?.[col.key]),
+    })),
+  ];
+  const contactFilterColumnsByKey = Object.fromEntries(contactFilterColumns.map((c) => [c.key, c]));
+
+  const nextContactFilterIdRef = useRef(1);
+  const [contactFilters, setContactFilters] = useState([]); // [{ id, column, op, value }]
+  const [editingContactFilterId, setEditingContactFilterId] = useState(null);
+  const addContactFilter = () => {
+    const id = nextContactFilterIdRef.current++;
+    setContactFilters((fs) => [...fs, { id, column: "__tag", op: "is", value: "" }]);
+    setEditingContactFilterId(id);
   };
-  const contactsTagFilterActive = contactsTagOp === "is empty" || contactsTagOp === "is not empty" || contactsTagFilter !== "All";
+  const updateContactFilter = (id, patch) =>
+    setContactFilters((fs) => fs.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+  const removeContactFilter = (id) => {
+    setContactFilters((fs) => fs.filter((f) => f.id !== id));
+    setEditingContactFilterId((cur) => (cur === id ? null : cur));
+  };
+  // Sidebar shortcut — sets/replaces the one Tag filter rather than
+  // stacking duplicates when you click around the tag list.
+  const setTagQuickFilter = (op, value) =>
+    setContactFilters((fs) => {
+      const without = fs.filter((f) => f.column !== "__tag");
+      if (op === null) return without;
+      const existing = fs.find((f) => f.column === "__tag");
+      return [...without, { id: existing?.id ?? nextContactFilterIdRef.current++, column: "__tag", op, value: value ?? "" }];
+    });
+  const tagQuickFilter = contactFilters.find((f) => f.column === "__tag");
+
+  const contactMatchesFilters = (c) =>
+    contactFilters.every((f) => {
+      const colDef = contactFilterColumnsByKey[f.column];
+      if (!colDef) return true;
+      const raw = colDef.get(c);
+      const val = raw === null || raw === undefined ? "" : String(raw);
+      if (f.op === "is empty") return val === "";
+      if (f.op === "is not empty") return val !== "";
+      if (colDef.kind === "select") {
+        const eq = val === f.value;
+        return f.op === "is" ? eq : !eq;
+      }
+      const contains = val.toLowerCase().includes((f.value || "").toLowerCase());
+      return f.op === "is" ? contains : !contains;
+    });
 
   const filteredContacts = contacts.filter(
     (c) =>
       (c.name.toLowerCase().includes(search.toLowerCase()) ||
         c.client.toLowerCase().includes(search.toLowerCase())) &&
-      contactMatchesTagFilter(c)
+      contactMatchesFilters(c)
   );
 
   // Sortable by clicking any column header — Date and every other
@@ -598,7 +651,7 @@ export default function SimpleCRM() {
   const [contactsPage, setContactsPage] = useState(0);
   useEffect(() => {
     setContactsPage(0);
-  }, [contactsTagFilter, contactsTagOp, search, contactSort.key, contactSort.dir]);
+  }, [contactFilters, search, contactSort.key, contactSort.dir]);
   const totalContactsPages = Math.max(1, Math.ceil(sortedContacts.length / CONTACTS_PAGE_SIZE));
   const pagedContacts = sortedContacts.slice(
     contactsPage * CONTACTS_PAGE_SIZE,
@@ -1505,7 +1558,8 @@ export default function SimpleCRM() {
   const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
-  const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, secondsLeft }
+  const [wrapUp, setWrapUp] = useState(null); // { lead, customStatus, notes, secondsLeft }
+  const [wrapUpStatusMenuOpen, setWrapUpStatusMenuOpen] = useState(false);
   const [callLog, setCallLog] = useState([]);
 
   // Kept in sync with `session` so the long-lived Twilio call event
@@ -1587,7 +1641,15 @@ export default function SimpleCRM() {
   // force a wrap-up.
   const handleCallEnded = (lead) => {
     if (!sessionRef.current || !lead) return;
-    setWrapUp({ lead, status: lead.status, notes: lead.notes || "", secondsLeft: WRAP_UP_SECONDS });
+    // customStatus edits the imported STATUS column (contacts.fields.status)
+    // — the real per-lead pipeline state — rather than the app's fixed
+    // status field, which every imported lead defaults to "New Lead".
+    setWrapUp({
+      lead,
+      customStatus: lead.fields?.status || "",
+      notes: lead.notes || "",
+      secondsLeft: WRAP_UP_SECONDS,
+    });
   };
 
   // Saves the wrap-up's status/notes onto the lead, logs the call, and
@@ -1595,10 +1657,18 @@ export default function SimpleCRM() {
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, status, notes } = wrapUp;
+    const { lead, customStatus, notes } = wrapUp;
+    // customStatus edits the imported STATUS column (contacts.fields.status)
+    // — the real per-lead pipeline state — rather than the app's fixed
+    // status field, which every imported lead defaults to "New Lead".
+    const status = customStatus;
 
     setContacts((cs) =>
-      cs.map((c) => (c.id === lead.id ? { ...c, status, notes, lastContact: "Today" } : c))
+      cs.map((c) =>
+        c.id === lead.id
+          ? { ...c, notes, lastContact: "Today", fields: { ...c.fields, status: customStatus } }
+          : c
+      )
     );
     const tempLogId = `${lead.id}-${Date.now()}`;
     setCallLog((log) => [
@@ -1611,7 +1681,7 @@ export default function SimpleCRM() {
     // Persist to the database — fire-and-forget, surfaced as a banner
     // on failure rather than blocking the session from moving on.
     api
-      .patch("/api/contacts", { id: lead.id, status, notes, lastContact: "Today" })
+      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", fields: { status: customStatus } })
       .catch((err) => setDbError(err.message || "Could not save the updated lead."));
     api
       .post("/api/call-log", { leadId: lead.id, name: lead.name, phone: lead.phone, client: lead.client, status, notes })
@@ -1851,12 +1921,9 @@ export default function SimpleCRM() {
               </div>
               <nav className="flex-1 pb-4">
                 <button
-                  onClick={() => {
-                    setContactsTagFilter("All");
-                    setContactsTagOp("is");
-                  }}
+                  onClick={() => setTagQuickFilter(null)}
                   className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                    !contactsTagFilterActive
+                    !tagQuickFilter
                       ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                       : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
                   }`}
@@ -1867,12 +1934,9 @@ export default function SimpleCRM() {
                 {contactTagNames.map((tag) => (
                   <button
                     key={tag}
-                    onClick={() => {
-                      setContactsTagFilter(tag);
-                      setContactsTagOp("is");
-                    }}
+                    onClick={() => setTagQuickFilter("is", tag)}
                     className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                      contactsTagOp === "is" && contactsTagFilter === tag
+                      tagQuickFilter?.op === "is" && tagQuickFilter.value === tag
                         ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                         : "hover:bg-gray-100"
                     }`}
@@ -1885,9 +1949,9 @@ export default function SimpleCRM() {
                 ))}
                 {contactTagCounts["Untagged"] > 0 && (
                   <button
-                    onClick={() => setContactsTagOp("is empty")}
+                    onClick={() => setTagQuickFilter("is empty", "")}
                     className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
-                      contactsTagOp === "is empty"
+                      tagQuickFilter?.op === "is empty"
                         ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                         : "hover:bg-gray-100"
                     }`}
@@ -2100,78 +2164,117 @@ export default function SimpleCRM() {
             <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
               <div>
                 <h1 className="text-xl font-bold">Contacts</h1>
-                <div className="relative mt-1.5">
-                  <button
-                    onClick={() => setShowTagFilterMenu((v) => !v)}
-                    className={`flex items-center gap-1.5 rounded-full border text-xs font-medium px-3 py-1.5 ${
-                      contactsTagFilterActive
-                        ? "border-gray-300 bg-white text-gray-800"
-                        : "border-dashed border-gray-300 text-gray-400 hover:text-gray-600 hover:border-gray-400"
-                    }`}
-                  >
-                    <Filter size={12} />
-                    {contactsTagFilterActive ? (
-                      <>
-                        Tag {contactsTagOp}
-                        {(contactsTagOp === "is" || contactsTagOp === "is not") && `: ${contactsTagFilter}`}
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 ml-0.5" />
-                      </>
-                    ) : (
-                      "+ Filter"
-                    )}
-                  </button>
-
-                  {showTagFilterMenu && (
-                    <>
-                      <div className="fixed inset-0 z-40" onClick={() => setShowTagFilterMenu(false)} />
-                      <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-3 w-64">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-sm font-medium text-gray-700 shrink-0">Tag</span>
-                          <select
-                            value={contactsTagOp}
-                            onChange={(e) => setContactsTagOp(e.target.value)}
-                            className="flex-1 border border-gray-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-gray-400 bg-white"
-                          >
-                            <option value="is">is</option>
-                            <option value="is not">is not</option>
-                            <option value="is empty">is empty</option>
-                            <option value="is not empty">is not empty</option>
-                          </select>
-                        </div>
-
-                        {(contactsTagOp === "is" || contactsTagOp === "is not") && (
-                          <select
-                            autoFocus
-                            value={contactTagNames.includes(contactsTagFilter) ? contactsTagFilter : ""}
-                            onChange={(e) => setContactsTagFilter(e.target.value)}
-                            className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm outline-none focus:border-gray-400 bg-white"
-                          >
-                            <option value="" disabled>
-                              Select tag…
-                            </option>
-                            {contactTagNames.map((tag) => (
-                              <option key={tag} value={tag}>
-                                {tag}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-
-                        {contactsTagFilterActive && (
-                          <button
-                            onClick={() => {
-                              setContactsTagFilter("All");
-                              setContactsTagOp("is");
-                              setShowTagFilterMenu(false);
+                <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                  {contactFilters.map((f) => {
+                    const colDef = contactFilterColumnsByKey[f.column];
+                    if (!colDef) return null;
+                    const isOpen = editingContactFilterId === f.id;
+                    return (
+                      <div className="relative" key={f.id}>
+                        <button
+                          onClick={() => setEditingContactFilterId((cur) => (cur === f.id ? null : f.id))}
+                          className="flex items-center gap-1.5 rounded-full border border-gray-300 bg-white text-gray-800 text-xs font-medium px-3 py-1.5"
+                        >
+                          <Filter size={12} />
+                          {colDef.label} {f.op}
+                          {(f.op === "is" || f.op === "is not") && f.value && `: ${f.value}`}
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeContactFilter(f.id);
                             }}
-                            className="mt-3 text-xs text-gray-400 hover:text-red-600"
+                            className="ml-0.5 text-gray-400 hover:text-red-600"
                           >
-                            Clear filter
-                          </button>
+                            ✕
+                          </span>
+                        </button>
+
+                        {isOpen && (
+                          <>
+                            <div className="fixed inset-0 z-40" onClick={() => setEditingContactFilterId(null)} />
+                            <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-3 w-72">
+                              <select
+                                value={f.column}
+                                onChange={(e) => updateContactFilter(f.id, { column: e.target.value, value: "" })}
+                                className="w-full mb-2 border border-gray-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-gray-400 bg-white"
+                              >
+                                <optgroup label="Fixed fields">
+                                  {contactFilterColumns
+                                    .filter((c) => c.key.startsWith("__"))
+                                    .map((c) => (
+                                      <option key={c.key} value={c.key}>
+                                        {c.label}
+                                      </option>
+                                    ))}
+                                </optgroup>
+                                <optgroup label="Imported criteria">
+                                  {contactFilterColumns
+                                    .filter((c) => !c.key.startsWith("__"))
+                                    .map((c) => (
+                                      <option key={c.key} value={c.key}>
+                                        {c.label}
+                                      </option>
+                                    ))}
+                                </optgroup>
+                              </select>
+
+                              <select
+                                value={f.op}
+                                onChange={(e) => updateContactFilter(f.id, { op: e.target.value })}
+                                className="w-full mb-2 border border-gray-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-gray-400 bg-white"
+                              >
+                                <option value="is">is</option>
+                                <option value="is not">is not</option>
+                                <option value="is empty">is empty</option>
+                                <option value="is not empty">is not empty</option>
+                              </select>
+
+                              {(f.op === "is" || f.op === "is not") &&
+                                (colDef.kind === "select" ? (
+                                  <select
+                                    autoFocus
+                                    value={(colDef.options || []).includes(f.value) ? f.value : ""}
+                                    onChange={(e) => updateContactFilter(f.id, { value: e.target.value })}
+                                    className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                                  >
+                                    <option value="" disabled>
+                                      Select value…
+                                    </option>
+                                    {(colDef.options || []).map((opt) => (
+                                      <option key={opt} value={opt}>
+                                        {opt}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    autoFocus
+                                    value={f.value}
+                                    onChange={(e) => updateContactFilter(f.id, { value: e.target.value })}
+                                    placeholder="Value…"
+                                    className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm outline-none focus:border-gray-400"
+                                  />
+                                ))}
+
+                              <button
+                                onClick={() => removeContactFilter(f.id)}
+                                className="mt-3 text-xs text-gray-400 hover:text-red-600"
+                              >
+                                Remove filter
+                              </button>
+                            </div>
+                          </>
                         )}
                       </div>
-                    </>
-                  )}
+                    );
+                  })}
+
+                  <button
+                    onClick={addContactFilter}
+                    className="flex items-center gap-1.5 rounded-full border border-dashed border-gray-300 text-gray-400 hover:text-gray-600 hover:border-gray-400 text-xs font-medium px-3 py-1.5"
+                  >
+                    <Filter size={12} /> + Filter
+                  </button>
                 </div>
               </div>
               <div className="flex gap-3">
@@ -2367,9 +2470,7 @@ export default function SimpleCRM() {
                         className="px-8 py-10 text-center text-sm text-gray-400"
                       >
                         No contacts
-                        {contactsTagFilterActive ? ` matching tag ${contactsTagOp}${
-                          contactsTagOp === "is" || contactsTagOp === "is not" ? `: ${contactsTagFilter}` : ""
-                        }` : ""}
+                        {contactFilters.length > 0 ? ` matching ${contactFilters.length} filter${contactFilters.length === 1 ? "" : "s"}` : ""}
                         {search ? ` match "${search}"` : ""}
                       </td>
                     </tr>
@@ -2600,19 +2701,60 @@ export default function SimpleCRM() {
                   </div>
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
+                    <div className="relative">
                       <label className="text-xs font-medium text-gray-500 block mb-1">Status</label>
-                      <select
-                        value={wrapUp.status}
-                        onChange={(e) => setWrapUp((w) => (w ? { ...w, status: e.target.value } : w))}
-                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
-                      >
-                        {Object.keys(statusColors).map((s) => (
-                          <option key={s} value={s}>
-                            {s}
-                          </option>
-                        ))}
-                      </select>
+                      {(() => {
+                        const statusCol = contactColumns.find((c) => c.key === "status");
+                        const options = statusCol?.options || [];
+                        return (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
+                              className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
+                            >
+                              {wrapUp.customStatus ? (
+                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(statusCol || {}, wrapUp.customStatus)}`}>
+                                  {wrapUp.customStatus}
+                                </span>
+                              ) : (
+                                <span className="text-gray-300 text-xs">—</span>
+                              )}
+                              <ChevronDown size={14} className="text-gray-400" />
+                            </button>
+                            {wrapUpStatusMenuOpen && (
+                              <>
+                                <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
+                                <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full max-h-64 overflow-y-auto">
+                                  <button
+                                    onClick={() => {
+                                      setWrapUp((w) => (w ? { ...w, customStatus: "" } : w));
+                                      setWrapUpStatusMenuOpen(false);
+                                    }}
+                                    className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 text-xs text-gray-400"
+                                  >
+                                    —
+                                  </button>
+                                  {options.map((o) => (
+                                    <button
+                                      key={o.value}
+                                      onClick={() => {
+                                        setWrapUp((w) => (w ? { ...w, customStatus: o.value } : w));
+                                        setWrapUpStatusMenuOpen(false);
+                                      }}
+                                      className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
+                                    >
+                                      <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${SELECT_COLORS[o.color] || SELECT_COLORS.gray}`}>
+                                        {o.value}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                     <div>
                       <label className="text-xs font-medium text-gray-500 block mb-1">Notes</label>

@@ -62,8 +62,33 @@ export const CONTACT_COLUMNS = [
   {
     "key": "status",
     "label": "STATUS",
-    "type": "text",
-    "options": []
+    "type": "select",
+    "options": [
+      { "value": "New", "color": "blue" },
+      { "value": "No Answer", "color": "gray" },
+      { "value": "no answer", "color": "gray" },
+      { "value": "Not Interested", "color": "red" },
+      { "value": "not interested", "color": "red" },
+      { "value": "Booked", "color": "green" },
+      { "value": "booked", "color": "green" },
+      { "value": "yes", "color": "green" },
+      { "value": "no", "color": "red" },
+      { "value": "Lead (pleae call)", "color": "amber" },
+      { "value": "Pending", "color": "amber" },
+      { "value": "Call Back", "color": "amber" },
+      { "value": "In Talks", "color": "amber" },
+      { "value": "Upcoming", "color": "blue" },
+      { "value": "No Show", "color": "red" },
+      { "value": "Disqualified", "color": "red" },
+      { "value": "Cancelled", "color": "red" },
+      { "value": "Won", "color": "green" },
+      { "value": "Lost", "color": "red" },
+      { "value": "Need_more_leads", "color": "purple" },
+      { "value": "better_quality_leads", "color": "purple" },
+      { "value": "Kenilworth St, Bondi Junction", "color": "gray" },
+      { "value": "Mascot", "color": "gray" },
+      { "value": "Status", "color": "gray" }
+    ]
   },
   {
     "key": "issue",
