@@ -429,6 +429,7 @@ export default function SimpleCRM() {
     tag: "",
   };
   const [showAddContact, setShowAddContact] = useState(false);
+  const [showMoreContactFields, setShowMoreContactFields] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
   const updateContactForm = (key, value) =>
     setContactForm((f) => ({ ...f, [key]: value }));
@@ -2333,7 +2334,10 @@ export default function SimpleCRM() {
                     : "Import leads"}
                 </button>
                 <button
-                  onClick={() => setShowAddContact(true)}
+                  onClick={() => {
+                    setShowMoreContactFields(false);
+                    setShowAddContact(true);
+                  }}
                   className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
                 >
                   <Plus size={15} /> Add contact
@@ -3658,7 +3662,7 @@ export default function SimpleCRM() {
                 <X size={18} />
               </button>
             </div>
-            <form onSubmit={handleAddContact} className="px-6 py-5 space-y-4">
+            <form onSubmit={handleAddContact} className="px-6 py-5 space-y-4 max-h-[75vh] overflow-y-auto">
               <div>
                 <label className="text-sm font-medium block mb-1.5">Name</label>
                 <input
@@ -3689,68 +3693,76 @@ export default function SimpleCRM() {
                   className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">Client</label>
-                  <select
-                    value={contactForm.client}
-                    onChange={(e) => updateContactForm("client", e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
-                  >
-                    {clients.map((cl) => (
-                      <option key={cl.id} value={cl.name}>
-                        {cl.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">Status</label>
-                  <select
-                    value={contactForm.status}
-                    onChange={(e) => updateContactForm("status", e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
-                  >
-                    {Object.keys(statusColors).map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">Lead date</label>
-                  <input
-                    value={contactForm.leadDate}
-                    onChange={(e) => updateContactForm("leadDate", e.target.value)}
-                    placeholder="e.g. 24/11/2025"
-                    className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-                  />
-                </div>
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">Tag</label>
-                  <input
-                    value={contactForm.tag}
-                    onChange={(e) => updateContactForm("tag", e.target.value)}
-                    placeholder="e.g. Khan Legal"
-                    className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-                  />
-                </div>
-              </div>
               <div>
-                <label className="text-sm font-medium block mb-1.5">Notes</label>
-                <textarea
-                  value={contactForm.notes}
-                  onChange={(e) => updateContactForm("notes", e.target.value)}
-                  placeholder="Anything worth knowing before the next call…"
-                  rows={3}
-                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 resize-none"
+                <label className="text-sm font-medium block mb-1.5">Tag</label>
+                <input
+                  value={contactForm.tag}
+                  onChange={(e) => updateContactForm("tag", e.target.value)}
+                  placeholder="e.g. Khan Legal"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
                 />
               </div>
-              {contactColumns.length > 0 && (
+
+              <button
+                type="button"
+                onClick={() => setShowMoreContactFields((v) => !v)}
+                className="text-xs font-medium text-gray-500 hover:text-gray-800 flex items-center gap-1"
+              >
+                <ChevronDown size={13} className={`transition-transform ${showMoreContactFields ? "rotate-180" : ""}`} />
+                {showMoreContactFields ? "Hide extra criteria" : `Show more criteria (${4 + contactColumns.length})`}
+              </button>
+
+              {showMoreContactFields && (
                 <div className="space-y-4 pt-1 border-t border-gray-100">
+                  <div className="grid grid-cols-2 gap-3 pt-4">
+                    <div>
+                      <label className="text-sm font-medium block mb-1.5">Client</label>
+                      <select
+                        value={contactForm.client}
+                        onChange={(e) => updateContactForm("client", e.target.value)}
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+                      >
+                        {clients.map((cl) => (
+                          <option key={cl.id} value={cl.name}>
+                            {cl.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium block mb-1.5">Status</label>
+                      <select
+                        value={contactForm.status}
+                        onChange={(e) => updateContactForm("status", e.target.value)}
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+                      >
+                        {Object.keys(statusColors).map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Lead date</label>
+                    <input
+                      value={contactForm.leadDate}
+                      onChange={(e) => updateContactForm("leadDate", e.target.value)}
+                      placeholder="e.g. 24/11/2025"
+                      className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Notes</label>
+                    <textarea
+                      value={contactForm.notes}
+                      onChange={(e) => updateContactForm("notes", e.target.value)}
+                      placeholder="Anything worth knowing before the next call…"
+                      rows={3}
+                      className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 resize-none"
+                    />
+                  </div>
                   {contactColumns.map((col) => (
                     <div key={col.id} className={col.type === "checkbox" ? "flex items-center gap-2" : ""}>
                       <label className="text-sm font-medium block mb-1.5">{col.label}</label>
