@@ -19,30 +19,32 @@ export function missingTwilioEnv(env = process.env) {
 }
 
 // The pool of numbers outbound calls rotate through as their caller
-// ID — set TWILIO_CALLER_IDS to a comma-separated list ("+618700001,
-// +618700002,+618700003,+618700004") to rotate across several
-// numbers, spreading call volume so no single number gets flagged by
-// carriers. TWILIO_CALLER_ID (singular) still works as before for a
-// single-number setup, and is used as a fallback if TWILIO_CALLER_IDS
-// isn't set.
-// Twilio requires E.164 ("+61...") for a caller ID — missing the "+"
-// makes the gateway reject the call outright (every single call, not
-// intermittently — the Twilio Console's own phone number list shows
-// each number twice, once with the "+" and once without, which is an
-// easy copy-paste trap when filling in this env var). Normalize
-// defensively rather than trust the env var is exactly right.
+// ID. Comma-separate several ("+618700001,+618700002,+618700003,
+// +618700004") to rotate across them, spreading call volume so no
+// single number gets flagged by carriers — or leave just one for a
+// single-number setup. Reads TWILIO_CALLER_IDS (plural) if set,
+// otherwise TWILIO_CALLER_ID (singular) — but either name is split
+// the same way, since "the list ended up on the singularly-named var"
+// is an easy mistake (that's exactly what happened once already) and
+// there's no reason the app should break over which name it's under.
+//
+// Twilio also requires E.164 ("+61...") for a caller ID — missing the
+// "+" makes the gateway reject the call outright, every single call,
+// not intermittently (the Twilio Console's own phone number list
+// shows each number twice, once with the "+" and once without, right
+// underneath — an easy copy-paste trap). Normalized defensively
+// rather than trusting the env var is exactly right.
 function normalizeCallerId(raw) {
   const s = String(raw).trim();
   return s && !s.startsWith("+") ? `+${s}` : s;
 }
 
 export function getCallerIdPool(env = process.env) {
-  const list = (env.TWILIO_CALLER_IDS || "")
+  const raw = env.TWILIO_CALLER_IDS || env.TWILIO_CALLER_ID || "";
+  return raw
     .split(",")
     .map((s) => normalizeCallerId(s))
     .filter(Boolean);
-  if (list.length) return list;
-  return env.TWILIO_CALLER_ID ? [normalizeCallerId(env.TWILIO_CALLER_ID)] : [];
 }
 
 // Mints a short-lived Access Token so the browser can register as a
