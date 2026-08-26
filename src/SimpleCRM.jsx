@@ -30,7 +30,7 @@ import {
   ChevronDown,
   BarChart3,
   CheckCircle2,
-  Link2,
+  Zap,
   Copy,
   RefreshCw,
 } from "lucide-react";
@@ -612,6 +612,7 @@ export default function SimpleCRM() {
   const [loadingTagWebhooks, setLoadingTagWebhooks] = useState(false);
   const [newWebhookTag, setNewWebhookTag] = useState("");
   const [copiedWebhookTag, setCopiedWebhookTag] = useState(null);
+  const [copiedTokenTag, setCopiedTokenTag] = useState(null);
 
   const openTagWebhooks = async () => {
     setShowTagWebhooks(true);
@@ -635,6 +636,19 @@ export default function SimpleCRM() {
       setTimeout(() => setCopiedWebhookTag((t) => (t === row.tag ? null : t)), 2000);
     } catch {
       window.prompt("Copy this webhook URL:", url);
+    }
+  };
+
+  // Same token that's embedded in the URL — surfaced on its own for
+  // platforms that want an endpoint plus a separate auth token/header
+  // rather than a token baked into the URL.
+  const copyTagToken = async (row) => {
+    try {
+      await navigator.clipboard.writeText(row.token);
+      setCopiedTokenTag(row.tag);
+      setTimeout(() => setCopiedTokenTag((t) => (t === row.tag ? null : t)), 2000);
+    } catch {
+      window.prompt("Copy this token:", row.token);
     }
   };
 
@@ -2392,9 +2406,9 @@ export default function SimpleCRM() {
                 <button
                   onClick={openTagWebhooks}
                   title="Lead webhooks — post new leads straight into a tag"
-                  className="text-gray-400 hover:text-gray-700"
+                  className="text-amber-500 hover:text-amber-600"
                 >
-                  <Link2 size={13} />
+                  <Zap size={15} fill="currentColor" />
                 </button>
               </div>
               <nav className="flex-1 pb-4">
@@ -4933,6 +4947,7 @@ export default function SimpleCRM() {
                           <Trash2 size={13} />
                         </button>
                       </div>
+                      <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1">URL</div>
                       <div className="flex items-center gap-1.5">
                         <input
                           readOnly
@@ -4950,10 +4965,32 @@ export default function SimpleCRM() {
                         </button>
                         <button
                           onClick={() => regenerateTagWebhook(row.tag)}
-                          title="Regenerate webhook URL"
+                          title="Regenerate webhook URL (and token)"
                           className="shrink-0 flex items-center text-gray-400 hover:text-gray-700 p-1.5 rounded-md border border-gray-200 hover:bg-gray-50"
                         >
                           <RefreshCw size={12} />
+                        </button>
+                      </div>
+                      <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1 mt-2">
+                        Token{" "}
+                        <span className="normal-case text-gray-300 font-normal">
+                          — for platforms that want it separately from the URL
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          readOnly
+                          value={row.token}
+                          onFocus={(e) => e.target.select()}
+                          className="flex-1 min-w-0 border border-gray-200 rounded-md px-2 py-1.5 text-[11px] text-gray-500 bg-gray-50 outline-none font-mono"
+                        />
+                        <button
+                          onClick={() => copyTagToken(row)}
+                          title="Copy token"
+                          className="shrink-0 flex items-center gap-1 text-[11px] font-medium px-2 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                        >
+                          <Copy size={12} />
+                          {copiedTokenTag === row.tag ? "Copied" : "Copy"}
                         </button>
                       </div>
                     </div>
