@@ -1770,6 +1770,11 @@ export default function SimpleCRM() {
   const reportsByUser = summarizeCallsBy(reportsCallLog, (e) => e.userName || "Unknown");
   const reportsByClient = summarizeCallsBy(reportsCallLog, (e) => e.client);
   const reportsByTag = summarizeCallsBy(reportsCallLog, (e) => e.tag || "Untagged");
+  // The actual list behind the Bookings tile — every call in range
+  // whose outcome was Booked, most recent first.
+  const reportsBookedList = reportsCallLog
+    .filter((e) => e.status === "Booked")
+    .sort((a, b) => new Date(b.calledAt) - new Date(a.calledAt));
 
   // Call log "status"/"outcome" is written from the imported STAGE
   // column's value (see finishWrapUp) — colored the same way STAGE
@@ -3807,6 +3812,55 @@ export default function SimpleCRM() {
                         <tr>
                           <td colSpan={reportsIsClientView ? 3 : 5} className="px-5 py-8 text-center text-sm text-gray-400">
                             No calls in this range
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="border border-green-200 rounded-2xl overflow-hidden">
+                <div className="px-5 py-3.5 border-b border-green-100 bg-green-50/40 font-semibold text-sm text-green-800">
+                  Booked leads ({reportsBookedList.length})
+                </div>
+                <div className="max-h-96 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                        <th className="px-5 py-2.5 font-medium">Lead</th>
+                        <th className="px-5 py-2.5 font-medium">Phone</th>
+                        <th className="px-5 py-2.5 font-medium">Tag</th>
+                        {!reportsIsClientView && <th className="px-5 py-2.5 font-medium">Rep</th>}
+                        <th className="px-5 py-2.5 font-medium">Booked</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reportsBookedList.map((entry) => (
+                        <tr key={entry.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
+                          <td className="px-5 py-2.5 font-medium whitespace-nowrap">{entry.name}</td>
+                          <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{entry.phone}</td>
+                          <td className="px-5 py-2.5">
+                            {entry.tag ? (
+                              <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(entry.tag)}`}>
+                                {entry.tag}
+                              </span>
+                            ) : (
+                              <span className="text-gray-300 text-xs">—</span>
+                            )}
+                          </td>
+                          {!reportsIsClientView && (
+                            <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{entry.userName || "—"}</td>
+                          )}
+                          <td className="px-5 py-2.5 text-gray-400 whitespace-nowrap">
+                            {new Date(entry.calledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                          </td>
+                        </tr>
+                      ))}
+                      {reportsBookedList.length === 0 && (
+                        <tr>
+                          <td colSpan={reportsIsClientView ? 4 : 5} className="px-5 py-8 text-center text-sm text-gray-400">
+                            No bookings in this range
                           </td>
                         </tr>
                       )}
