@@ -602,6 +602,77 @@ export default function SimpleCRM() {
     return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
   };
 
+  // Lead webhooks — one URL per tag (see api/lead-webhook.js). A
+  // lead-gen platform posts to that URL and the lead lands straight
+  // on that tag's tab, no manual import. Loaded lazily the first time
+  // the panel's opened rather than on every bootstrap, since it's an
+  // occasional admin action.
+  const [showTagWebhooks, setShowTagWebhooks] = useState(false);
+  const [tagWebhooks, setTagWebhooks] = useState([]); // [{ tag, token }]
+  const [loadingTagWebhooks, setLoadingTagWebhooks] = useState(false);
+  const [newWebhookTag, setNewWebhookTag] = useState("");
+  const [copiedWebhookTag, setCopiedWebhookTag] = useState(null);
+
+  const openTagWebhooks = async () => {
+    setShowTagWebhooks(true);
+    setLoadingTagWebhooks(true);
+    try {
+      setTagWebhooks(await api.get("/api/tag-webhooks"));
+    } catch (err) {
+      setDbError(err.message || "Could not load webhooks.");
+    } finally {
+      setLoadingTagWebhooks(false);
+    }
+  };
+
+  const webhookUrlForTag = (token) => `${window.location.origin}/api/lead-webhook?token=${token}`;
+
+  const copyTagWebhookUrl = async (row) => {
+    const url = webhookUrlForTag(row.token);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedWebhookTag(row.tag);
+      setTimeout(() => setCopiedWebhookTag((t) => (t === row.tag ? null : t)), 2000);
+    } catch {
+      window.prompt("Copy this webhook URL:", url);
+    }
+  };
+
+  const createTagWebhook = async (tag) => {
+    const trimmed = tag.trim();
+    if (!trimmed) return;
+    try {
+      const row = await api.post("/api/tag-webhooks", { tag: trimmed });
+      setTagWebhooks((rows) => [...rows.filter((r) => r.tag !== row.tag), row].sort((a, b) => a.tag.localeCompare(b.tag)));
+      setNewWebhookTag("");
+    } catch (err) {
+      setDbError(err.message || "Could not create the webhook.");
+    }
+  };
+
+  const regenerateTagWebhook = async (tag) => {
+    if (
+      !window.confirm(`Generate a new webhook URL for "${tag}"? The old one will stop accepting leads immediately.`)
+    )
+      return;
+    try {
+      const row = await api.patch("/api/tag-webhooks", { tag });
+      setTagWebhooks((rows) => rows.map((r) => (r.tag === tag ? row : r)));
+    } catch (err) {
+      setDbError(err.message || "Could not regenerate the webhook URL.");
+    }
+  };
+
+  const deleteTagWebhookRow = async (tag) => {
+    if (!window.confirm(`Delete the webhook for "${tag}"? Anything still posting to its URL will start failing.`)) return;
+    setTagWebhooks((rows) => rows.filter((r) => r.tag !== tag));
+    try {
+      await api.delete(`/api/tag-webhooks?tag=${encodeURIComponent(tag)}`);
+    } catch (err) {
+      setDbError(err.message || "Could not delete the webhook.");
+    }
+  };
+
   // Filter bar (Contacts) — any number of filters, each on any
   // column (fixed fields or any of the imported criteria), each with
   // is / is not / is empty / is not empty. "is"/"is not" means
@@ -927,47 +998,6 @@ export default function SimpleCRM() {
       await api.patch("/api/clients", { id: clientId, name });
     } catch (err) {
       setDbError(err.message || "Could not save the change.");
-    }
-  };
-
-  // Each client's webhook URL is what a lead-gen platform (a form,
-  // Zapier/Make, GoHighLevel, Meta Lead Ads, …) posts new leads to —
-  // see api/lead-webhook.js. The token in it doubles as that
-  // endpoint's whole auth model, so it stays visible/copyable here
-  // rather than shown once like an API key.
-  const [copiedWebhookClientId, setCopiedWebhookClientId] = useState(null);
-
-  const webhookUrlForClient = (client) => `${window.location.origin}/api/lead-webhook?token=${client.webhookToken}`;
-  // A client's row name here rarely matches their real tag naming
-  // (e.g. "2. Wilco Rel..."), so which tab a webhook lead lands on is
-  // a separate, pickable setting (fields.webhook_tag) rather than
-  // always being the client's name — see the "Tags new leads as"
-  // selector below.
-  const webhookTagForClient = (client) => client.fields?.webhook_tag || client.name;
-
-  const copyClientWebhookUrl = async (client) => {
-    const url = webhookUrlForClient(client);
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopiedWebhookClientId(client.id);
-      setTimeout(() => setCopiedWebhookClientId((id) => (id === client.id ? null : id)), 2000);
-    } catch {
-      window.prompt("Copy this webhook URL:", url);
-    }
-  };
-
-  const regenerateClientWebhook = async (client) => {
-    if (
-      !window.confirm(
-        `Generate a new webhook URL for ${client.name}? The old one will stop accepting leads immediately — update it wherever it's currently pasted in.`
-      )
-    )
-      return;
-    try {
-      const updated = await api.patch("/api/clients", { id: client.id, regenerateWebhookToken: true });
-      setClients((cs) => cs.map((c) => (c.id === client.id ? updated : c)));
-    } catch (err) {
-      setDbError(err.message || "Could not regenerate the webhook URL.");
     }
   };
 
@@ -2357,8 +2387,15 @@ export default function SimpleCRM() {
         <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
           {page === "contacts" && (
             <>
-              <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
-                Tags
+              <div className="px-4 pt-5 pb-2 flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Tags</span>
+                <button
+                  onClick={openTagWebhooks}
+                  title="Lead webhooks — post new leads straight into a tag"
+                  className="text-gray-400 hover:text-gray-700"
+                >
+                  <Link2 size={13} />
+                </button>
               </div>
               <nav className="flex-1 pb-4">
                 <button
@@ -4082,7 +4119,6 @@ export default function SimpleCRM() {
                             </div>
                           </th>
                         ))}
-                        <th className="px-3 py-3 font-medium whitespace-nowrap">Lead webhook</th>
                         <th className="px-3 py-3">
                           <button
                             onClick={() => setShowAddColumn(true)}
@@ -4134,52 +4170,12 @@ export default function SimpleCRM() {
                               {renderClientCell(client, col)}
                             </td>
                           ))}
-                          <td className="px-3 py-2.5 whitespace-nowrap">
-                            {client.webhookToken && (
-                              <div className="flex flex-col gap-1 min-w-[190px]">
-                                <select
-                                  value={webhookTagForClient(client)}
-                                  onChange={(e) => updateClientField(client.id, "webhook_tag", e.target.value)}
-                                  title="Which Contacts tag new leads from this webhook land on"
-                                  className="border border-gray-200 rounded-md px-1.5 py-1 text-[11px] outline-none bg-white"
-                                >
-                                  {!contactTagNames.includes(webhookTagForClient(client)) && (
-                                    <option value={webhookTagForClient(client)}>
-                                      {webhookTagForClient(client)} (new tag)
-                                    </option>
-                                  )}
-                                  {contactTagNames.map((t) => (
-                                    <option key={t} value={t}>
-                                      {t}
-                                    </option>
-                                  ))}
-                                </select>
-                                <div className="flex items-center gap-1">
-                                  <button
-                                    onClick={() => copyClientWebhookUrl(client)}
-                                    title={webhookUrlForClient(client)}
-                                    className="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
-                                  >
-                                    <Copy size={12} />
-                                    {copiedWebhookClientId === client.id ? "Copied" : "Copy URL"}
-                                  </button>
-                                  <button
-                                    onClick={() => regenerateClientWebhook(client)}
-                                    title="Regenerate webhook URL"
-                                    className="text-gray-400 hover:text-gray-700 p-1 rounded-md border border-gray-200 hover:bg-gray-50"
-                                  >
-                                    <RefreshCw size={12} />
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </td>
                           <td />
                         </tr>
                       ))}
                       {clients.length === 0 && (
                         <tr>
-                          <td colSpan={clientColumns.length + 4} className="px-5 py-10 text-center text-sm text-gray-400">
+                          <td colSpan={clientColumns.length + 3} className="px-5 py-10 text-center text-sm text-gray-400">
                             No clients yet — click "Import client list" to bring in the CSV data, or "Add client" to
                             start fresh.
                           </td>
@@ -4223,56 +4219,6 @@ export default function SimpleCRM() {
                         </a>
                       )}
                     </div>
-                    {cl.webhookToken && (
-                      <div className="mt-3 pt-3 border-t border-gray-100">
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-gray-500 mb-1.5">
-                          <Link2 size={12} /> Lead webhook
-                        </div>
-                        <div className="flex items-center gap-1.5 mb-1.5">
-                          <span className="text-[11px] text-gray-400 shrink-0">Tags new leads as</span>
-                          <select
-                            value={webhookTagForClient(cl)}
-                            onChange={(e) => updateClientField(cl.id, "webhook_tag", e.target.value)}
-                            className="flex-1 min-w-0 border border-gray-200 rounded-md px-1.5 py-1 text-[11px] outline-none bg-white"
-                          >
-                            {!contactTagNames.includes(webhookTagForClient(cl)) && (
-                              <option value={webhookTagForClient(cl)}>{webhookTagForClient(cl)} (new tag)</option>
-                            )}
-                            {contactTagNames.map((t) => (
-                              <option key={t} value={t}>
-                                {t}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            readOnly
-                            value={webhookUrlForClient(cl)}
-                            onFocus={(e) => e.target.select()}
-                            className="flex-1 min-w-0 border border-gray-200 rounded-md px-2 py-1.5 text-[11px] text-gray-500 bg-gray-50 outline-none font-mono"
-                          />
-                          <button
-                            onClick={() => copyClientWebhookUrl(cl)}
-                            title="Copy webhook URL"
-                            className="shrink-0 flex items-center gap-1 text-[11px] font-medium px-2 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
-                          >
-                            <Copy size={12} />
-                            {copiedWebhookClientId === cl.id ? "Copied" : "Copy"}
-                          </button>
-                          <button
-                            onClick={() => regenerateClientWebhook(cl)}
-                            title="Regenerate webhook URL"
-                            className="shrink-0 flex items-center text-gray-400 hover:text-gray-700 p-1.5 rounded-md border border-gray-200 hover:bg-gray-50"
-                          >
-                            <RefreshCw size={12} />
-                          </button>
-                        </div>
-                        <div className="text-[11px] text-gray-400 mt-1">
-                          New leads posted here land in Contacts tagged "{webhookTagForClient(cl)}".
-                        </div>
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
@@ -4938,6 +4884,115 @@ export default function SimpleCRM() {
                   Add column
                 </button>
               </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Lead webhooks — one URL per tag, see api/lead-webhook.js */}
+      {showTagWebhooks && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowTagWebhooks(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div>
+                <h2 className="text-lg font-bold">Lead webhooks</h2>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  One URL per tag — post a new lead to it and it lands straight on that tag's tab in Contacts.
+                </p>
+              </div>
+              <button onClick={() => setShowTagWebhooks(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="px-6 py-4 max-h-[55vh] overflow-y-auto">
+              {loadingTagWebhooks ? (
+                <div className="flex items-center justify-center py-10 text-gray-400">
+                  <Loader2 size={18} className="animate-spin" />
+                </div>
+              ) : tagWebhooks.length === 0 ? (
+                <div className="text-sm text-gray-400 py-6 text-center">
+                  No webhooks yet — create one for a tag below.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {tagWebhooks.map((row) => (
+                    <div key={row.tag} className="border border-gray-200 rounded-lg p-3">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(row.tag)}`}>
+                          {row.tag}
+                        </span>
+                        <button
+                          onClick={() => deleteTagWebhookRow(row.tag)}
+                          title="Delete this webhook"
+                          className="text-gray-300 hover:text-red-500"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          readOnly
+                          value={webhookUrlForTag(row.token)}
+                          onFocus={(e) => e.target.select()}
+                          className="flex-1 min-w-0 border border-gray-200 rounded-md px-2 py-1.5 text-[11px] text-gray-500 bg-gray-50 outline-none font-mono"
+                        />
+                        <button
+                          onClick={() => copyTagWebhookUrl(row)}
+                          title="Copy webhook URL"
+                          className="shrink-0 flex items-center gap-1 text-[11px] font-medium px-2 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                        >
+                          <Copy size={12} />
+                          {copiedWebhookTag === row.tag ? "Copied" : "Copy"}
+                        </button>
+                        <button
+                          onClick={() => regenerateTagWebhook(row.tag)}
+                          title="Regenerate webhook URL"
+                          className="shrink-0 flex items-center text-gray-400 hover:text-gray-700 p-1.5 rounded-md border border-gray-200 hover:bg-gray-50"
+                        >
+                          <RefreshCw size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                createTagWebhook(newWebhookTag);
+              }}
+              className="px-6 py-4 border-t border-gray-100 flex items-end gap-2"
+            >
+              <div className="flex-1">
+                <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                  Create a webhook for a tag
+                </label>
+                <input
+                  list="tag-webhook-existing-tags"
+                  value={newWebhookTag}
+                  onChange={(e) => setNewWebhookTag(e.target.value)}
+                  placeholder="Pick an existing tag, or type a new one"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <datalist id="tag-webhook-existing-tags">
+                  {contactTagNames.map((t) => (
+                    <option key={t} value={t} />
+                  ))}
+                </datalist>
+              </div>
+              <button
+                type="submit"
+                disabled={!newWebhookTag.trim()}
+                className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Create
+              </button>
             </form>
           </div>
         </div>

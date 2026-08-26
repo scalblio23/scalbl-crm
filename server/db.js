@@ -45,28 +45,21 @@ async function query(text, params = []) {
   return rows;
 }
 
-// ---------- Client webhook tokens (for /api/lead-webhook) ----------
-// Not hashed like API keys — unlike a key, this token needs to stay
-// visible/copyable from the Clients tab indefinitely (it's embedded
-// in a URL a client pastes into their lead-gen platform), not just
-// shown once at creation. It only grants "create a lead tagged for
-// this one client" on a public endpoint, not general CRM access, so
-// storing it in the clear is an acceptable trade for that usability.
+// ---------- Tag webhook tokens (for /api/lead-webhook) ----------
+// One token per Contacts tag (the "tab" shown in the Contacts sidebar)
+// rather than per client — a client's row name in the Clients tab
+// rarely matches the tag naming a CRM actually accumulates (e.g.
+// "2. Wilco Rel..."), so the webhook targets the tag directly. Not
+// hashed like an API key — unlike a key, this token needs to stay
+// visible/copyable indefinitely (it's embedded in a URL pasted into a
+// lead-gen platform), not just shown once at creation. It only grants
+// "create a lead under this one tag" on a public endpoint, not
+// general CRM access, so storing it in the clear is an acceptable
+// trade for that usability.
 const WEBHOOK_TOKEN_PREFIX = "whk_";
 
 function generateWebhookToken() {
   return WEBHOOK_TOKEN_PREFIX + crypto.randomBytes(20).toString("hex");
-}
-
-// Lazily gives every client a token — new ones get one straight from
-// createClient(), and this catches any client row that existed before
-// this feature shipped. Runs on every ensureSchema() call but is a
-// no-op once every row has one (the SELECT comes back empty).
-async function backfillClientWebhookTokens() {
-  const rows = await query("SELECT id FROM clients WHERE webhook_token IS NULL");
-  for (const row of rows) {
-    await query("UPDATE clients SET webhook_token = $2 WHERE id = $1", [row.id, generateWebhookToken()]);
-  }
 }
 
 // Idempotent — safe to call on every request. Creates the schema on
@@ -90,14 +83,10 @@ export async function ensureSchema() {
     // Table already existed before `fields` was added — safe no-op if
     // it's already there.
     await query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS fields JSONB DEFAULT '{}'`);
-    // Each client's own secret for /api/lead-webhook — the URL built
-    // from it (see webhookUrlForClient on the frontend) is what a
-    // client's lead-gen platform posts new leads to, so it doubles as
-    // that endpoint's auth. Nullable so this ALTER is safe to run
-    // against a table that predates the column; backfillClientWebhookTokens
-    // below fills in a real token for every row right after.
-    await query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS webhook_token TEXT UNIQUE`);
-    await backfillClientWebhookTokens();
+    // Superseded by tag_webhooks (below) — a per-client token doesn't
+    // match how tags are actually named, so this is dropped rather
+    // than kept around unused.
+    await query(`ALTER TABLE clients DROP COLUMN IF EXISTS webhook_token`);
     await query(`
       CREATE TABLE IF NOT EXISTS client_columns (
         id SERIAL PRIMARY KEY,
@@ -134,6 +123,17 @@ export async function ensureSchema() {
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS fields JSONB DEFAULT '{}'`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS lead_date TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS tag TEXT`);
+    // One webhook per tag (see findTagByWebhookToken/ensureTagWebhookToken
+    // below) — created on demand from the Contacts sidebar, not
+    // pre-populated for every tag, so this starts empty.
+    await query(`
+      CREATE TABLE IF NOT EXISTS tag_webhooks (
+        id SERIAL PRIMARY KEY,
+        tag TEXT UNIQUE NOT NULL,
+        token TEXT UNIQUE NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     await query(`
       CREATE TABLE IF NOT EXISTS contact_columns (
         id SERIAL PRIMARY KEY,
@@ -417,7 +417,6 @@ function clientFromRow(r) {
     script: r.script,
     scriptSteps: r.script_steps || [],
     fields: r.fields || {},
-    webhookToken: r.webhook_token,
   };
 }
 
@@ -428,7 +427,7 @@ export async function getClients() {
 
 export async function createClient(c) {
   const rows = await query(
-    "INSERT INTO clients (name, industry, leads, ads_live, script, script_steps, fields, webhook_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+    "INSERT INTO clients (name, industry, leads, ads_live, script, script_steps, fields) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
     [
       c.name,
       c.industry || null,
@@ -437,30 +436,9 @@ export async function createClient(c) {
       c.script || null,
       JSON.stringify(c.scriptSteps || []),
       JSON.stringify(c.fields || {}),
-      generateWebhookToken(),
     ]
   );
   return clientFromRow(rows[0]);
-}
-
-// Looks up which client a /api/lead-webhook request belongs to —
-// the token in its URL is that endpoint's whole auth model, so this
-// is effectively its login.
-export async function findClientByWebhookToken(token) {
-  if (!token) return null;
-  const rows = await query("SELECT * FROM clients WHERE webhook_token = $1", [token]);
-  return rows[0] ? clientFromRow(rows[0]) : null;
-}
-
-// Issues a client a fresh token, immediately invalidating its old
-// webhook URL — for when one leaks or a client wants to reconnect a
-// different platform.
-export async function regenerateClientWebhookToken(id) {
-  const rows = await query("UPDATE clients SET webhook_token = $2 WHERE id = $1 RETURNING *", [
-    id,
-    generateWebhookToken(),
-  ]);
-  return rows[0] ? clientFromRow(rows[0]) : null;
 }
 
 // Patches a client's name and/or custom fields. `fields` is shallow-
@@ -628,6 +606,59 @@ export async function updateContact(id, patch) {
 
 export async function deleteContacts(ids) {
   await query("DELETE FROM contacts WHERE id = ANY($1::int[])", [ids]);
+}
+
+// ---------- Tag webhooks (for /api/lead-webhook) ----------
+// One row per tag that's had a webhook URL generated for it — see
+// generateWebhookToken above. Not every tag has one; they're created
+// on demand from the "Webhooks" panel on the Contacts sidebar.
+
+function tagWebhookFromRow(r) {
+  return { tag: r.tag, token: r.token, createdAt: r.created_at };
+}
+
+export async function getTagWebhooks() {
+  const rows = await query("SELECT * FROM tag_webhooks ORDER BY tag");
+  return rows.map(tagWebhookFromRow);
+}
+
+// Returns the webhook for `tag`, creating one the first time it's
+// asked for. ON CONFLICT rather than a plain check-then-insert so two
+// concurrent requests for a brand-new tag can't race into a duplicate
+// insert and a unique-constraint error.
+export async function ensureTagWebhookToken(tag) {
+  const rows = await query(
+    `INSERT INTO tag_webhooks (tag, token) VALUES ($1,$2)
+     ON CONFLICT (tag) DO UPDATE SET tag = EXCLUDED.tag
+     RETURNING *`,
+    [tag, generateWebhookToken()]
+  );
+  return tagWebhookFromRow(rows[0]);
+}
+
+// Looks up which tag a /api/lead-webhook request belongs to — the
+// token in its URL is that endpoint's whole auth model, so this is
+// effectively its login.
+export async function findTagByWebhookToken(token) {
+  if (!token) return null;
+  const rows = await query("SELECT * FROM tag_webhooks WHERE token = $1", [token]);
+  return rows[0] ? tagWebhookFromRow(rows[0]) : null;
+}
+
+// Issues a fresh token for a tag's webhook, immediately invalidating
+// its old URL — for when one leaks or needs reconnecting to a
+// different platform. No-op (returns null) if that tag never had a
+// webhook to begin with.
+export async function regenerateTagWebhookToken(tag) {
+  const rows = await query("UPDATE tag_webhooks SET token = $2 WHERE tag = $1 RETURNING *", [
+    tag,
+    generateWebhookToken(),
+  ]);
+  return rows[0] ? tagWebhookFromRow(rows[0]) : null;
+}
+
+export async function deleteTagWebhook(tag) {
+  await query("DELETE FROM tag_webhooks WHERE tag = $1", [tag]);
 }
 
 // ---------- Contact table columns (dynamic schema, same pattern as

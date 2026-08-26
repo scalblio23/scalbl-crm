@@ -1,11 +1,11 @@
 // Public endpoint (no session cookie or API key) — reachable at
-// /api/lead-webhook?token=<per-client token>. The token in the URL
-// *is* the auth: paste this one URL into whatever a client's leads
-// come from (a form's webhook, Zapier/Make, GoHighLevel, Meta Lead
-// Ads via Zapier, …) and every new lead it posts lands in Contacts
-// already tagged into that client's tab — see PUBLIC_PATHS in
-// server/index.js and the Clients tab in the app for each client's URL.
-import { ensureSchema, findClientByWebhookToken, importContactsBulk } from "../server/db.js";
+// /api/lead-webhook?token=<per-tag token>. The token in the URL *is*
+// the auth: paste this one URL into whatever a lead comes from (a
+// form's webhook, Zapier/Make, GoHighLevel, Meta Lead Ads via
+// Zapier, …) and every new lead it posts lands in Contacts already
+// on that tag's tab — see PUBLIC_PATHS in server/index.js, and the
+// "Webhooks" panel on the Contacts sidebar for each tag's URL.
+import { ensureSchema, findTagByWebhookToken, importContactsBulk } from "../server/db.js";
 
 // Lead-gen platforms don't agree on field names, so accept the common
 // spellings for each core field rather than forcing every integrator
@@ -36,9 +36,9 @@ function nameFromBody(body) {
 }
 
 // Everything not recognized as a core field becomes a custom Contacts
-// column, same as a bulk sheet import — a client's form can ask
+// column, same as a bulk sheet import — a lead source can ask
 // whatever extra questions it wants and they still show up on the lead.
-function leadFromBody(body, client) {
+function leadFromBody(body, tag) {
   const fields = {};
   for (const [key, value] of Object.entries(body || {})) {
     if (RECOGNIZED_KEYS.has(key)) continue;
@@ -53,17 +53,11 @@ function leadFromBody(body, client) {
     status: (body?.status && String(body.status).trim()) || "New Lead",
     lastContact: "Today",
     leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
-    // Which Contacts tab this lands on — a client's row name rarely
-    // matches their actual tag naming (e.g. "2. Wilco Rel..."), so
-    // this is whatever tag was picked for the webhook in the Clients
-    // tab (client.fields.webhook_tag), falling back to the client's
-    // name only if that was never set. Deliberately never taken from
-    // the request body, so one client's webhook can't land leads on
-    // another client's tab. `client` stays the client's real name
-    // regardless, so Reports-by-client stays accurate even when the
-    // tag has been pointed somewhere else.
-    tag: client.fields?.webhook_tag || client.name,
-    client: client.name,
+    // Which Contacts tab this lands on — fixed by the token, never
+    // taken from the request body, so one webhook can't post leads
+    // onto a different tag's tab.
+    tag,
+    client: tag,
     fields,
   };
 }
@@ -78,8 +72,8 @@ export default async function handler(req, res) {
 
     const token = req.query?.token;
     if (!token) return res.status(401).json({ error: "Missing ?token= in the webhook URL" });
-    const client = await findClientByWebhookToken(String(token));
-    if (!client) return res.status(401).json({ error: "Invalid or revoked webhook token" });
+    const webhook = await findTagByWebhookToken(String(token));
+    if (!webhook) return res.status(401).json({ error: "Invalid or revoked webhook token" });
 
     const payloads = Array.isArray(req.body) ? req.body : [req.body];
     const withPhone = payloads.filter((b) => b && pick(b, CORE_ALIASES.phone));
@@ -88,9 +82,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No phone number found in the request body" });
     }
 
-    const records = withPhone.map((b) => leadFromBody(b, client));
+    const records = withPhone.map((b) => leadFromBody(b, webhook.tag));
     const result = await importContactsBulk(records);
-    return res.status(200).json({ ok: true, client: client.name, ...result, skipped });
+    return res.status(200).json({ ok: true, tag: webhook.tag, ...result, skipped });
   } catch (err) {
     console.error("[api/lead-webhook]", err);
     return res.status(500).json({ error: err.message || "Webhook failed" });

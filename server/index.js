@@ -13,8 +13,11 @@ import {
   createClient,
   updateClient,
   deleteClients,
-  findClientByWebhookToken,
-  regenerateClientWebhookToken,
+  getTagWebhooks,
+  ensureTagWebhookToken,
+  regenerateTagWebhookToken,
+  deleteTagWebhook,
+  findTagByWebhookToken,
   getClientColumns,
   createClientColumn,
   deleteClientColumn,
@@ -117,7 +120,15 @@ app.use(async (req, res, next) => {
 // separately just below since its GET must stay open for a client to
 // render their own leads' criteria.
 app.use(
-  ["/api/clients", "/api/client-columns", "/api/clients-import", "/api/contacts-import", "/api/contacts-bulk-import", "/api/dial-lists"],
+  [
+    "/api/clients",
+    "/api/client-columns",
+    "/api/clients-import",
+    "/api/contacts-import",
+    "/api/contacts-bulk-import",
+    "/api/dial-lists",
+    "/api/tag-webhooks",
+  ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
     next();
@@ -468,11 +479,10 @@ app.post("/api/sms-inbound", async (req, res) => {
 });
 
 // ---------- Lead webhook ----------
-// Public — auth is the per-client token in ?token=, not the session
+// Public — auth is the per-tag token in ?token=, not the session
 // cookie (see PUBLIC_PATHS above and api/lead-webhook.js, which this
-// mirrors). One URL per client, pasted into whatever their leads come
-// from, lands new leads in Contacts already tagged into that client's
-// tab.
+// mirrors). One URL per tag, pasted into whatever a lead comes from,
+// lands new leads in Contacts already on that tag's tab.
 const LEAD_WEBHOOK_CORE_ALIASES = {
   name: ["name", "full_name", "fullName", "fullname"],
   phone: ["phone", "phone_number", "phoneNumber", "mobile", "mobile_number"],
@@ -501,7 +511,7 @@ function leadWebhookName(body) {
   return [first, last].filter(Boolean).join(" ").trim();
 }
 
-function leadWebhookRecordFromBody(body, client) {
+function leadWebhookRecordFromBody(body, tag) {
   const fields = {};
   for (const [key, value] of Object.entries(body || {})) {
     if (LEAD_WEBHOOK_RECOGNIZED_KEYS.has(key)) continue;
@@ -516,11 +526,10 @@ function leadWebhookRecordFromBody(body, client) {
     status: (body?.status && String(body.status).trim()) || "New Lead",
     lastContact: "Today",
     leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
-    // Which Contacts tab this lands on — falls back to the client's
-    // name only if no tag override was ever picked for the webhook
-    // (see the "Tags new leads as" selector in the Clients tab).
-    tag: client.fields?.webhook_tag || client.name,
-    client: client.name,
+    // Fixed by the token, never taken from the request body, so one
+    // webhook can't post leads onto a different tag's tab.
+    tag,
+    client: tag,
     fields,
   };
 }
@@ -530,22 +539,54 @@ app.post("/api/lead-webhook", async (req, res) => {
     await ensureSchema();
     const token = req.query?.token;
     if (!token) return res.status(401).json({ error: "Missing ?token= in the webhook URL" });
-    const client = await findClientByWebhookToken(String(token));
-    if (!client) return res.status(401).json({ error: "Invalid or revoked webhook token" });
+    const webhook = await findTagByWebhookToken(String(token));
+    if (!webhook) return res.status(401).json({ error: "Invalid or revoked webhook token" });
 
     const payloads = Array.isArray(req.body) ? req.body : [req.body];
     const withPhone = payloads.filter((b) => b && leadWebhookPick(b, LEAD_WEBHOOK_CORE_ALIASES.phone));
     const skipped = payloads.length - withPhone.length;
     if (!withPhone.length) return res.status(400).json({ error: "No phone number found in the request body" });
 
-    const records = withPhone.map((b) => leadWebhookRecordFromBody(b, client));
+    const records = withPhone.map((b) => leadWebhookRecordFromBody(b, webhook.tag));
     const result = await importContactsBulk(records);
-    res.status(200).json({ ok: true, client: client.name, ...result, skipped });
+    res.status(200).json({ ok: true, tag: webhook.tag, ...result, skipped });
   } catch (err) {
     console.error("[db] /api/lead-webhook", err);
     res.status(500).json({ error: err.message || "Webhook failed" });
   }
 });
+
+// Managing the webhooks themselves (list/create/regenerate/delete) —
+// session-only, mirrors api/tag-webhooks.js. Added to the
+// forbidClientRole list below alongside /api/dial-lists etc.
+app.get("/api/tag-webhooks", dbRoute(async (req, res) => res.json(await getTagWebhooks())));
+app.post(
+  "/api/tag-webhooks",
+  dbRoute(async (req, res) => {
+    const tag = String(req.body?.tag || "").trim();
+    if (!tag) return res.status(400).json({ error: "Missing tag" });
+    res.status(201).json(await ensureTagWebhookToken(tag));
+  })
+);
+app.patch(
+  "/api/tag-webhooks",
+  dbRoute(async (req, res) => {
+    const tag = String(req.body?.tag || "").trim();
+    if (!tag) return res.status(400).json({ error: "Missing tag" });
+    const row = await regenerateTagWebhookToken(tag);
+    if (!row) return res.status(404).json({ error: "That tag doesn't have a webhook yet" });
+    res.json(row);
+  })
+);
+app.delete(
+  "/api/tag-webhooks",
+  dbRoute(async (req, res) => {
+    const tag = String(req.query.tag || "").trim();
+    if (!tag) return res.status(400).json({ error: "Missing tag" });
+    await deleteTagWebhook(tag);
+    res.status(204).end();
+  })
+);
 
 // ---------- Database ----------
 
@@ -557,9 +598,9 @@ app.post(
 app.patch(
   "/api/clients",
   dbRoute(async (req, res) => {
-    const { id, regenerateWebhookToken, ...patch } = req.body || {};
+    const { id, ...patch } = req.body || {};
     if (!id) return res.status(400).json({ error: "Missing id" });
-    const client = regenerateWebhookToken ? await regenerateClientWebhookToken(id) : await updateClient(id, patch);
+    const client = await updateClient(id, patch);
     if (!client) return res.status(404).json({ error: "Client not found" });
     res.json(client);
   })
