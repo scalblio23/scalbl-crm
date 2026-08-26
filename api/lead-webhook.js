@@ -16,7 +16,18 @@ const CORE_ALIASES = {
   email: ["email", "email_address", "emailAddress"],
   notes: ["notes", "message", "comment", "comments"],
 };
-const OTHER_RECOGNIZED_KEYS = ["first_name", "firstName", "last_name", "lastName", "tag", "client", "status", "lead_date", "leadDate"];
+const OTHER_RECOGNIZED_KEYS = [
+  "first_name",
+  "firstName",
+  "last_name",
+  "lastName",
+  "tag",
+  "client",
+  "status",
+  "lead_date",
+  "leadDate",
+  "token", // the auth token itself, present alongside lead data on a GET request
+];
 const RECOGNIZED_KEYS = new Set(Object.values(CORE_ALIASES).flat().concat(OTHER_RECOGNIZED_KEYS));
 
 function pick(body, keys) {
@@ -63,8 +74,8 @@ function leadFromBody(body, tag) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
+  if (req.method !== "POST" && req.method !== "GET") {
+    res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "Method not allowed" });
   }
   try {
@@ -75,7 +86,13 @@ export default async function handler(req, res) {
     const webhook = await findTagByWebhookToken(String(token));
     if (!webhook) return res.status(401).json({ error: "Invalid or revoked webhook token" });
 
-    const payloads = Array.isArray(req.body) ? req.body : [req.body];
+    // GET has no body — some simpler lead-gen platforms (and a quick
+    // browser/curl test) can only fire a plain GET with the lead's
+    // data as query params, so read from there instead. Only ever one
+    // lead per GET, since there's no clean way to send an array of
+    // leads in a query string.
+    const payloads =
+      req.method === "GET" ? [{ ...req.query }] : Array.isArray(req.body) ? req.body : [req.body];
     const withPhone = payloads.filter((b) => b && pick(b, CORE_ALIASES.phone));
     const skipped = payloads.length - withPhone.length;
     if (!withPhone.length) {

@@ -492,7 +492,18 @@ const LEAD_WEBHOOK_CORE_ALIASES = {
 const LEAD_WEBHOOK_RECOGNIZED_KEYS = new Set(
   Object.values(LEAD_WEBHOOK_CORE_ALIASES)
     .flat()
-    .concat(["first_name", "firstName", "last_name", "lastName", "tag", "client", "status", "lead_date", "leadDate"])
+    .concat([
+      "first_name",
+      "firstName",
+      "last_name",
+      "lastName",
+      "tag",
+      "client",
+      "status",
+      "lead_date",
+      "leadDate",
+      "token", // the auth token itself, present alongside lead data on a GET request
+    ])
 );
 
 function leadWebhookPick(body, keys) {
@@ -534,7 +545,7 @@ function leadWebhookRecordFromBody(body, tag) {
   };
 }
 
-app.post("/api/lead-webhook", async (req, res) => {
+async function handleLeadWebhook(req, res) {
   try {
     await ensureSchema();
     const token = req.query?.token;
@@ -542,7 +553,12 @@ app.post("/api/lead-webhook", async (req, res) => {
     const webhook = await findTagByWebhookToken(String(token));
     if (!webhook) return res.status(401).json({ error: "Invalid or revoked webhook token" });
 
-    const payloads = Array.isArray(req.body) ? req.body : [req.body];
+    // GET has no body — some simpler lead-gen platforms (and a quick
+    // browser/curl test) can only fire a plain GET with the lead's
+    // data as query params, so read from there instead. Only ever one
+    // lead per GET, since there's no clean way to send an array of
+    // leads in a query string.
+    const payloads = req.method === "GET" ? [{ ...req.query }] : Array.isArray(req.body) ? req.body : [req.body];
     const withPhone = payloads.filter((b) => b && leadWebhookPick(b, LEAD_WEBHOOK_CORE_ALIASES.phone));
     const skipped = payloads.length - withPhone.length;
     if (!withPhone.length) return res.status(400).json({ error: "No phone number found in the request body" });
@@ -554,7 +570,9 @@ app.post("/api/lead-webhook", async (req, res) => {
     console.error("[db] /api/lead-webhook", err);
     res.status(500).json({ error: err.message || "Webhook failed" });
   }
-});
+}
+app.post("/api/lead-webhook", handleLeadWebhook);
+app.get("/api/lead-webhook", handleLeadWebhook);
 
 // Managing the webhooks themselves (list/create/regenerate/delete) —
 // session-only, mirrors api/tag-webhooks.js. Added to the
