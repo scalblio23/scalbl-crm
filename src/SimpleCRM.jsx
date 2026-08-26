@@ -4076,6 +4076,7 @@ export default function SimpleCRM() {
                             </div>
                           </th>
                         ))}
+                        <th className="px-3 py-3 font-medium whitespace-nowrap">Lead webhook</th>
                         <th className="px-3 py-3">
                           <button
                             onClick={() => setShowAddColumn(true)}
@@ -4127,12 +4128,33 @@ export default function SimpleCRM() {
                               {renderClientCell(client, col)}
                             </td>
                           ))}
+                          <td className="px-3 py-2.5 whitespace-nowrap">
+                            {client.webhookToken && (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => copyClientWebhookUrl(client)}
+                                  title={webhookUrlForClient(client)}
+                                  className="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                                >
+                                  <Copy size={12} />
+                                  {copiedWebhookClientId === client.id ? "Copied" : "Copy URL"}
+                                </button>
+                                <button
+                                  onClick={() => regenerateClientWebhook(client)}
+                                  title="Regenerate webhook URL"
+                                  className="text-gray-400 hover:text-gray-700 p-1 rounded-md border border-gray-200 hover:bg-gray-50"
+                                >
+                                  <RefreshCw size={12} />
+                                </button>
+                              </div>
+                            )}
+                          </td>
                           <td />
                         </tr>
                       ))}
                       {clients.length === 0 && (
                         <tr>
-                          <td colSpan={clientColumns.length + 3} className="px-5 py-10 text-center text-sm text-gray-400">
+                          <td colSpan={clientColumns.length + 4} className="px-5 py-10 text-center text-sm text-gray-400">
                             No clients yet — click "Import client list" to bring in the CSV data, or "Add client" to
                             start fresh.
                           </td>
