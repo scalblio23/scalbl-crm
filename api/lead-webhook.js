@@ -53,11 +53,16 @@ function leadFromBody(body, client) {
     status: (body?.status && String(body.status).trim()) || "New Lead",
     lastContact: "Today",
     leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
-    // The client's own tag is what puts this lead on their tab in
-    // Contacts (see contactTagNames in SimpleCRM.jsx) — not whatever
-    // the sender might pass, so one client's webhook can't land leads
-    // on another client's tab.
-    tag: client.name,
+    // Which Contacts tab this lands on — a client's row name rarely
+    // matches their actual tag naming (e.g. "2. Wilco Rel..."), so
+    // this is whatever tag was picked for the webhook in the Clients
+    // tab (client.fields.webhook_tag), falling back to the client's
+    // name only if that was never set. Deliberately never taken from
+    // the request body, so one client's webhook can't land leads on
+    // another client's tab. `client` stays the client's real name
+    // regardless, so Reports-by-client stays accurate even when the
+    // tag has been pointed somewhere else.
+    tag: client.fields?.webhook_tag || client.name,
     client: client.name,
     fields,
   };

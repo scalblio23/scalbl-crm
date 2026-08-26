@@ -516,7 +516,10 @@ function leadWebhookRecordFromBody(body, client) {
     status: (body?.status && String(body.status).trim()) || "New Lead",
     lastContact: "Today",
     leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
-    tag: client.name,
+    // Which Contacts tab this lands on — falls back to the client's
+    // name only if no tag override was ever picked for the webhook
+    // (see the "Tags new leads as" selector in the Clients tab).
+    tag: client.fields?.webhook_tag || client.name,
     client: client.name,
     fields,
   };

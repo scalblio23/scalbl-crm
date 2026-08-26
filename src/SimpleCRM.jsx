@@ -938,6 +938,12 @@ export default function SimpleCRM() {
   const [copiedWebhookClientId, setCopiedWebhookClientId] = useState(null);
 
   const webhookUrlForClient = (client) => `${window.location.origin}/api/lead-webhook?token=${client.webhookToken}`;
+  // A client's row name here rarely matches their real tag naming
+  // (e.g. "2. Wilco Rel..."), so which tab a webhook lead lands on is
+  // a separate, pickable setting (fields.webhook_tag) rather than
+  // always being the client's name — see the "Tags new leads as"
+  // selector below.
+  const webhookTagForClient = (client) => client.fields?.webhook_tag || client.name;
 
   const copyClientWebhookUrl = async (client) => {
     const url = webhookUrlForClient(client);
@@ -4130,22 +4136,41 @@ export default function SimpleCRM() {
                           ))}
                           <td className="px-3 py-2.5 whitespace-nowrap">
                             {client.webhookToken && (
-                              <div className="flex items-center gap-1">
-                                <button
-                                  onClick={() => copyClientWebhookUrl(client)}
-                                  title={webhookUrlForClient(client)}
-                                  className="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                              <div className="flex flex-col gap-1 min-w-[190px]">
+                                <select
+                                  value={webhookTagForClient(client)}
+                                  onChange={(e) => updateClientField(client.id, "webhook_tag", e.target.value)}
+                                  title="Which Contacts tag new leads from this webhook land on"
+                                  className="border border-gray-200 rounded-md px-1.5 py-1 text-[11px] outline-none bg-white"
                                 >
-                                  <Copy size={12} />
-                                  {copiedWebhookClientId === client.id ? "Copied" : "Copy URL"}
-                                </button>
-                                <button
-                                  onClick={() => regenerateClientWebhook(client)}
-                                  title="Regenerate webhook URL"
-                                  className="text-gray-400 hover:text-gray-700 p-1 rounded-md border border-gray-200 hover:bg-gray-50"
-                                >
-                                  <RefreshCw size={12} />
-                                </button>
+                                  {!contactTagNames.includes(webhookTagForClient(client)) && (
+                                    <option value={webhookTagForClient(client)}>
+                                      {webhookTagForClient(client)} (new tag)
+                                    </option>
+                                  )}
+                                  {contactTagNames.map((t) => (
+                                    <option key={t} value={t}>
+                                      {t}
+                                    </option>
+                                  ))}
+                                </select>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={() => copyClientWebhookUrl(client)}
+                                    title={webhookUrlForClient(client)}
+                                    className="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                                  >
+                                    <Copy size={12} />
+                                    {copiedWebhookClientId === client.id ? "Copied" : "Copy URL"}
+                                  </button>
+                                  <button
+                                    onClick={() => regenerateClientWebhook(client)}
+                                    title="Regenerate webhook URL"
+                                    className="text-gray-400 hover:text-gray-700 p-1 rounded-md border border-gray-200 hover:bg-gray-50"
+                                  >
+                                    <RefreshCw size={12} />
+                                  </button>
+                                </div>
                               </div>
                             )}
                           </td>
@@ -4203,6 +4228,23 @@ export default function SimpleCRM() {
                         <div className="flex items-center gap-1.5 text-xs font-medium text-gray-500 mb-1.5">
                           <Link2 size={12} /> Lead webhook
                         </div>
+                        <div className="flex items-center gap-1.5 mb-1.5">
+                          <span className="text-[11px] text-gray-400 shrink-0">Tags new leads as</span>
+                          <select
+                            value={webhookTagForClient(cl)}
+                            onChange={(e) => updateClientField(cl.id, "webhook_tag", e.target.value)}
+                            className="flex-1 min-w-0 border border-gray-200 rounded-md px-1.5 py-1 text-[11px] outline-none bg-white"
+                          >
+                            {!contactTagNames.includes(webhookTagForClient(cl)) && (
+                              <option value={webhookTagForClient(cl)}>{webhookTagForClient(cl)} (new tag)</option>
+                            )}
+                            {contactTagNames.map((t) => (
+                              <option key={t} value={t}>
+                                {t}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                         <div className="flex items-center gap-1.5">
                           <input
                             readOnly
@@ -4227,7 +4269,7 @@ export default function SimpleCRM() {
                           </button>
                         </div>
                         <div className="text-[11px] text-gray-400 mt-1">
-                          New leads posted here land in Contacts tagged "{cl.name}".
+                          New leads posted here land in Contacts tagged "{webhookTagForClient(cl)}".
                         </div>
                       </div>
                     )}
