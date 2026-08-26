@@ -358,6 +358,35 @@ export default function SimpleCRM() {
   const [clients, setClients] = useState([]);
   const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
   const [contactColumns, setContactColumns] = useState([]); // dynamic custom columns for the contact table
+
+  // Which custom Contacts columns the user has chosen to hide from the
+  // table — a display-only preference, kept per-browser since it's not
+  // data anyone else needs to see. With 226+ imported criteria columns,
+  // letting people trim the table down to what they actually look at
+  // matters a lot more than it would with a handful of columns.
+  const [hiddenContactColumnKeys, setHiddenContactColumnKeys] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("scalbl:hiddenContactColumns") || "[]"));
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("scalbl:hiddenContactColumns", JSON.stringify([...hiddenContactColumnKeys]));
+    } catch {
+      // ignore — private browsing / storage disabled
+    }
+  }, [hiddenContactColumnKeys]);
+  const toggleContactColumnHidden = (key) =>
+    setHiddenContactColumnKeys((s) => {
+      const next = new Set(s);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const [showColumnSettings, setShowColumnSettings] = useState(false);
+  const [columnSettingsSearch, setColumnSettingsSearch] = useState("");
   const [conversations, setConversations] = useState([]);
   const [activeConvo, setActiveConvo] = useState(null);
   const [selectedConvoIds, setSelectedConvoIds] = useState([]);
@@ -679,8 +708,8 @@ export default function SimpleCRM() {
   // the current filter, so picking a tag shows that tag's own
   // criteria instead of 226 columns.
   const hasFieldValue = (v) => v !== null && v !== undefined && v !== "" && v !== false;
-  const visibleContactColumns = contactColumns.filter((col) =>
-    filteredContacts.some((c) => hasFieldValue(c.fields?.[col.key]))
+  const visibleContactColumns = contactColumns.filter(
+    (col) => !hiddenContactColumnKeys.has(col.key) && filteredContacts.some((c) => hasFieldValue(c.fields?.[col.key]))
   );
 
   // Bulk-select + delete on the Contacts table
@@ -1572,7 +1601,7 @@ export default function SimpleCRM() {
   const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
-  const [wrapUp, setWrapUp] = useState(null); // { lead, customStatus, notes, secondsLeft }
+  const [wrapUp, setWrapUp] = useState(null); // { lead, customStage, notes, secondsLeft }
   const [wrapUpStatusMenuOpen, setWrapUpStatusMenuOpen] = useState(false);
   const [callLog, setCallLog] = useState([]);
 
@@ -1655,32 +1684,32 @@ export default function SimpleCRM() {
   // force a wrap-up.
   const handleCallEnded = (lead) => {
     if (!sessionRef.current || !lead) return;
-    // customStatus edits the imported STATUS column (contacts.fields.status)
+    // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
     setWrapUp({
       lead,
-      customStatus: lead.fields?.status || "",
+      customStage: lead.fields?.stage || "",
       notes: lead.notes || "",
       secondsLeft: WRAP_UP_SECONDS,
     });
   };
 
-  // Saves the wrap-up's status/notes onto the lead, logs the call, and
+  // Saves the wrap-up's stage/notes onto the lead, logs the call, and
   // advances the session to the next lead — auto-triggered by the
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, customStatus, notes } = wrapUp;
-    // customStatus edits the imported STATUS column (contacts.fields.status)
+    const { lead, customStage, notes } = wrapUp;
+    // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
-    const status = customStatus;
+    const status = customStage;
 
     setContacts((cs) =>
       cs.map((c) =>
         c.id === lead.id
-          ? { ...c, notes, lastContact: "Today", fields: { ...c.fields, status: customStatus } }
+          ? { ...c, notes, lastContact: "Today", fields: { ...c.fields, stage: customStage } }
           : c
       )
     );
@@ -1695,7 +1724,7 @@ export default function SimpleCRM() {
     // Persist to the database — fire-and-forget, surfaced as a banner
     // on failure rather than blocking the session from moving on.
     api
-      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", fields: { status: customStatus } })
+      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", fields: { stage: customStage } })
       .catch((err) => setDbError(err.message || "Could not save the updated lead."));
     api
       .post("/api/call-log", { leadId: lead.id, name: lead.name, phone: lead.phone, client: lead.client, status, notes })
@@ -2309,6 +2338,68 @@ export default function SimpleCRM() {
                   </button>
                 )}
                 <div className="relative">
+                  <button
+                    onClick={() => {
+                      setColumnSettingsSearch("");
+                      setShowColumnSettings((v) => !v);
+                    }}
+                    className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Settings size={15} /> Columns
+                    {hiddenContactColumnKeys.size > 0 && (
+                      <span className="text-xs bg-gray-100 text-gray-500 rounded-full px-1.5">
+                        {hiddenContactColumnKeys.size} hidden
+                      </span>
+                    )}
+                  </button>
+                  {showColumnSettings && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setShowColumnSettings(false)} />
+                      <div className="absolute right-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-3 w-80">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm font-medium text-gray-700">Show / hide criteria columns</span>
+                          {hiddenContactColumnKeys.size > 0 && (
+                            <button
+                              onClick={() => setHiddenContactColumnKeys(new Set())}
+                              className="text-xs text-gray-400 hover:text-red-600"
+                            >
+                              Show all
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          autoFocus
+                          value={columnSettingsSearch}
+                          onChange={(e) => setColumnSettingsSearch(e.target.value)}
+                          placeholder="Search columns…"
+                          className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-gray-400 mb-2"
+                        />
+                        <div className="max-h-72 overflow-y-auto space-y-0.5">
+                          {contactColumns
+                            .filter((col) => col.label.toLowerCase().includes(columnSettingsSearch.toLowerCase()))
+                            .map((col) => (
+                              <label
+                                key={col.id}
+                                className="flex items-center gap-2 px-1.5 py-1 rounded-md hover:bg-gray-50 text-sm cursor-pointer"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={!hiddenContactColumnKeys.has(col.key)}
+                                  onChange={() => toggleContactColumnHidden(col.key)}
+                                  className="w-3.5 h-3.5 rounded border-gray-300 shrink-0"
+                                />
+                                <span className="truncate">{col.label}</span>
+                              </label>
+                            ))}
+                          {contactColumns.filter((col) => col.label.toLowerCase().includes(columnSettingsSearch.toLowerCase())).length === 0 && (
+                            <div className="text-xs text-gray-400 px-1.5 py-2">No columns match "{columnSettingsSearch}"</div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="relative">
                   <Search size={15} className="absolute left-3 top-2.5 text-gray-400" />
                   <input
                     value={search}
@@ -2348,7 +2439,7 @@ export default function SimpleCRM() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
-                    <th className="pl-8 pr-2 py-3 font-medium w-8">
+                    <th className="pl-8 pr-2 py-2 font-medium w-8">
                       <input
                         type="checkbox"
                         checked={allVisibleContactsSelected}
@@ -2356,7 +2447,7 @@ export default function SimpleCRM() {
                         className="w-4 h-4 rounded border-gray-300"
                       />
                     </th>
-                    <th className="px-5 py-3 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__leadDate")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -2364,7 +2455,7 @@ export default function SimpleCRM() {
                         Date {sortIndicator("__leadDate")}
                       </button>
                     </th>
-                    <th className="px-5 py-3 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__name")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -2372,7 +2463,7 @@ export default function SimpleCRM() {
                         Name {sortIndicator("__name")}
                       </button>
                     </th>
-                    <th className="py-3 font-medium whitespace-nowrap">
+                    <th className="py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__phone")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -2380,7 +2471,7 @@ export default function SimpleCRM() {
                         Phone {sortIndicator("__phone")}
                       </button>
                     </th>
-                    <th className="py-3 font-medium whitespace-nowrap">
+                    <th className="py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__client")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -2388,7 +2479,7 @@ export default function SimpleCRM() {
                         Client {sortIndicator("__client")}
                       </button>
                     </th>
-                    <th className="py-3 font-medium whitespace-nowrap">
+                    <th className="py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__tag")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -2396,7 +2487,7 @@ export default function SimpleCRM() {
                         Tag {sortIndicator("__tag")}
                       </button>
                     </th>
-                    <th className="py-3 font-medium whitespace-nowrap">
+                    <th className="py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__status")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -2404,7 +2495,7 @@ export default function SimpleCRM() {
                         Status {sortIndicator("__status")}
                       </button>
                     </th>
-                    <th className="py-3 font-medium whitespace-nowrap">
+                    <th className="py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__lastContact")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -2413,7 +2504,7 @@ export default function SimpleCRM() {
                       </button>
                     </th>
                     {visibleContactColumns.map((col) => (
-                      <th key={col.id} className="px-3 py-3 font-medium whitespace-nowrap">
+                      <th key={col.id} className="px-3 py-2 font-medium whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
                           <button
                             onClick={() => toggleContactSort(col.key)}
@@ -2432,7 +2523,7 @@ export default function SimpleCRM() {
                         </div>
                       </th>
                     ))}
-                    <th className="px-3 py-3">
+                    <th className="px-3 py-2">
                       <button
                         onClick={() => setShowAddContactColumn(true)}
                         className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-800 whitespace-nowrap"
@@ -2445,7 +2536,7 @@ export default function SimpleCRM() {
                 <tbody>
                   {pagedContacts.map((c) => (
                     <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50">
-                      <td className="pl-8 pr-2 py-3.5">
+                      <td className="pl-8 pr-2 py-2.5">
                         <input
                           type="checkbox"
                           checked={selectedContactIds.includes(c.id)}
@@ -2453,11 +2544,11 @@ export default function SimpleCRM() {
                           className="w-4 h-4 rounded border-gray-300"
                         />
                       </td>
-                      <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{c.leadDate || "—"}</td>
-                      <td className="px-5 py-3.5 font-medium whitespace-nowrap">{c.name}</td>
-                      <td className="py-3.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
-                      <td className="py-3.5 text-gray-600 whitespace-nowrap">{c.client}</td>
-                      <td className="py-3.5 whitespace-nowrap">
+                      <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{c.leadDate || "—"}</td>
+                      <td className="px-5 py-2.5 font-medium whitespace-nowrap">{c.name}</td>
+                      <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
+                      <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.client}</td>
+                      <td className="py-2.5 whitespace-nowrap">
                         {c.tag ? (
                           <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(c.tag)}`}>
                             {c.tag}
@@ -2466,14 +2557,14 @@ export default function SimpleCRM() {
                           <span className="text-gray-300 text-xs">—</span>
                         )}
                       </td>
-                      <td className="py-3.5 whitespace-nowrap">
+                      <td className="py-2.5 whitespace-nowrap">
                         <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[c.status]}`}>
                           {c.status}
                         </span>
                       </td>
-                      <td className="py-3.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
+                      <td className="py-2.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
                       {visibleContactColumns.map((col) => (
-                        <td key={col.id} className="px-3 py-3.5 min-w-[130px] max-w-[220px]">
+                        <td key={col.id} className="px-3 py-2.5 min-w-[130px] max-w-[220px]">
                           {renderContactCell(c, col)}
                         </td>
                       ))}
@@ -2719,10 +2810,10 @@ export default function SimpleCRM() {
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
-                      <label className="text-xs font-medium text-gray-500 block mb-1">Status</label>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
                       {(() => {
-                        const statusCol = contactColumns.find((c) => c.key === "status");
-                        const options = statusCol?.options || [];
+                        const stageCol = contactColumns.find((c) => c.key === "stage");
+                        const options = stageCol?.options || [];
                         return (
                           <>
                             <button
@@ -2730,9 +2821,9 @@ export default function SimpleCRM() {
                               onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
                               className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
                             >
-                              {wrapUp.customStatus ? (
-                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(statusCol || {}, wrapUp.customStatus)}`}>
-                                  {wrapUp.customStatus}
+                              {wrapUp.customStage ? (
+                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(stageCol || {}, wrapUp.customStage)}`}>
+                                  {wrapUp.customStage}
                                 </span>
                               ) : (
                                 <span className="text-gray-300 text-xs">—</span>
@@ -2745,7 +2836,7 @@ export default function SimpleCRM() {
                                 <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full max-h-64 overflow-y-auto">
                                   <button
                                     onClick={() => {
-                                      setWrapUp((w) => (w ? { ...w, customStatus: "" } : w));
+                                      setWrapUp((w) => (w ? { ...w, customStage: "" } : w));
                                       setWrapUpStatusMenuOpen(false);
                                     }}
                                     className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 text-xs text-gray-400"
@@ -2756,7 +2847,7 @@ export default function SimpleCRM() {
                                     <button
                                       key={o.value}
                                       onClick={() => {
-                                        setWrapUp((w) => (w ? { ...w, customStatus: o.value } : w));
+                                        setWrapUp((w) => (w ? { ...w, customStage: o.value } : w));
                                         setWrapUpStatusMenuOpen(false);
                                       }}
                                       className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
