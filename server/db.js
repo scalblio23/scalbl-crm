@@ -192,6 +192,7 @@ export async function ensureSchema() {
 const INVITED_USERS = [
   { name: "Henry", email: "henryfortunatow@gmail.com" },
   { name: "Jem", email: "jem.scalbl@gmail.com" },
+  { name: "Cody", email: "codyadrury90@gmail.com" },
 ];
 
 async function seedUsersIfMissing() {
