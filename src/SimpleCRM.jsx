@@ -465,6 +465,21 @@ export default function SimpleCRM() {
     status: "All",
   };
   const [dialFilters, setDialFilters] = useState(emptyDialFilters);
+  // Per-custom-column filters, so leads can be filtered/excluded by
+  // any imported criteria too, not just the fixed columns above.
+  // Select/checkbox columns (e.g. Stage) get an exclude-checklist —
+  // check "Booked" and "Not Interested" to hide those leads from the
+  // dial queue. Everything else gets a plain substring text filter.
+  const [dialFieldExcludes, setDialFieldExcludes] = useState({}); // { [columnKey]: string[] of values to hide }
+  const [dialFieldTextFilters, setDialFieldTextFilters] = useState({}); // { [columnKey]: string }
+  const toggleDialFieldExclude = (key, value) =>
+    setDialFieldExcludes((f) => {
+      const current = f[key] || [];
+      const next = current.includes(value) ? current.filter((v) => v !== value) : [...current, value];
+      return { ...f, [key]: next };
+    });
+  const updateDialFieldTextFilter = (key, value) => setDialFieldTextFilters((f) => ({ ...f, [key]: value }));
+  const [openDialExcludeMenu, setOpenDialExcludeMenu] = useState(null); // column key whose checklist is open, or null
 
   // Secondary sidebar (Contacts) — filters the table down to one tag
   // at a time, "All" shows everyone. A contact's tag is free text —
@@ -1312,11 +1327,25 @@ export default function SimpleCRM() {
   );
   const dialClientOptions = ["All", ...clients.map((cl) => cl.name)];
   const dialStatusOptions = ["All", ...Object.keys(statusColors)];
-  const dialFiltersActive = Object.entries(dialFilters).some(
-    ([key, value]) => value !== emptyDialFilters[key]
+  // Custom columns worth showing/filtering in the Powerdialler table —
+  // whatever actually has a value somewhere in the queue. Computed
+  // from the full queue (not the currently-filtered set) so the
+  // column list stays put as filters change instead of flickering.
+  const visibleDialColumns = contactColumns.filter((col) =>
+    dialQueue.some((l) => hasFieldValue(l.fields?.[col.key]))
   );
+  const dialFieldFiltersActive =
+    Object.values(dialFieldExcludes).some((vals) => vals && vals.length > 0) ||
+    Object.values(dialFieldTextFilters).some((v) => v);
+  const dialFiltersActive =
+    Object.entries(dialFilters).some(([key, value]) => value !== emptyDialFilters[key]) || dialFieldFiltersActive;
   const updateDialFilter = (key, value) =>
     setDialFilters((f) => ({ ...f, [key]: value }));
+  const clearAllDialFilters = () => {
+    setDialFilters(emptyDialFilters);
+    setDialFieldExcludes({});
+    setDialFieldTextFilters({});
+  };
   const filteredDialQueueBase = dialQueue.filter(
     (l) =>
       l.name.toLowerCase().includes(dialFilters.name.toLowerCase()) &&
@@ -1324,7 +1353,21 @@ export default function SimpleCRM() {
       l.phone.toLowerCase().includes(dialFilters.phone.toLowerCase()) &&
       (dialFilters.client === "All" || l.client === dialFilters.client) &&
       l.notes.toLowerCase().includes(dialFilters.notes.toLowerCase()) &&
-      (dialFilters.status === "All" || l.status === dialFilters.status)
+      (dialFilters.status === "All" || l.status === dialFilters.status) &&
+      visibleDialColumns.every((col) => {
+        const val = l.fields?.[col.key];
+        if (col.type === "select" || col.type === "checkbox") {
+          const excluded = dialFieldExcludes[col.key] || [];
+          if (!excluded.length) return true;
+          const displayVal = col.type === "checkbox" ? (val ? "Yes" : "No") : val || "";
+          return !excluded.includes(displayVal);
+        }
+        const textFilter = (dialFieldTextFilters[col.key] || "").toLowerCase();
+        if (!textFilter) return true;
+        return String(val ?? "")
+          .toLowerCase()
+          .includes(textFilter);
+      })
   );
   const activeLead = dialQueue.find((l) => l.id === activeLeadId) || null;
 
@@ -1446,11 +1489,11 @@ export default function SimpleCRM() {
   // tab. filteredDialQueue above (the full matching set) still drives
   // the dial session queue, "Start Power Dialler," and Save-as-list —
   // only what actually renders in the table is capped.
-  const DIAL_QUEUE_PAGE_SIZE = 100;
+  const DIAL_QUEUE_PAGE_SIZE = 30;
   const [dialQueuePage, setDialQueuePage] = useState(0);
   useEffect(() => {
     setDialQueuePage(0);
-  }, [dialFilters, dialListFilter]);
+  }, [dialFilters, dialFieldExcludes, dialFieldTextFilters, dialListFilter]);
   const totalDialQueuePages = Math.max(1, Math.ceil(filteredDialQueue.length / DIAL_QUEUE_PAGE_SIZE));
   const pagedDialQueue = filteredDialQueue.slice(
     dialQueuePage * DIAL_QUEUE_PAGE_SIZE,
@@ -2388,7 +2431,7 @@ export default function SimpleCRM() {
                 )}
                 {dialFiltersActive && (
                   <button
-                    onClick={() => setDialFilters(emptyDialFilters)}
+                    onClick={clearAllDialFilters}
                     className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
                   >
                     <X size={14} /> Clear filters
@@ -2696,6 +2739,11 @@ export default function SimpleCRM() {
                       <th className="px-5 py-3 font-medium">Client</th>
                       <th className="px-5 py-3 font-medium">Notes</th>
                       <th className="px-5 py-3 font-medium">Status</th>
+                      {visibleDialColumns.map((col) => (
+                        <th key={col.id} className="px-5 py-3 font-medium whitespace-nowrap">
+                          {col.label}
+                        </th>
+                      ))}
                       <th className="px-5 py-3 font-medium">Script</th>
                       <th className="px-5 py-3 font-medium text-right">Action</th>
                     </tr>
@@ -2759,6 +2807,68 @@ export default function SimpleCRM() {
                           ))}
                         </select>
                       </th>
+                      {visibleDialColumns.map((col) => (
+                        <th key={col.id} className="px-5 pb-3 font-normal">
+                          {col.type === "select" || col.type === "checkbox" ? (
+                            <div className="relative">
+                              <button
+                                type="button"
+                                onClick={() => setOpenDialExcludeMenu((k) => (k === col.key ? null : col.key))}
+                                className={`w-full flex items-center justify-between gap-1 border rounded-md px-2 py-1.5 text-xs font-normal normal-case bg-white ${
+                                  (dialFieldExcludes[col.key] || []).length
+                                    ? "border-red-300 text-red-700"
+                                    : "border-gray-200 text-gray-500"
+                                }`}
+                              >
+                                <span className="truncate">
+                                  {(dialFieldExcludes[col.key] || []).length
+                                    ? `Hiding ${dialFieldExcludes[col.key].length}`
+                                    : "Hide…"}
+                                </span>
+                                <Filter size={11} className="shrink-0" />
+                              </button>
+                              {openDialExcludeMenu === col.key && (
+                                <>
+                                  <div
+                                    className="fixed inset-0 z-40"
+                                    onClick={() => setOpenDialExcludeMenu(null)}
+                                  />
+                                  <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-2 w-48 max-h-56 overflow-y-auto normal-case">
+                                    <div className="text-xs font-semibold text-gray-400 px-1 pb-1">
+                                      Hide leads where {col.label} is…
+                                    </div>
+                                    {(col.type === "checkbox" ? ["Yes", "No"] : col.options || []).map((opt) => {
+                                      const value = typeof opt === "string" ? opt : opt.value;
+                                      const checked = (dialFieldExcludes[col.key] || []).includes(value);
+                                      return (
+                                        <label
+                                          key={value}
+                                          className="flex items-center gap-2 px-1 py-1 text-xs text-gray-700 hover:bg-gray-50 rounded cursor-pointer"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={() => toggleDialFieldExclude(col.key, value)}
+                                            className="w-3.5 h-3.5 rounded border-gray-300"
+                                          />
+                                          <span className="truncate">{value}</span>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          ) : (
+                            <input
+                              value={dialFieldTextFilters[col.key] || ""}
+                              onChange={(e) => updateDialFieldTextFilter(col.key, e.target.value)}
+                              placeholder="Filter…"
+                              className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                            />
+                          )}
+                        </th>
+                      ))}
                       <th className="px-5 pb-3" />
                       <th className="px-5 pb-3" />
                     </tr>
@@ -2791,6 +2901,40 @@ export default function SimpleCRM() {
                             {lead.status}
                           </span>
                         </td>
+                        {visibleDialColumns.map((col) => {
+                          const val = lead.fields?.[col.key];
+                          if (col.type === "checkbox") {
+                            return (
+                              <td key={col.id} className="px-5 py-3.5 text-gray-500">
+                                {val ? "Yes" : "No"}
+                              </td>
+                            );
+                          }
+                          if (col.type === "select") {
+                            return (
+                              <td key={col.id} className="px-5 py-3.5">
+                                {val ? (
+                                  <span
+                                    className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(
+                                      col,
+                                      val
+                                    )}`}
+                                  >
+                                    {val}
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-300 text-xs">—</span>
+                                )}
+                              </td>
+                            );
+                          }
+                          const display = formatDynamicCellDisplay(col, val);
+                          return (
+                            <td key={col.id} className="px-5 py-3.5 text-gray-500 max-w-xs truncate" title={display}>
+                              {display !== null ? display : <span className="text-gray-300">—</span>}
+                            </td>
+                          );
+                        })}
                         <td className="px-5 py-3.5">
                           {getClient(lead.client)?.script ? (
                             <a
@@ -2827,7 +2971,10 @@ export default function SimpleCRM() {
                     ))}
                     {filteredDialQueue.length === 0 && (
                       <tr>
-                        <td colSpan={9} className="px-5 py-10 text-center text-sm text-gray-400">
+                        <td
+                          colSpan={9 + visibleDialColumns.length}
+                          className="px-5 py-10 text-center text-sm text-gray-400"
+                        >
                           No leads match the current filters
                         </td>
                       </tr>
