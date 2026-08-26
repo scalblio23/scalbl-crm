@@ -28,6 +28,7 @@ import {
   ArrowUpDown,
   Filter,
   ChevronDown,
+  BarChart3,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -278,6 +279,7 @@ const navItems = [
   { key: "contacts", label: "Contacts", icon: Users },
   { key: "powerdialler", label: "Powerdialler", icon: Phone },
   { key: "log", label: "Log", icon: ClipboardList },
+  { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "clients", label: "Clients", icon: Briefcase },
   { key: "settings", label: "Settings", icon: Settings },
 ];
@@ -1607,6 +1609,60 @@ export default function SimpleCRM() {
   const [wrapUpStatusMenuOpen, setWrapUpStatusMenuOpen] = useState(false);
   const [callLog, setCallLog] = useState([]);
 
+  // ---------- Reports ----------
+  const isoToday = () => new Date().toISOString().slice(0, 10);
+  const isoDaysAgo = (n) => {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    return d.toISOString().slice(0, 10);
+  };
+  const [reportsFrom, setReportsFrom] = useState(() => isoDaysAgo(30));
+  const [reportsTo, setReportsTo] = useState(() => isoToday());
+  const [reportsUserFilter, setReportsUserFilter] = useState("All");
+
+  const reportsUserNames = [...new Set(callLog.map((e) => e.userName || "Unknown"))].sort();
+  const reportsCallLog = callLog.filter((e) => {
+    if (!e.calledAt) return false;
+    const d = String(e.calledAt).slice(0, 10);
+    if (reportsFrom && d < reportsFrom) return false;
+    if (reportsTo && d > reportsTo) return false;
+    if (reportsUserFilter !== "All" && (e.userName || "Unknown") !== reportsUserFilter) return false;
+    return true;
+  });
+  const reportsTotalCalls = reportsCallLog.length;
+  const reportsTotalSeconds = reportsCallLog.reduce((sum, e) => sum + (e.durationSeconds || 0), 0);
+  const reportsAvgSeconds = reportsTotalCalls ? reportsTotalSeconds / reportsTotalCalls : 0;
+  const reportsUniqueLeads = new Set(reportsCallLog.map((e) => e.leadId)).size;
+
+  // Groups call log entries by a key (rep, client, or tag) and rolls
+  // up call count + duration for each — the source for every
+  // breakdown table below.
+  const summarizeCallsBy = (items, keyFn) => {
+    const map = new Map();
+    for (const item of items) {
+      const key = keyFn(item) || "—";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(item);
+    }
+    return [...map.entries()]
+      .map(([key, group]) => {
+        const calls = group.length;
+        const totalSeconds = group.reduce((s, e) => s + (e.durationSeconds || 0), 0);
+        return { key, calls, totalSeconds, avgSeconds: calls ? totalSeconds / calls : 0 };
+      })
+      .sort((a, b) => b.calls - a.calls);
+  };
+  const reportsByUser = summarizeCallsBy(reportsCallLog, (e) => e.userName || "Unknown");
+  const reportsByClient = summarizeCallsBy(reportsCallLog, (e) => e.client);
+  const reportsByTag = summarizeCallsBy(reportsCallLog, (e) => e.tag || "Untagged");
+
+  // Call log "status"/"outcome" is written from the imported STAGE
+  // column's value (see finishWrapUp) — colored the same way STAGE
+  // pills are everywhere else, rather than the app's built-in
+  // statusColors (which only covers manually-created contacts).
+  const stageColumnDef = contactColumns.find((c) => c.key === "stage");
+  const callOutcomeColor = (value) => (value ? selectOptionColor(stageColumnDef || {}, value) : "");
+
   // Kept in sync with `session` so the long-lived Twilio call event
   // handlers below (registered once per call, not re-created each
   // render) always see whether a session is *currently* active rather
@@ -1681,11 +1737,57 @@ export default function SimpleCRM() {
     }
   };
 
+  // Logs a completed call straight to the call log — used for ad hoc
+  // calls placed outside a dialler session, where no wrap-up screen
+  // opens to capture it. Keeps the Reports tab's call counts/durations
+  // complete instead of only covering session calls.
+  const logCallDirect = (lead, durationMs) => {
+    const durationSeconds = Math.round((durationMs || 0) / 1000);
+    const status = lead.fields?.stage || lead.status;
+    const tempLogId = `${lead.id}-${Date.now()}`;
+    setCallLog((log) => [
+      {
+        id: tempLogId,
+        leadId: lead.id,
+        name: lead.name,
+        phone: lead.phone,
+        client: lead.client,
+        tag: lead.tag,
+        status,
+        notes: lead.notes,
+        durationSeconds,
+        userName: authUser?.name,
+        calledAt: new Date().toISOString(),
+      },
+      ...log,
+    ]);
+    api
+      .post("/api/call-log", {
+        leadId: lead.id,
+        name: lead.name,
+        phone: lead.phone,
+        client: lead.client,
+        tag: lead.tag,
+        status,
+        notes: lead.notes,
+        durationSeconds,
+      })
+      .then((saved) => {
+        if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
+      })
+      .catch((err) => setDbError(err.message || "Could not save the call log entry."));
+    api.post("/api/called-leads", { leadId: lead.id }).catch(() => {});
+  };
+
   // Called whenever a call ends (hung up, disconnected, or failed).
-  // Only relevant mid-session — a one-off call from the table doesn't
-  // force a wrap-up.
-  const handleCallEnded = (lead) => {
-    if (!sessionRef.current || !lead) return;
+  // Mid-session, this opens the wrap-up screen. A one-off call from
+  // the table has no wrap-up to force, so it's logged directly.
+  const handleCallEnded = (lead, durationMs) => {
+    if (!lead) return;
+    if (!sessionRef.current) {
+      logCallDirect(lead, durationMs);
+      return;
+    }
     // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
@@ -1693,6 +1795,7 @@ export default function SimpleCRM() {
       lead,
       customStage: lead.fields?.stage || "",
       notes: lead.notes || "",
+      durationMs,
       secondsLeft: WRAP_UP_SECONDS,
     });
   };
@@ -1702,11 +1805,12 @@ export default function SimpleCRM() {
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, customStage, notes } = wrapUp;
+    const { lead, customStage, notes, durationMs } = wrapUp;
     // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
     const status = customStage;
+    const durationSeconds = Math.round((durationMs || 0) / 1000);
 
     setContacts((cs) =>
       cs.map((c) =>
@@ -1717,7 +1821,19 @@ export default function SimpleCRM() {
     );
     const tempLogId = `${lead.id}-${Date.now()}`;
     setCallLog((log) => [
-      { id: tempLogId, leadId: lead.id, name: lead.name, phone: lead.phone, client: lead.client, status, notes, calledAt: new Date().toISOString() },
+      {
+        id: tempLogId,
+        leadId: lead.id,
+        name: lead.name,
+        phone: lead.phone,
+        client: lead.client,
+        tag: lead.tag,
+        status,
+        notes,
+        durationSeconds,
+        userName: authUser?.name,
+        calledAt: new Date().toISOString(),
+      },
       ...log,
     ]);
     setCalledLeadIds((ids) => [...ids, lead.id]);
@@ -1729,7 +1845,16 @@ export default function SimpleCRM() {
       .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", fields: { stage: customStage } })
       .catch((err) => setDbError(err.message || "Could not save the updated lead."));
     api
-      .post("/api/call-log", { leadId: lead.id, name: lead.name, phone: lead.phone, client: lead.client, status, notes })
+      .post("/api/call-log", {
+        leadId: lead.id,
+        name: lead.name,
+        phone: lead.phone,
+        client: lead.client,
+        tag: lead.tag,
+        status,
+        notes,
+        durationSeconds,
+      })
       .then((saved) => {
         if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
       })
@@ -1788,7 +1913,7 @@ export default function SimpleCRM() {
         const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
         callStartRef.current = null;
         logCallToConversation(lead, durationMs);
-        handleCallEnded(lead);
+        handleCallEnded(lead, durationMs);
       };
 
       call.on("accept", () => setCallStatus("in-progress"));
@@ -3293,6 +3418,8 @@ export default function SimpleCRM() {
                   <th className="py-3 font-medium">Phone</th>
                   <th className="py-3 font-medium">Outcome</th>
                   <th className="py-3 font-medium">Notes</th>
+                  <th className="py-3 font-medium">Rep</th>
+                  <th className="py-3 font-medium">Duration</th>
                   <th className="py-3 font-medium">Called</th>
                 </tr>
               </thead>
@@ -3303,12 +3430,20 @@ export default function SimpleCRM() {
                     <td className="py-3.5 text-gray-600">{entry.client}</td>
                     <td className="py-3.5 text-gray-600">{entry.phone}</td>
                     <td className="py-3.5">
-                      <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[entry.status]}`}>
-                        {entry.status}
-                      </span>
+                      {entry.status ? (
+                        <span className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${callOutcomeColor(entry.status)}`}>
+                          {entry.status}
+                        </span>
+                      ) : (
+                        <span className="text-gray-300 text-xs">—</span>
+                      )}
                     </td>
                     <td className="py-3.5 text-gray-500 max-w-xs truncate" title={entry.notes}>
                       {entry.notes || "—"}
+                    </td>
+                    <td className="py-3.5 text-gray-500 whitespace-nowrap">{entry.userName || "—"}</td>
+                    <td className="py-3.5 text-gray-500 whitespace-nowrap">
+                      {entry.durationSeconds != null ? formatCallDuration(entry.durationSeconds * 1000) : "—"}
                     </td>
                     <td className="py-3.5 text-gray-400">
                       {new Date(entry.calledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
@@ -3317,13 +3452,200 @@ export default function SimpleCRM() {
                 ))}
                 {callLog.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-8 py-10 text-center text-sm text-gray-400">
+                    <td colSpan={8} className="px-8 py-10 text-center text-sm text-gray-400">
                       No calls logged yet — run the Power Dialler to start logging calls.
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Reports */}
+        {page === "reports" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
+              <div>
+                <h1 className="text-xl font-bold">Reports</h1>
+                <div className="text-sm text-gray-400 mt-0.5">
+                  {reportsTotalCalls} call{reportsTotalCalls === 1 ? "" : "s"} in range
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="date"
+                  value={reportsFrom}
+                  onChange={(e) => setReportsFrom(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <span className="text-sm text-gray-400">to</span>
+                <input
+                  type="date"
+                  value={reportsTo}
+                  onChange={(e) => setReportsTo(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <select
+                  value={reportsUserFilter}
+                  onChange={(e) => setReportsUserFilter(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                >
+                  <option value="All">All reps</option>
+                  {reportsUserNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => {
+                    setReportsFrom(isoDaysAgo(30));
+                    setReportsTo(isoToday());
+                    setReportsUserFilter("All");
+                  }}
+                  className="text-sm text-gray-400 hover:text-gray-700 px-2"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            <div className="p-8 space-y-8">
+              {/* Big-number KPIs */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="border border-gray-200 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Calls made</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums">{reportsTotalCalls}</div>
+                </div>
+                <div className="border border-gray-200 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Avg. minutes / call</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums">
+                    {(reportsAvgSeconds / 60).toFixed(1)}
+                  </div>
+                </div>
+                <div className="border border-gray-200 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Total talk time</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums">
+                    {formatCallDuration(reportsTotalSeconds * 1000)}
+                  </div>
+                </div>
+                <div className="border border-gray-200 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Leads contacted</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums">{reportsUniqueLeads}</div>
+                </div>
+              </div>
+
+              {/* Breakdown tables */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per rep</div>
+                  <div className="max-h-80 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                          <th className="px-5 py-2.5 font-medium">Rep</th>
+                          <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                          <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reportsByUser.map((row) => (
+                          <tr key={row.key} className="border-b border-gray-50 last:border-0">
+                            <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
+                            <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                            <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                              {formatCallDuration(row.avgSeconds * 1000)}
+                            </td>
+                          </tr>
+                        ))}
+                        {reportsByUser.length === 0 && (
+                          <tr>
+                            <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
+                              No calls in this range
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per client</div>
+                  <div className="max-h-80 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                          <th className="px-5 py-2.5 font-medium">Client</th>
+                          <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                          <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reportsByClient.map((row) => (
+                          <tr key={row.key} className="border-b border-gray-50 last:border-0">
+                            <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
+                            <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                            <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                              {formatCallDuration(row.avgSeconds * 1000)}
+                            </td>
+                          </tr>
+                        ))}
+                        {reportsByClient.length === 0 && (
+                          <tr>
+                            <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
+                              No calls in this range
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per tag</div>
+                <div className="max-h-96 overflow-y-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                        <th className="px-5 py-2.5 font-medium">Tag</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Total talk time</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reportsByTag.map((row) => (
+                        <tr key={row.key} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
+                          <td className="px-5 py-2.5">
+                            <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(row.key)}`}>
+                              {row.key}
+                            </span>
+                          </td>
+                          <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                            {formatCallDuration(row.avgSeconds * 1000)}
+                          </td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                            {formatCallDuration(row.totalSeconds * 1000)}
+                          </td>
+                        </tr>
+                      ))}
+                      {reportsByTag.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="px-5 py-8 text-center text-sm text-gray-400">
+                            No calls in this range
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 

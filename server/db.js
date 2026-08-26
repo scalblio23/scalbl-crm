@@ -159,6 +159,14 @@ export async function ensureSchema() {
         called_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // Added for the Reports tab — who placed the call, how long it
+    // lasted, and the lead's tag at call time. user_id is TEXT (not
+    // INTEGER) because API-key callers resolve to a synthetic id like
+    // "api-key:3" rather than a row in `users`.
+    await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS user_id TEXT`);
+    await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS user_name TEXT`);
+    await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS duration_seconds INTEGER`);
+    await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS tag TEXT`);
     await query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -896,36 +904,46 @@ export async function markLeadCalled(leadId) {
   await query("INSERT INTO called_leads (lead_id) VALUES ($1) ON CONFLICT DO NOTHING", [leadId]);
 }
 
-export async function getCallLog() {
-  const rows = await query("SELECT * FROM call_log ORDER BY called_at DESC");
-  return rows.map((r) => ({
+function callLogFromRow(r) {
+  return {
     id: r.id,
     leadId: r.lead_id,
     name: r.name,
     phone: r.phone,
     client: r.client,
+    tag: r.tag,
     status: r.status,
     notes: r.notes,
+    userId: r.user_id,
+    userName: r.user_name,
+    durationSeconds: r.duration_seconds,
     calledAt: r.called_at,
-  }));
+  };
+}
+
+export async function getCallLog() {
+  const rows = await query("SELECT * FROM call_log ORDER BY called_at DESC");
+  return rows.map(callLogFromRow);
 }
 
 export async function addCallLogEntry(entry) {
   const rows = await query(
-    "INSERT INTO call_log (lead_id, name, phone, client, status, notes) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
-    [entry.leadId, entry.name, entry.phone, entry.client, entry.status, entry.notes]
+    `INSERT INTO call_log (lead_id, name, phone, client, tag, status, notes, user_id, user_name, duration_seconds)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [
+      entry.leadId,
+      entry.name,
+      entry.phone,
+      entry.client,
+      entry.tag ?? null,
+      entry.status,
+      entry.notes,
+      entry.userId ?? null,
+      entry.userName ?? null,
+      entry.durationSeconds ?? null,
+    ]
   );
-  const row = rows[0];
-  return {
-    id: row.id,
-    leadId: row.lead_id,
-    name: row.name,
-    phone: row.phone,
-    client: row.client,
-    status: row.status,
-    notes: row.notes,
-    calledAt: row.called_at,
-  };
+  return callLogFromRow(rows[0]);
 }
 
 // ---------- Users ----------

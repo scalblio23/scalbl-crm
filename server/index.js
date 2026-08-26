@@ -542,7 +542,15 @@ app.post(
 app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog())));
 app.post(
   "/api/call-log",
-  dbRoute(async (req, res) => res.status(201).json(await addCallLogEntry(req.body || {})))
+  dbRoute(async (req, res) =>
+    res.status(201).json(
+      await addCallLogEntry({
+        ...(req.body || {}),
+        userId: String(req.user.id),
+        userName: req.user.name || req.user.email || "Unknown",
+      })
+    )
+  )
 );
 
 app.listen(PORT, () => {

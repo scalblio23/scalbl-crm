@@ -12,7 +12,14 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "POST") {
-      const entry = await addCallLogEntry(req.body || {});
+      // user_id/user_name are attributed server-side from the
+      // authenticated caller — never trusted from the request body —
+      // so the Reports tab's per-user numbers can't be spoofed.
+      const entry = await addCallLogEntry({
+        ...(req.body || {}),
+        userId: String(user.id),
+        userName: user.name || user.email || "Unknown",
+      });
       return res.status(201).json(entry);
     }
 
