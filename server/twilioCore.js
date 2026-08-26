@@ -25,13 +25,24 @@ export function missingTwilioEnv(env = process.env) {
 // carriers. TWILIO_CALLER_ID (singular) still works as before for a
 // single-number setup, and is used as a fallback if TWILIO_CALLER_IDS
 // isn't set.
+// Twilio requires E.164 ("+61...") for a caller ID — missing the "+"
+// makes the gateway reject the call outright (every single call, not
+// intermittently — the Twilio Console's own phone number list shows
+// each number twice, once with the "+" and once without, which is an
+// easy copy-paste trap when filling in this env var). Normalize
+// defensively rather than trust the env var is exactly right.
+function normalizeCallerId(raw) {
+  const s = String(raw).trim();
+  return s && !s.startsWith("+") ? `+${s}` : s;
+}
+
 export function getCallerIdPool(env = process.env) {
   const list = (env.TWILIO_CALLER_IDS || "")
     .split(",")
-    .map((s) => s.trim())
+    .map((s) => normalizeCallerId(s))
     .filter(Boolean);
   if (list.length) return list;
-  return env.TWILIO_CALLER_ID ? [env.TWILIO_CALLER_ID] : [];
+  return env.TWILIO_CALLER_ID ? [normalizeCallerId(env.TWILIO_CALLER_ID)] : [];
 }
 
 // Mints a short-lived Access Token so the browser can register as a
