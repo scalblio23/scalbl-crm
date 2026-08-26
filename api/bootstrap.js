@@ -9,7 +9,7 @@ import {
   getCalledLeadIds,
   getCallLog,
 } from "../server/db.js";
-import { requireAuth } from "../server/auth.js";
+import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 
 // GET /api/bootstrap — everything the app needs on first load, in one
 // request. Firing separate requests on mount meant separate
@@ -22,16 +22,21 @@ export default async function handler(req, res) {
   if (!user) return;
   try {
     await ensureSchema();
+    const allowedTags = scopeTagsForUser(user);
+    // A client-role user never sees the Clients org list or Powerlists
+    // — those aren't on their tab list at all — so skip fetching them
+    // rather than shipping data down just to hide it client-side.
+    const scoped = allowedTags !== null;
     const [clients, clientColumns, contacts, contactColumns, conversations, dialLists, calledLeadIds, callLog] =
       await Promise.all([
-        getClients(),
-        getClientColumns(),
-        getContacts(),
+        scoped ? [] : getClients(),
+        scoped ? [] : getClientColumns(),
+        getContacts(allowedTags),
         getContactColumns(),
-        getConversations(),
-        getDialLists(),
+        getConversations(allowedTags),
+        scoped ? [] : getDialLists(),
         getCalledLeadIds(),
-        getCallLog(),
+        getCallLog(allowedTags),
       ]);
     res.setHeader("Cache-Control", "no-store");
     res.status(200).json({

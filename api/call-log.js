@@ -1,5 +1,5 @@
 import { ensureSchema, getCallLog, addCallLogEntry } from "../server/db.js";
-import { requireAuth } from "../server/auth.js";
+import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -8,7 +8,7 @@ export default async function handler(req, res) {
     await ensureSchema();
 
     if (req.method === "GET") {
-      return res.status(200).json(await getCallLog());
+      return res.status(200).json(await getCallLog(scopeTagsForUser(user)));
     }
 
     if (req.method === "POST") {

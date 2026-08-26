@@ -1,14 +1,20 @@
 import { ensureSchema, createApiKey, getApiKeys, deleteApiKey } from "../server/db.js";
-import { getUserFromRequest, generateApiKey, hashApiKey } from "../server/auth.js";
+import { getSessionUser, generateApiKey, hashApiKey } from "../server/auth.js";
 
 // Deliberately session-only (not requireAuth, which also accepts an
 // API key) — a key should never be able to mint itself more keys, or
 // see/revoke anyone else's. Managing keys requires an actual logged-
-// in person.
+// in person. Also blocked for the client role — a key is equivalent
+// to full admin access (see getUserFromApiKey), so letting a
+// tag-scoped client mint one would be a straight-up privilege
+// escalation around their own data scoping.
 export default async function handler(req, res) {
-  const user = getUserFromRequest(req);
+  const user = await getSessionUser(req);
   if (!user) {
     return res.status(401).json({ error: "Log in to manage API keys." });
+  }
+  if (user.role === "client") {
+    return res.status(403).json({ error: "Not available on this account." });
   }
   try {
     await ensureSchema();

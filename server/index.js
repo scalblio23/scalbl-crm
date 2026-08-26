@@ -20,6 +20,7 @@ import {
   resetContactImport,
   importContactDataBatch,
   getContacts,
+  getContactById,
   createContact,
   updateContact,
   deleteContacts,
@@ -46,9 +47,14 @@ import {
   createApiKey,
   getApiKeys,
   deleteApiKey,
+  getUsers,
+  getUserById,
+  inviteUser,
+  updateUser,
+  deleteUserById,
 } from "./db.js";
 import {
-  getUserFromRequest,
+  getSessionUser,
   requireAuth,
   hashPassword,
   verifyPassword,
@@ -56,6 +62,11 @@ import {
   clearSessionCookie,
   generateApiKey,
   hashApiKey,
+  scopeTagsForUser,
+  canManageUsers,
+  canDeleteUser,
+  forbidClientRole,
+  ROLES,
 } from "./auth.js";
 
 dotenv.config();
@@ -93,6 +104,25 @@ app.use(async (req, res, next) => {
   next();
 });
 
+// A client role has no business on these endpoints at all — not just
+// data they can't see, but capability they don't have (client org
+// management, dial lists, bulk/reset imports). Mirrors the same guard
+// in the equivalent api/*.js files. contact-columns is handled
+// separately just below since its GET must stay open for a client to
+// render their own leads' criteria.
+app.use(
+  ["/api/clients", "/api/client-columns", "/api/clients-import", "/api/contacts-import", "/api/contacts-bulk-import", "/api/dial-lists"],
+  (req, res, next) => {
+    if (forbidClientRole(req.user, res)) return;
+    next();
+  }
+);
+app.use("/api/contact-columns", (req, res, next) => {
+  if (req.method === "GET") return next();
+  if (forbidClientRole(req.user, res)) return;
+  next();
+});
+
 // Wraps a route so DB errors come back as a clean 500 instead of
 // crashing the process, and so every route ensures the schema exists.
 function dbRoute(fn) {
@@ -119,9 +149,12 @@ app.get("/api/health", (req, res) => {
 
 // ---------- Auth ----------
 
-app.get("/api/auth-me", (req, res) => {
-  res.json({ user: getUserFromRequest(req) });
-});
+app.get(
+  "/api/auth-me",
+  dbRoute(async (req, res) => {
+    res.json({ user: await getSessionUser(req) });
+  })
+);
 
 app.post(
   "/api/auth-login",
@@ -134,7 +167,13 @@ app.post(
     }
     const ok = await verifyPassword(password, row.password_hash);
     if (!ok) return res.status(401).json({ error: "Incorrect email or password." });
-    const user = { id: row.id, name: row.name, email: row.email };
+    const user = {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      role: row.role || "admin",
+      allowedTags: row.allowed_tags || [],
+    };
     res.setHeader("Set-Cookie", createSessionCookie(user));
     res.json({ user });
   })
@@ -156,7 +195,13 @@ app.post(
     if (!row) {
       return res.status(409).json({ error: "This account already has a password — log in instead." });
     }
-    const user = { id: row.id, name: row.name, email: row.email };
+    const user = {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      role: row.role || "admin",
+      allowedTags: row.allowed_tags || [],
+    };
     res.setHeader("Set-Cookie", createSessionCookie(user));
     res.json({ user });
   })
@@ -169,22 +214,36 @@ app.post("/api/auth-logout", (req, res) => {
 
 // ---------- API keys (programmatic/agent access) ----------
 // Session-only on purpose — a key should never be able to mint more
-// keys or see/revoke anyone else's, so this checks getUserFromRequest
+// keys or see/revoke anyone else's, so this checks getSessionUser
 // directly rather than the global middleware's requireAuth (which
-// also accepts a key).
+// also accepts a key). Also blocked for the client role — a key is
+// equivalent to full admin access, so letting a tag-scoped client
+// mint one would be a privilege escalation around their own scoping.
+async function requireKeyManager(req, res) {
+  const user = await getSessionUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Log in to manage API keys." });
+    return null;
+  }
+  if (user.role === "client") {
+    res.status(403).json({ error: "Not available on this account." });
+    return null;
+  }
+  return user;
+}
 app.get(
   "/api/api-keys",
   dbRoute(async (req, res) => {
-    const user = getUserFromRequest(req);
-    if (!user) return res.status(401).json({ error: "Log in to manage API keys." });
+    const user = await requireKeyManager(req, res);
+    if (!user) return;
     res.json(await getApiKeys());
   })
 );
 app.post(
   "/api/api-keys",
   dbRoute(async (req, res) => {
-    const user = getUserFromRequest(req);
-    if (!user) return res.status(401).json({ error: "Log in to manage API keys." });
+    const user = await requireKeyManager(req, res);
+    if (!user) return;
     const label = String(req.body?.label || "").trim();
     if (!label) return res.status(400).json({ error: "Give the key a label (e.g. what agent it's for)." });
     const rawKey = generateApiKey();
@@ -200,11 +259,69 @@ app.post(
 app.delete(
   "/api/api-keys",
   dbRoute(async (req, res) => {
-    const user = getUserFromRequest(req);
-    if (!user) return res.status(401).json({ error: "Log in to manage API keys." });
+    const user = await requireKeyManager(req, res);
+    if (!user) return;
     const id = req.query.id;
     if (!id) return res.status(400).json({ error: "Missing id" });
     await deleteApiKey(id);
+    res.status(204).end();
+  })
+);
+
+// ---------- Users (roster + role management) ----------
+// GET is open to anyone signed in (so an admin can see who has
+// access); POST/PATCH/DELETE are gated by canManageUsers/canDeleteUser
+// — see api/users.js for the full reasoning, mirrored here.
+app.get("/api/users", dbRoute(async (req, res) => res.json(await getUsers())));
+app.post(
+  "/api/users",
+  dbRoute(async (req, res) => {
+    if (!canManageUsers(req.user.role)) {
+      return res.status(403).json({ error: "Only an owner or super admin can invite users." });
+    }
+    const { name, email, role, allowedTags } = req.body || {};
+    if (!name || !email) return res.status(400).json({ error: "Missing name or email" });
+    if (role && (role === "owner" || !ROLES.includes(role))) {
+      return res.status(400).json({ error: "Invalid role" });
+    }
+    const created = await inviteUser({ name, email, role, allowedTags });
+    if (!created) return res.status(409).json({ error: "That email is already invited." });
+    res.status(201).json(created);
+  })
+);
+app.patch(
+  "/api/users",
+  dbRoute(async (req, res) => {
+    if (!canManageUsers(req.user.role)) {
+      return res.status(403).json({ error: "Only an owner or super admin can edit users." });
+    }
+    const { id, name, role, allowedTags } = req.body || {};
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    if (role && (role === "owner" || !ROLES.includes(role))) {
+      return res.status(400).json({ error: "Invalid role" });
+    }
+    const target = await getUserById(id);
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (target.role === "owner") {
+      return res.status(403).json({ error: "The owner's account can't be edited." });
+    }
+    res.json(await updateUser(id, { name, role, allowedTags }));
+  })
+);
+app.delete(
+  "/api/users",
+  dbRoute(async (req, res) => {
+    const id = Number(req.query.id);
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    if (id === Number(req.user.id)) {
+      return res.status(400).json({ error: "You can't delete your own account." });
+    }
+    const target = await getUserById(id);
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (!canDeleteUser(req.user.role, target.role)) {
+      return res.status(403).json({ error: "Not allowed to delete this user." });
+    }
+    await deleteUserById(id);
     res.status(204).end();
   })
 );
@@ -214,16 +331,18 @@ app.delete(
 app.get(
   "/api/bootstrap",
   dbRoute(async (req, res) => {
+    const allowedTags = scopeTagsForUser(req.user);
+    const scoped = allowedTags !== null;
     const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, calledLeadIds, callLog] =
       await Promise.all([
-        getClients(),
-        getClientColumns(),
-        getContacts(),
+        scoped ? [] : getClients(),
+        scoped ? [] : getClientColumns(),
+        getContacts(allowedTags),
         getContactColumns(),
-        getConversations(),
-        getDialLists(),
+        getConversations(allowedTags),
+        scoped ? [] : getDialLists(),
         getCalledLeadIds(),
-        getCallLog(),
+        getCallLog(allowedTags),
       ]);
     res.setHeader("Cache-Control", "no-store");
     res.json({
@@ -403,16 +522,34 @@ app.post(
   })
 );
 
-app.get("/api/contacts", dbRoute(async (req, res) => res.json(await getContacts())));
+app.get(
+  "/api/contacts",
+  dbRoute(async (req, res) => res.json(await getContacts(scopeTagsForUser(req.user))))
+);
 app.post(
   "/api/contacts",
-  dbRoute(async (req, res) => res.status(201).json(await createContact(req.body || {})))
+  dbRoute(async (req, res) => {
+    const allowedTags = scopeTagsForUser(req.user);
+    const body = req.body || {};
+    if (allowedTags && (!body.tag || !allowedTags.includes(body.tag))) {
+      return res.status(403).json({ error: "You can only add leads under your own tag." });
+    }
+    res.status(201).json(await createContact(body));
+  })
 );
 app.patch(
   "/api/contacts",
   dbRoute(async (req, res) => {
     const { id, ...patch } = req.body || {};
     if (!id) return res.status(400).json({ error: "Missing id" });
+    const allowedTags = scopeTagsForUser(req.user);
+    if (allowedTags) {
+      const existing = await getContactById(id);
+      if (!existing || !allowedTags.includes(existing.tag)) {
+        return res.status(403).json({ error: "Not found" });
+      }
+      delete patch.tag;
+    }
     const contact = await updateContact(id, patch);
     if (!contact) return res.status(404).json({ error: "Contact not found" });
     res.json(contact);
@@ -421,6 +558,9 @@ app.patch(
 app.delete(
   "/api/contacts",
   dbRoute(async (req, res) => {
+    if (scopeTagsForUser(req.user)) {
+      return res.status(403).json({ error: "Not allowed to delete leads." });
+    }
     const ids = String(req.query.ids || "")
       .split(",")
       .map((id) => Number(id.trim()))
@@ -472,12 +612,22 @@ app.post(
   })
 );
 
-app.get("/api/conversations", dbRoute(async (req, res) => res.json(await getConversations())));
+app.get(
+  "/api/conversations",
+  dbRoute(async (req, res) => res.json(await getConversations(scopeTagsForUser(req.user))))
+);
 app.post(
   "/api/conversations",
   dbRoute(async (req, res) => {
     const { leadId, name, text, time } = req.body || {};
     if (!leadId || !text) return res.status(400).json({ error: "Missing leadId or text" });
+    const allowedTags = scopeTagsForUser(req.user);
+    if (allowedTags) {
+      const lead = await getContactById(leadId);
+      if (!lead || !allowedTags.includes(lead.tag)) {
+        return res.status(403).json({ error: "Not found" });
+      }
+    }
     const conversationId = await logCall({ leadId, name, text, time });
     res.status(201).json({ conversationId });
   })
@@ -485,6 +635,9 @@ app.post(
 app.delete(
   "/api/conversations",
   dbRoute(async (req, res) => {
+    if (scopeTagsForUser(req.user)) {
+      return res.status(403).json({ error: "Not allowed to delete conversations." });
+    }
     const ids = String(req.query.ids || "")
       .split(",")
       .map((id) => Number(id.trim()))
@@ -539,7 +692,7 @@ app.post(
   })
 );
 
-app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog())));
+app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog(scopeTagsForUser(req.user)))));
 app.post(
   "/api/call-log",
   dbRoute(async (req, res) =>

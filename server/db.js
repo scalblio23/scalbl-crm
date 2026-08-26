@@ -176,6 +176,14 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // Role hierarchy: owner > super_admin > admin > client. "client" is
+    // scoped to a set of lead tags (allowed_tags) — everywhere the app
+    // reads contacts/conversations/calls, a client-role caller only
+    // ever gets rows whose tag is in that list. The other three roles
+    // all see every tab and every lead; they differ only in whether
+    // they can manage other users (see server/auth.js).
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'`);
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tags JSONB DEFAULT '[]'`);
     await query(`
       CREATE TABLE IF NOT EXISTS api_keys (
         id SERIAL PRIMARY KEY,
@@ -189,6 +197,14 @@ export async function ensureSchema() {
     `);
     await seedIfEmpty();
     await seedUsersIfMissing();
+    // Owner is pinned to one specific email rather than being a role
+    // anyone can grant — self-healing here (after seeding, so it also
+    // catches a brand-new database where Henry's row didn't exist a
+    // moment ago) means even a bad edit elsewhere can't strip it or
+    // hand it to someone else.
+    await query(`UPDATE users SET role = 'owner' WHERE email = $1 AND role IS DISTINCT FROM 'owner'`, [
+      OWNER_EMAIL,
+    ]);
   })();
   return schemaReady;
 }
@@ -196,7 +212,11 @@ export async function ensureSchema() {
 // Invite-only accounts: pre-seed the people allowed to ever log in,
 // with no password set yet. Each one claims their account once via
 // "set password" — anyone else's email just won't exist here, so
-// there's no open self-registration.
+// there's no open self-registration. Roles for anyone invited this
+// way default to 'admin' (see the users table's column default) —
+// Henry's is corrected to 'owner' by the self-heal above regardless
+// of what's written here.
+const OWNER_EMAIL = "henryfortunatow@gmail.com";
 const INVITED_USERS = [
   { name: "Henry", email: "henryfortunatow@gmail.com" },
   { name: "Jem", email: "jem.scalbl@gmail.com" },
@@ -487,9 +507,21 @@ function contactFromRow(r) {
   };
 }
 
-export async function getContacts() {
-  const rows = await query("SELECT * FROM contacts ORDER BY created_at DESC");
+// allowedTags scopes the result to a client-role user's own leads —
+// pass null/undefined for full access (owner/super_admin/admin, and
+// API keys).
+export async function getContacts(allowedTags) {
+  const rows = allowedTags
+    ? await query("SELECT * FROM contacts WHERE tag = ANY($1::text[]) ORDER BY created_at DESC", [allowedTags])
+    : await query("SELECT * FROM contacts ORDER BY created_at DESC");
   return rows.map(contactFromRow);
+}
+
+// Used by the API layer to check a client-role caller's tag access
+// before letting them touch one specific contact (edit/delete).
+export async function getContactById(id) {
+  const rows = await query("SELECT * FROM contacts WHERE id = $1", [id]);
+  return rows[0] ? contactFromRow(rows[0]) : null;
 }
 
 export async function createContact(c) {
@@ -806,9 +838,25 @@ export async function findContactByPhone(rawPhone) {
   return match ? contactFromRow(match) : null;
 }
 
-export async function getConversations() {
-  const convos = await query("SELECT * FROM conversations ORDER BY updated_at DESC");
-  const messages = await query("SELECT * FROM messages ORDER BY id ASC");
+// allowedTags scopes this to conversations for leads the caller can
+// see (client role only) — dropping any conversation with no matching
+// contact (e.g. SMS from an unrecognized number), since those aren't
+// attributable to any client's leads.
+export async function getConversations(allowedTags) {
+  const convos = allowedTags
+    ? await query(
+        `SELECT c.* FROM conversations c
+         JOIN contacts ct ON ct.id = c.lead_id
+         WHERE ct.tag = ANY($1::text[])
+         ORDER BY c.updated_at DESC`,
+        [allowedTags]
+      )
+    : await query("SELECT * FROM conversations ORDER BY updated_at DESC");
+  const messages = convos.length
+    ? await query("SELECT * FROM messages WHERE conversation_id = ANY($1::int[]) ORDER BY id ASC", [
+        convos.map((c) => c.id),
+      ])
+    : [];
   return convos.map((c) => ({
     id: c.id,
     leadId: c.lead_id,
@@ -921,8 +969,10 @@ function callLogFromRow(r) {
   };
 }
 
-export async function getCallLog() {
-  const rows = await query("SELECT * FROM call_log ORDER BY called_at DESC");
+export async function getCallLog(allowedTags) {
+  const rows = allowedTags
+    ? await query("SELECT * FROM call_log WHERE tag = ANY($1::text[]) ORDER BY called_at DESC", [allowedTags])
+    : await query("SELECT * FROM call_log ORDER BY called_at DESC");
   return rows.map(callLogFromRow);
 }
 
@@ -963,6 +1013,58 @@ export async function claimUserPassword(email, passwordHash) {
     [String(email).toLowerCase().trim(), passwordHash]
   );
   return rows[0] || null;
+}
+
+function userFromRow(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    role: r.role || "admin",
+    allowedTags: r.allowed_tags || [],
+    hasPassword: Boolean(r.password_hash),
+    createdAt: r.created_at,
+  };
+}
+
+export async function getUserById(id) {
+  const rows = await query("SELECT * FROM users WHERE id = $1", [id]);
+  return rows[0] || null;
+}
+
+// For the Settings → Users list. Never returns password_hash.
+export async function getUsers() {
+  const rows = await query("SELECT * FROM users ORDER BY created_at ASC");
+  return rows.map(userFromRow);
+}
+
+// Invites a new user (no password yet — they claim the account the
+// same way INVITED_USERS does). role defaults to 'admin'; 'owner' is
+// rejected here — see server/auth.js, which enforces that only the
+// one hardcoded owner email can ever hold that role.
+export async function inviteUser({ name, email, role, allowedTags }) {
+  const rows = await query(
+    `INSERT INTO users (name, email, role, allowed_tags) VALUES ($1,$2,$3,$4)
+     ON CONFLICT (email) DO NOTHING RETURNING *`,
+    [name, String(email).toLowerCase().trim(), role || "admin", JSON.stringify(allowedTags || [])]
+  );
+  return rows[0] ? userFromRow(rows[0]) : null;
+}
+
+export async function updateUser(id, { name, role, allowedTags }) {
+  const rows = await query(
+    `UPDATE users SET
+       name = COALESCE($2, name),
+       role = COALESCE($3, role),
+       allowed_tags = COALESCE($4::jsonb, allowed_tags)
+     WHERE id = $1 RETURNING *`,
+    [id, name ?? null, role ?? null, allowedTags ? JSON.stringify(allowedTags) : null]
+  );
+  return rows[0] ? userFromRow(rows[0]) : null;
+}
+
+export async function deleteUserById(id) {
+  await query("DELETE FROM users WHERE id = $1", [id]);
 }
 
 // ---------- API keys (for programmatic/agent access) ----------

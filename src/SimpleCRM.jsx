@@ -1015,6 +1015,96 @@ export default function SimpleCRM() {
     };
   }, [page, authUser]);
 
+  // ---------- Users (Settings → Team, role management) ----------
+  const canManageUsers = authUser?.role === "owner" || authUser?.role === "super_admin";
+  // Mirrors server/auth.js's tabsForRole — a client role only ever
+  // sees their own leads, so Powerdialler/Log/Clients/Settings (which
+  // are either full-roster tools or nothing-to-do-with-leads config)
+  // are hidden rather than just data-scoped.
+  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports"];
+  const visibleNavItems =
+    authUser?.role === "client" ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
+  useEffect(() => {
+    if (authUser?.role === "client" && !CLIENT_NAV_KEYS.includes(page)) setPage("conversation");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser, page]);
+  const [teamUsers, setTeamUsers] = useState([]);
+  const [teamUsersLoading, setTeamUsersLoading] = useState(false);
+  const emptyInviteForm = { name: "", email: "", role: "admin", allowedTags: [] };
+  const [inviteForm, setInviteForm] = useState(emptyInviteForm);
+  const [invitingUser, setInvitingUser] = useState(false);
+
+  useEffect(() => {
+    if (page !== "settings" || !authUser) return;
+    let cancelled = false;
+    setTeamUsersLoading(true);
+    api
+      .get("/api/users")
+      .then((list) => {
+        if (!cancelled) setTeamUsers(list);
+      })
+      .catch((err) => {
+        if (!cancelled) setDbError(err.message || "Could not load the team list.");
+      })
+      .finally(() => {
+        if (!cancelled) setTeamUsersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page, authUser]);
+
+  const handleInviteUser = async (e) => {
+    e.preventDefault();
+    if (!inviteForm.name.trim() || !inviteForm.email.trim()) return;
+    setInvitingUser(true);
+    try {
+      const created = await api.post("/api/users", {
+        name: inviteForm.name.trim(),
+        email: inviteForm.email.trim(),
+        role: inviteForm.role,
+        allowedTags: inviteForm.role === "client" ? inviteForm.allowedTags : [],
+      });
+      setTeamUsers((us) => [...us, created]);
+      setInviteForm(emptyInviteForm);
+    } catch (err) {
+      setDbError(err.message || "Could not invite that user.");
+    } finally {
+      setInvitingUser(false);
+    }
+  };
+
+  const patchTeamUser = async (id, patch) => {
+    try {
+      const updated = await api.patch("/api/users", { id, ...patch });
+      setTeamUsers((us) => us.map((u) => (u.id === id ? updated : u)));
+    } catch (err) {
+      setDbError(err.message || "Could not update that user.");
+    }
+  };
+
+  const handleDeleteTeamUser = async (id) => {
+    try {
+      await api.delete(`/api/users?id=${id}`);
+      setTeamUsers((us) => us.filter((u) => u.id !== id));
+    } catch (err) {
+      setDbError(err.message || "Could not remove that user.");
+    }
+  };
+
+  const toggleInviteAllowedTag = (tag) =>
+    setInviteForm((f) => ({
+      ...f,
+      allowedTags: f.allowedTags.includes(tag) ? f.allowedTags.filter((t) => t !== tag) : [...f.allowedTags, tag],
+    }));
+  const [tagMenuUserId, setTagMenuUserId] = useState(null); // which team row's tag-picker popover is open
+  const toggleTeamUserTag = (u, tag) => {
+    const next = u.allowedTags.includes(tag) ? u.allowedTags.filter((t) => t !== tag) : [...u.allowedTags, tag];
+    setTeamUsers((us) => us.map((x) => (x.id === u.id ? { ...x, allowedTags: next } : x)));
+    patchTeamUser(u.id, { allowedTags: next });
+  };
+  const canDeleteTeamUser = (targetRole) => canManageUsers && targetRole !== "owner";
+
   const handleCreateApiKey = async (e) => {
     e.preventDefault();
     if (!newKeyLabel.trim()) return;
@@ -1633,6 +1723,11 @@ export default function SimpleCRM() {
   const reportsTotalSeconds = reportsCallLog.reduce((sum, e) => sum + (e.durationSeconds || 0), 0);
   const reportsAvgSeconds = reportsTotalCalls ? reportsTotalSeconds / reportsTotalCalls : 0;
   const reportsUniqueLeads = new Set(reportsCallLog.map((e) => e.leadId)).size;
+  // "Successful booking" = a call whose outcome (STAGE) was moved to
+  // Booked — the one number a Client-role user gets in place of the
+  // internal talk-time metrics they don't see.
+  const reportsBookedCalls = reportsCallLog.filter((e) => e.status === "Booked").length;
+  const reportsIsClientView = authUser?.role === "client";
 
   // Groups call log entries by a key (rep, client, or tag) and rolls
   // up call count + duration for each — the source for every
@@ -1648,7 +1743,8 @@ export default function SimpleCRM() {
       .map(([key, group]) => {
         const calls = group.length;
         const totalSeconds = group.reduce((s, e) => s + (e.durationSeconds || 0), 0);
-        return { key, calls, totalSeconds, avgSeconds: calls ? totalSeconds / calls : 0 };
+        const bookedCalls = group.filter((e) => e.status === "Booked").length;
+        return { key, calls, totalSeconds, avgSeconds: calls ? totalSeconds / calls : 0, bookedCalls };
       })
       .sort((a, b) => b.calls - a.calls);
   };
@@ -2052,7 +2148,7 @@ export default function SimpleCRM() {
           <div className="text-xs text-gray-400 mt-0.5">Lead operations</div>
         </div>
         <nav className="flex-1 py-3">
-          {navItems.map(({ key, label, icon: Icon }) => (
+          {visibleNavItems.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setPage(key)}
@@ -2198,7 +2294,7 @@ export default function SimpleCRM() {
               <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
                 <span className="font-semibold">Conversations</span>
                 <div className="flex items-center gap-3">
-                  {selectedConvoIds.length > 0 && (
+                  {selectedConvoIds.length > 0 && authUser?.role !== "client" && (
                     <button
                       onClick={deleteSelectedConvos}
                       className="flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-800"
@@ -2448,7 +2544,7 @@ export default function SimpleCRM() {
                 </div>
               </div>
               <div className="flex gap-3">
-                {selectedContactIds.length > 0 && (
+                {selectedContactIds.length > 0 && authUser?.role !== "client" && (
                   <button
                     onClick={() => setShowAddToPowerlist(true)}
                     className="flex items-center gap-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 text-sm px-4 py-2 rounded-lg font-medium"
@@ -2456,7 +2552,7 @@ export default function SimpleCRM() {
                     <ListChecks size={15} /> Add to Powerlist
                   </button>
                 )}
-                {selectedContactIds.length > 0 && (
+                {selectedContactIds.length > 0 && authUser?.role !== "client" && (
                   <button
                     onClick={deleteSelectedContacts}
                     className="flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
@@ -2535,22 +2631,24 @@ export default function SimpleCRM() {
                     className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-64"
                   />
                 </div>
-                <button
-                  onClick={handleImportContacts}
-                  disabled={importingContacts}
-                  className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {importingContacts ? (
-                    <Loader2 size={15} className="animate-spin" />
-                  ) : (
-                    <Upload size={15} />
-                  )}
-                  {importingContacts
-                    ? importProgress
-                      ? `Importing ${importProgress.inserted}/${importProgress.total}…`
-                      : "Importing…"
-                    : "Import leads"}
-                </button>
+                {authUser?.role !== "client" && (
+                  <button
+                    onClick={handleImportContacts}
+                    disabled={importingContacts}
+                    className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {importingContacts ? (
+                      <Loader2 size={15} className="animate-spin" />
+                    ) : (
+                      <Upload size={15} />
+                    )}
+                    {importingContacts
+                      ? importProgress
+                        ? `Importing ${importProgress.inserted}/${importProgress.total}…`
+                        : "Importing…"
+                      : "Import leads"}
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     setShowMoreContactFields(false);
@@ -3518,92 +3616,120 @@ export default function SimpleCRM() {
                   <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Calls made</div>
                   <div className="text-4xl font-bold mt-2 tabular-nums">{reportsTotalCalls}</div>
                 </div>
-                <div className="border border-gray-200 rounded-2xl p-5">
-                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Avg. minutes / call</div>
-                  <div className="text-4xl font-bold mt-2 tabular-nums">
-                    {(reportsAvgSeconds / 60).toFixed(1)}
+                {reportsIsClientView ? (
+                  <div className="border border-gray-200 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                      Successful bookings
+                    </div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums">{reportsBookedCalls}</div>
                   </div>
-                </div>
-                <div className="border border-gray-200 rounded-2xl p-5">
-                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Total talk time</div>
-                  <div className="text-4xl font-bold mt-2 tabular-nums">
-                    {formatCallDuration(reportsTotalSeconds * 1000)}
-                  </div>
-                </div>
+                ) : (
+                  <>
+                    <div className="border border-gray-200 rounded-2xl p-5">
+                      <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                        Avg. minutes / call
+                      </div>
+                      <div className="text-4xl font-bold mt-2 tabular-nums">
+                        {(reportsAvgSeconds / 60).toFixed(1)}
+                      </div>
+                    </div>
+                    <div className="border border-gray-200 rounded-2xl p-5">
+                      <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                        Total talk time
+                      </div>
+                      <div className="text-4xl font-bold mt-2 tabular-nums">
+                        {formatCallDuration(reportsTotalSeconds * 1000)}
+                      </div>
+                    </div>
+                  </>
+                )}
                 <div className="border border-gray-200 rounded-2xl p-5">
                   <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Leads contacted</div>
                   <div className="text-4xl font-bold mt-2 tabular-nums">{reportsUniqueLeads}</div>
                 </div>
+                {reportsIsClientView && (
+                  <div className="border border-gray-200 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                      Booking rate
+                    </div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums">
+                      {reportsTotalCalls ? Math.round((reportsBookedCalls / reportsTotalCalls) * 100) : 0}%
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Breakdown tables */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="border border-gray-200 rounded-2xl overflow-hidden">
-                  <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per rep</div>
-                  <div className="max-h-80 overflow-y-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
-                          <th className="px-5 py-2.5 font-medium">Rep</th>
-                          <th className="px-5 py-2.5 font-medium text-right">Calls</th>
-                          <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {reportsByUser.map((row) => (
-                          <tr key={row.key} className="border-b border-gray-50 last:border-0">
-                            <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
-                            <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
-                            <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
-                              {formatCallDuration(row.avgSeconds * 1000)}
-                            </td>
+              {/* Breakdown tables — rep/client performance is internal,
+                  so it's skipped entirely for the Client role. */}
+              {!reportsIsClientView && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                    <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per rep</div>
+                    <div className="max-h-80 overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                            <th className="px-5 py-2.5 font-medium">Rep</th>
+                            <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                            <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
                           </tr>
-                        ))}
-                        {reportsByUser.length === 0 && (
-                          <tr>
-                            <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
-                              No calls in this range
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {reportsByUser.map((row) => (
+                            <tr key={row.key} className="border-b border-gray-50 last:border-0">
+                              <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
+                              <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                              <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                                {formatCallDuration(row.avgSeconds * 1000)}
+                              </td>
+                            </tr>
+                          ))}
+                          {reportsByUser.length === 0 && (
+                            <tr>
+                              <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
+                                No calls in this range
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                </div>
 
-                <div className="border border-gray-200 rounded-2xl overflow-hidden">
-                  <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per client</div>
-                  <div className="max-h-80 overflow-y-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
-                          <th className="px-5 py-2.5 font-medium">Client</th>
-                          <th className="px-5 py-2.5 font-medium text-right">Calls</th>
-                          <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {reportsByClient.map((row) => (
-                          <tr key={row.key} className="border-b border-gray-50 last:border-0">
-                            <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
-                            <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
-                            <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
-                              {formatCallDuration(row.avgSeconds * 1000)}
-                            </td>
+                  <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                    <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per client</div>
+                    <div className="max-h-80 overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                            <th className="px-5 py-2.5 font-medium">Client</th>
+                            <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                            <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
                           </tr>
-                        ))}
-                        {reportsByClient.length === 0 && (
-                          <tr>
-                            <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
-                              No calls in this range
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {reportsByClient.map((row) => (
+                            <tr key={row.key} className="border-b border-gray-50 last:border-0">
+                              <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
+                              <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                              <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                                {formatCallDuration(row.avgSeconds * 1000)}
+                              </td>
+                            </tr>
+                          ))}
+                          {reportsByClient.length === 0 && (
+                            <tr>
+                              <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
+                                No calls in this range
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
 
               <div className="border border-gray-200 rounded-2xl overflow-hidden">
                 <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per tag</div>
@@ -3613,8 +3739,13 @@ export default function SimpleCRM() {
                       <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
                         <th className="px-5 py-2.5 font-medium">Tag</th>
                         <th className="px-5 py-2.5 font-medium text-right">Calls</th>
-                        <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
-                        <th className="px-5 py-2.5 font-medium text-right">Total talk time</th>
+                        {!reportsIsClientView && (
+                          <>
+                            <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
+                            <th className="px-5 py-2.5 font-medium text-right">Total talk time</th>
+                          </>
+                        )}
+                        {reportsIsClientView && <th className="px-5 py-2.5 font-medium text-right">Booked</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -3626,17 +3757,26 @@ export default function SimpleCRM() {
                             </span>
                           </td>
                           <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
-                          <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
-                            {formatCallDuration(row.avgSeconds * 1000)}
-                          </td>
-                          <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
-                            {formatCallDuration(row.totalSeconds * 1000)}
-                          </td>
+                          {!reportsIsClientView && (
+                            <>
+                              <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                                {formatCallDuration(row.avgSeconds * 1000)}
+                              </td>
+                              <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                                {formatCallDuration(row.totalSeconds * 1000)}
+                              </td>
+                            </>
+                          )}
+                          {reportsIsClientView && (
+                            <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                              {row.bookedCalls}
+                            </td>
+                          )}
                         </tr>
                       ))}
                       {reportsByTag.length === 0 && (
                         <tr>
-                          <td colSpan={4} className="px-5 py-8 text-center text-sm text-gray-400">
+                          <td colSpan={reportsIsClientView ? 3 : 4} className="px-5 py-8 text-center text-sm text-gray-400">
                             No calls in this range
                           </td>
                         </tr>
@@ -3866,6 +4006,202 @@ export default function SimpleCRM() {
                 <input defaultValue="+61 8 1234 5678" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400" />
               </div>
               <button className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">Save changes</button>
+            </div>
+
+            <div className="px-8 pb-10 max-w-3xl">
+              <div className="border-t border-gray-100 pt-8">
+                <h2 className="text-base font-bold">Team &amp; permissions</h2>
+                <p className="text-sm text-gray-500 mt-1 max-w-lg">
+                  Owner and Super Admin can invite people and change roles. Admin sees the team but can't edit
+                  it. A Client account only ever sees Conversation, Contacts and Reports — scoped to the lead
+                  tag(s) picked for them below.
+                </p>
+
+                {canManageUsers && (
+                  <form onSubmit={handleInviteUser} className="flex items-end gap-2 mt-4 flex-wrap">
+                    <div>
+                      <label className="text-xs font-medium block mb-1.5 text-gray-500">Name</label>
+                      <input
+                        value={inviteForm.name}
+                        onChange={(e) => setInviteForm((f) => ({ ...f, name: e.target.value }))}
+                        placeholder="Jane Smith"
+                        className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 w-40"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium block mb-1.5 text-gray-500">Email</label>
+                      <input
+                        type="email"
+                        value={inviteForm.email}
+                        onChange={(e) => setInviteForm((f) => ({ ...f, email: e.target.value }))}
+                        placeholder="jane@client.com"
+                        className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 w-52"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium block mb-1.5 text-gray-500">Role</label>
+                      <select
+                        value={inviteForm.role}
+                        onChange={(e) => setInviteForm((f) => ({ ...f, role: e.target.value }))}
+                        className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                      >
+                        <option value="admin">Admin</option>
+                        <option value="super_admin">Super Admin</option>
+                        <option value="client">Client</option>
+                      </select>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={invitingUser || !inviteForm.name.trim() || !inviteForm.email.trim()}
+                      className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {invitingUser && <Loader2 size={14} className="animate-spin" />}
+                      Invite
+                    </button>
+                  </form>
+                )}
+
+                {canManageUsers && inviteForm.role === "client" && (
+                  <div className="mt-3 border border-gray-200 rounded-lg p-3 max-w-md">
+                    <div className="text-xs font-medium text-gray-500 mb-1.5">Which tags can they see?</div>
+                    {contactTagNames.length === 0 ? (
+                      <div className="text-xs text-gray-400">No tags yet — import some leads first.</div>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                        {contactTagNames.map((tag) => (
+                          <button
+                            type="button"
+                            key={tag}
+                            onClick={() => toggleInviteAllowedTag(tag)}
+                            className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${
+                              inviteForm.allowedTags.includes(tag)
+                                ? "bg-gray-900 text-white border-gray-900"
+                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                            }`}
+                          >
+                            {tag}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="mt-5 border border-gray-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                        <th className="px-4 py-2.5 font-medium">Name</th>
+                        <th className="px-4 py-2.5 font-medium">Email</th>
+                        <th className="px-4 py-2.5 font-medium">Role</th>
+                        <th className="px-4 py-2.5 font-medium">Tags</th>
+                        <th className="px-4 py-2.5 font-medium">Status</th>
+                        <th className="px-4 py-2.5"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {teamUsers.map((u) => (
+                        <tr key={u.id} className="border-b border-gray-50 last:border-0">
+                          <td className="px-4 py-3 font-medium">{u.name}</td>
+                          <td className="px-4 py-3 text-gray-500">{u.email}</td>
+                          <td className="px-4 py-3">
+                            {u.role === "owner" ? (
+                              <span className="text-xs px-2.5 py-1 rounded-full border bg-purple-50 text-purple-700 border-purple-200">
+                                Owner
+                              </span>
+                            ) : canManageUsers ? (
+                              <select
+                                value={u.role}
+                                onChange={(e) => patchTeamUser(u.id, { role: e.target.value })}
+                                className="border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400 bg-white"
+                              >
+                                <option value="admin">Admin</option>
+                                <option value="super_admin">Super Admin</option>
+                                <option value="client">Client</option>
+                              </select>
+                            ) : (
+                              <span className="text-xs text-gray-600 capitalize">{u.role.replace("_", " ")}</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3">
+                            {u.role !== "client" ? (
+                              <span className="text-gray-300 text-xs">—</span>
+                            ) : (
+                              <div className="relative">
+                                <button
+                                  type="button"
+                                  onClick={() => canManageUsers && setTagMenuUserId((cur) => (cur === u.id ? null : u.id))}
+                                  className="flex flex-wrap gap-1 max-w-[220px]"
+                                >
+                                  {u.allowedTags.length ? (
+                                    u.allowedTags.map((tag) => (
+                                      <span
+                                        key={tag}
+                                        className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200 whitespace-nowrap"
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))
+                                  ) : (
+                                    <span className="text-xs text-red-500">No tags — sees nothing</span>
+                                  )}
+                                </button>
+                                {canManageUsers && tagMenuUserId === u.id && (
+                                  <>
+                                    <div className="fixed inset-0 z-40" onClick={() => setTagMenuUserId(null)} />
+                                    <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-56 max-h-56 overflow-y-auto">
+                                      {contactTagNames.map((tag) => (
+                                        <label
+                                          key={tag}
+                                          className="flex items-center gap-2 px-1.5 py-1 rounded-md hover:bg-gray-50 text-xs cursor-pointer"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={u.allowedTags.includes(tag)}
+                                            onChange={() => toggleTeamUserTag(u, tag)}
+                                            className="w-3.5 h-3.5 rounded border-gray-300"
+                                          />
+                                          <span className="truncate">{tag}</span>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">{u.hasPassword ? "Active" : "Invited"}</td>
+                          <td className="px-4 py-3 text-right">
+                            {canDeleteTeamUser(u.role) && u.id !== authUser?.id && (
+                              <button
+                                onClick={() => handleDeleteTeamUser(u.id)}
+                                className="text-gray-300 hover:text-red-500"
+                                title="Remove user"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                      {!teamUsersLoading && teamUsers.length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
+                            No team members yet
+                          </td>
+                        </tr>
+                      )}
+                      {teamUsersLoading && (
+                        <tr>
+                          <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
+                            <Loader2 size={14} className="animate-spin inline" />
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
 
             <div className="px-8 pb-10 max-w-2xl">
@@ -4120,12 +4456,33 @@ export default function SimpleCRM() {
               </div>
               <div>
                 <label className="text-sm font-medium block mb-1.5">Tag</label>
-                <input
-                  value={contactForm.tag}
-                  onChange={(e) => updateContactForm("tag", e.target.value)}
-                  placeholder="e.g. Khan Legal"
-                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-                />
+                {authUser?.role === "client" ? (
+                  // A client account can only ever add leads under one
+                  // of their own tags — the server enforces this too,
+                  // but picking from a list avoids a confusing 403 from
+                  // typing the wrong thing.
+                  <select
+                    value={contactForm.tag}
+                    onChange={(e) => updateContactForm("tag", e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    <option value="" disabled>
+                      Select tag…
+                    </option>
+                    {(authUser.allowedTags || []).map((tag) => (
+                      <option key={tag} value={tag}>
+                        {tag}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={contactForm.tag}
+                    onChange={(e) => updateContactForm("tag", e.target.value)}
+                    placeholder="e.g. Khan Legal"
+                    className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                  />
+                )}
               </div>
 
               <button

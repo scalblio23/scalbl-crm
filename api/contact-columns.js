@@ -5,7 +5,7 @@ import {
   deleteContactColumn,
   updateContactColumnByKey,
 } from "../server/db.js";
-import { requireAuth } from "../server/auth.js";
+import { requireAuth, forbidClientRole } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -14,8 +14,13 @@ export default async function handler(req, res) {
     await ensureSchema();
 
     if (req.method === "GET") {
+      // Reading column definitions is fine for a client role — they
+      // need it to render their own leads' criteria. Changing the
+      // schema (add/retype/delete a column) is not, since it affects
+      // every lead, not just theirs.
       return res.status(200).json(await getContactColumns());
     }
+    if (forbidClientRole(user, res)) return;
 
     if (req.method === "POST") {
       const { label, type, options } = req.body || {};

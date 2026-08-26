@@ -8,7 +8,55 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import { findApiKeyByHash, touchApiKeyLastUsed } from "./db.js";
+import { findApiKeyByHash, touchApiKeyLastUsed, getUserById } from "./db.js";
+
+// ---------- Roles ----------
+// owner        — henryfortunatow@gmail.com only (see db.js's
+//                self-healing UPDATE in ensureSchema). All tabs, all
+//                lead data, can't be edited or deleted by anyone.
+// super_admin  — all tabs, all lead data, can edit other users
+//                (except the owner) and can't delete the owner.
+// admin        — all tabs, all lead data, can't edit or delete anyone.
+// client       — only Conversation/Contacts/Reports, and only leads
+//                whose tag is in that user's allowedTags.
+export const ROLES = ["owner", "super_admin", "admin", "client"];
+const FULL_ACCESS_TABS = ["conversation", "contacts", "powerdialler", "log", "clients", "reports", "settings"];
+const CLIENT_TABS = ["conversation", "contacts", "reports"];
+
+export function tabsForRole(role) {
+  return role === "client" ? CLIENT_TABS : FULL_ACCESS_TABS;
+}
+
+export function isDataScoped(role) {
+  return role === "client";
+}
+
+// Everyone but a client role sees every lead; a client role is scoped
+// to their own allowedTags. Returns null for "no filter" (full
+// access) so callers can pass it straight through to a query.
+export function scopeTagsForUser(user) {
+  return isDataScoped(user.role) ? user.allowedTags || [] : null;
+}
+
+export function canManageUsers(role) {
+  return role === "owner" || role === "super_admin";
+}
+
+export function canDeleteUser(actingRole, targetRole) {
+  if (targetRole === "owner") return false;
+  return canManageUsers(actingRole);
+}
+
+// For endpoints a client role has no business reaching at all (client
+// org management, dial lists, bulk/reset imports, column schema
+// changes) — not just data they can't see, but capability they don't
+// have, regardless of tag scoping. Writes the 403 itself; callers do
+// `if (forbidClientRole(user, res)) return;` right after requireAuth.
+export function forbidClientRole(user, res) {
+  if (user.role !== "client") return false;
+  res.status(403).json({ error: "Not available on this account." });
+  return true;
+}
 
 export const COOKIE_NAME = "scalbl_session";
 const SESSION_DAYS = 30;
@@ -106,6 +154,32 @@ export function getUserFromRequest(req) {
   }
 }
 
+// Resolves a session cookie all the way to a live role/allowedTags —
+// looked up fresh from the database on every call rather than baked
+// into the JWT, so promoting/demoting a user or changing their
+// allowed tags takes effect on their very next request instead of
+// waiting for them to log in again. Returns null if the account was
+// deleted since the token was issued (treated as logged out).
+export async function getSessionUser(req) {
+  const identity = getUserFromRequest(req);
+  if (!identity) return null;
+  let row;
+  try {
+    row = await getUserById(identity.id);
+  } catch (err) {
+    console.error("[auth] user lookup failed", err);
+    return null;
+  }
+  if (!row) return null;
+  return {
+    id: identity.id,
+    email: row.email,
+    name: row.name,
+    role: row.role || "admin",
+    allowedTags: row.allowed_tags || [],
+  };
+}
+
 // ---------- API keys (programmatic/agent access) ----------
 // A key is a bearer credential equivalent to being logged in — it's
 // meant for scripts and agents that can't hold a session cookie, not
@@ -150,7 +224,17 @@ async function getUserFromApiKey(req) {
   if (!row) return null;
 
   touchApiKeyLastUsed(row.id).catch(() => {});
-  return { id: `api-key:${row.id}`, name: `API key (${row.label})`, email: null, isApiKey: true };
+  // A key is only ever mintable by an already-logged-in user (see
+  // api/api-keys.js), so it's treated as full access, same as admin —
+  // there's no "client-role key" concept.
+  return {
+    id: `api-key:${row.id}`,
+    name: `API key (${row.label})`,
+    email: null,
+    isApiKey: true,
+    role: "admin",
+    allowedTags: [],
+  };
 }
 
 // For Vercel functions: call at the top of any handler that needs a
@@ -159,7 +243,7 @@ async function getUserFromApiKey(req) {
 // `if (!user) return;`). Async because the API-key path needs a
 // database lookup — every caller must `await` this now.
 export async function requireAuth(req, res) {
-  const sessionUser = getUserFromRequest(req);
+  const sessionUser = await getSessionUser(req);
   if (sessionUser) return sessionUser;
 
   const apiUser = await getUserFromApiKey(req);

@@ -1,9 +1,10 @@
 import { ensureSchema, getClients, createClient, updateClient, deleteClients } from "../server/db.js";
-import { requireAuth } from "../server/auth.js";
+import { requireAuth, forbidClientRole } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
+  if (forbidClientRole(user, res)) return;
   try {
     await ensureSchema();
 

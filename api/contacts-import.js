@@ -1,5 +1,5 @@
 import { ensureSchema, resetContactImport, importContactDataBatch } from "../server/db.js";
-import { requireAuth } from "../server/auth.js";
+import { requireAuth, forbidClientRole } from "../server/auth.js";
 
 // Bumps this function's execution time limit as far as Vercel allows
 // (60s on Hobby, more on paid plans).
@@ -18,6 +18,7 @@ export const config = { maxDuration: 60 };
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
+  if (forbidClientRole(user, res)) return;
   try {
     await ensureSchema();
     if (req.method !== "POST") {
