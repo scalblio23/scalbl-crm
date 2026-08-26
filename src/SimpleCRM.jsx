@@ -488,6 +488,7 @@ export default function SimpleCRM() {
   const [calling, setCalling] = useState(false);
   const [activeLeadId, setActiveLeadId] = useState(null);
   const emptyDialFilters = {
+    leadDate: "",
     name: "",
     email: "",
     phone: "",
@@ -1444,6 +1445,7 @@ export default function SimpleCRM() {
   };
   const filteredDialQueueBase = dialQueue.filter(
     (l) =>
+      (l.leadDate || "").toLowerCase().includes(dialFilters.leadDate.toLowerCase()) &&
       l.name.toLowerCase().includes(dialFilters.name.toLowerCase()) &&
       l.email.toLowerCase().includes(dialFilters.email.toLowerCase()) &&
       l.phone.toLowerCase().includes(dialFilters.phone.toLowerCase()) &&
@@ -2983,6 +2985,7 @@ export default function SimpleCRM() {
                   <thead>
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 py-3 font-medium w-8" />
+                      <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
                       <th className="px-5 py-3 font-medium">Name</th>
                       <th className="px-5 py-3 font-medium">Email</th>
                       <th className="px-5 py-3 font-medium">Phone</th>
@@ -2999,6 +3002,14 @@ export default function SimpleCRM() {
                     </tr>
                     <tr className="border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 pb-3" />
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.leadDate}
+                          onChange={(e) => updateDialFilter("leadDate", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
                       <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.name}
@@ -3139,6 +3150,7 @@ export default function SimpleCRM() {
                             className="w-4 h-4 rounded border-gray-300"
                           />
                         </td>
+                        <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{lead.leadDate || "—"}</td>
                         <td className="px-5 py-3.5 font-medium">{lead.name}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.phone}</td>
@@ -3222,7 +3234,7 @@ export default function SimpleCRM() {
                     {filteredDialQueue.length === 0 && (
                       <tr>
                         <td
-                          colSpan={9 + visibleDialColumns.length}
+                          colSpan={10 + visibleDialColumns.length}
                           className="px-5 py-10 text-center text-sm text-gray-400"
                         >
                           No leads match the current filters
