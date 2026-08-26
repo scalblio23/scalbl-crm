@@ -193,6 +193,7 @@ const INVITED_USERS = [
   { name: "Henry", email: "henryfortunatow@gmail.com" },
   { name: "Jem", email: "jem.scalbl@gmail.com" },
   { name: "Cody", email: "codyadrury90@gmail.com" },
+  { name: "Dave", email: "lorddave1513@gmail.com" },
 ];
 
 async function seedUsersIfMissing() {

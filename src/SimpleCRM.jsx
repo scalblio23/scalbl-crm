@@ -516,7 +516,14 @@ export default function SimpleCRM() {
     { key: "__phone", label: "Phone", kind: "text", get: (c) => c.phone },
     { key: "__client", label: "Client", kind: "text", get: (c) => c.client },
     { key: "__tag", label: "Tag", kind: "select", options: contactTagNames, get: (c) => c.tag },
-    { key: "__status", label: "Status", kind: "select", options: Object.keys(statusColors), get: (c) => c.status },
+    {
+      key: "__status",
+      label: "Status",
+      kind: "select",
+      options: Object.keys(statusColors),
+      optionColor: (v) => statusColors[v],
+      get: (c) => c.status,
+    },
     { key: "__leadDate", label: "Date", kind: "text", get: (c) => c.leadDate },
     { key: "__notes", label: "Notes", kind: "text", get: (c) => c.notes },
     { key: "__lastContact", label: "Last contact", kind: "text", get: (c) => c.lastContact },
@@ -525,6 +532,12 @@ export default function SimpleCRM() {
       label: col.label,
       kind: col.type === "select" || col.type === "checkbox" ? "select" : "text",
       options: col.type === "select" ? (col.options || []).map((o) => o.value) : col.type === "checkbox" ? ["Yes", "No"] : null,
+      optionColor:
+        col.type === "select"
+          ? (v) => selectOptionColor(col, v)
+          : col.type === "checkbox"
+          ? (v) => (v === "Yes" ? SELECT_COLORS.green : SELECT_COLORS.gray)
+          : null,
       get: (c) => (col.type === "checkbox" ? (c.fields?.[col.key] ? "Yes" : "No") : c.fields?.[col.key]),
     })),
   ];
@@ -2229,32 +2242,32 @@ export default function SimpleCRM() {
                                 <option value="is not empty">is not empty</option>
                               </select>
 
-                              {(f.op === "is" || f.op === "is not") &&
-                                (colDef.kind === "select" ? (
-                                  <select
-                                    autoFocus
-                                    value={(colDef.options || []).includes(f.value) ? f.value : ""}
-                                    onChange={(e) => updateContactFilter(f.id, { value: e.target.value })}
-                                    className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm outline-none focus:border-gray-400 bg-white"
-                                  >
-                                    <option value="" disabled>
-                                      Select value…
-                                    </option>
-                                    {(colDef.options || []).map((opt) => (
-                                      <option key={opt} value={opt}>
-                                        {opt}
-                                      </option>
-                                    ))}
-                                  </select>
-                                ) : (
+                              {(f.op === "is" || f.op === "is not") && (
+                                <>
                                   <input
                                     autoFocus
                                     value={f.value}
                                     onChange={(e) => updateContactFilter(f.id, { value: e.target.value })}
-                                    placeholder="Value…"
+                                    placeholder={colDef.kind === "select" ? "Type or pick below…" : "Value…"}
                                     className="w-full border border-gray-200 rounded-lg px-2.5 py-2 text-sm outline-none focus:border-gray-400"
                                   />
-                                ))}
+                                  {colDef.kind === "select" && (colDef.options || []).length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2 max-h-32 overflow-y-auto">
+                                      {colDef.options.map((opt) => (
+                                        <button
+                                          key={opt}
+                                          onClick={() => updateContactFilter(f.id, { value: opt })}
+                                          className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${
+                                            colDef.optionColor ? colDef.optionColor(opt) : "bg-gray-50 text-gray-600 border-gray-200"
+                                          } ${f.value === opt ? "ring-2 ring-offset-1 ring-gray-400" : ""}`}
+                                        >
+                                          {opt}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </>
+                              )}
 
                               <button
                                 onClick={() => removeContactFilter(f.id)}
