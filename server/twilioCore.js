@@ -10,11 +10,28 @@ const REQUIRED_ENV_KEYS = [
   "TWILIO_API_KEY_SID",
   "TWILIO_API_KEY_SECRET",
   "TWILIO_TWIML_APP_SID",
-  "TWILIO_CALLER_ID",
 ];
 
 export function missingTwilioEnv(env = process.env) {
-  return REQUIRED_ENV_KEYS.filter((key) => !env[key]);
+  const missing = REQUIRED_ENV_KEYS.filter((key) => !env[key]);
+  if (getCallerIdPool(env).length === 0) missing.push("TWILIO_CALLER_ID (or TWILIO_CALLER_IDS)");
+  return missing;
+}
+
+// The pool of numbers outbound calls rotate through as their caller
+// ID — set TWILIO_CALLER_IDS to a comma-separated list ("+618700001,
+// +618700002,+618700003,+618700004") to rotate across several
+// numbers, spreading call volume so no single number gets flagged by
+// carriers. TWILIO_CALLER_ID (singular) still works as before for a
+// single-number setup, and is used as a fallback if TWILIO_CALLER_IDS
+// isn't set.
+export function getCallerIdPool(env = process.env) {
+  const list = (env.TWILIO_CALLER_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (list.length) return list;
+  return env.TWILIO_CALLER_ID ? [env.TWILIO_CALLER_ID] : [];
 }
 
 // Mints a short-lived Access Token so the browser can register as a
@@ -39,12 +56,16 @@ export function mintAccessToken(identity, env = process.env) {
 }
 
 // Builds the TwiML response for the voice webhook: who to dial and
-// what caller ID to show.
-export function buildVoiceTwiml(to, env = process.env) {
+// what caller ID to show. callerId is resolved by the caller (see
+// api/voice.js) — usually the next number in TWILIO_CALLER_IDS'
+// rotation — rather than read from env here, since picking it may
+// require a database round-trip this function shouldn't need to know
+// about.
+export function buildVoiceTwiml(to, callerId) {
   const twiml = new twilio.twiml.VoiceResponse();
 
   if (to) {
-    const dial = twiml.dial({ callerId: env.TWILIO_CALLER_ID });
+    const dial = twiml.dial({ callerId });
     if (/^client:/.test(to)) {
       dial.client(to.replace(/^client:/, ""));
     } else {
@@ -66,14 +87,16 @@ function restClient(env = process.env) {
 // Sends an outbound SMS. Uses TWILIO_MESSAGING_SERVICE_SID if set
 // (recommended by Twilio — better deliverability, required for some
 // inbound routing setups); otherwise falls back to sending straight
-// from TWILIO_CALLER_ID.
+// from the first number in the caller ID pool. SMS doesn't rotate —
+// only outbound calls do, per the caller-ID-flagging concern that
+// rotation exists for.
 export async function sendSms({ to, body }, env = process.env) {
   const client = restClient(env);
   const params = { to, body };
   if (env.TWILIO_MESSAGING_SERVICE_SID) {
     params.messagingServiceSid = env.TWILIO_MESSAGING_SERVICE_SID;
   } else {
-    params.from = env.TWILIO_CALLER_ID;
+    params.from = getCallerIdPool(env)[0];
   }
   const message = await client.messages.create(params);
   return { sid: message.sid, status: message.status };

@@ -41,7 +41,10 @@ cp .env.example .env
 ```
 
 Fill in `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`,
-`TWILIO_TWIML_APP_SID`, and `TWILIO_CALLER_ID` (the number from step 1).
+`TWILIO_TWIML_APP_SID`, and `TWILIO_CALLER_ID` (the number from step 1). To
+rotate outbound calls across several numbers instead of one — spreading call
+volume so no single number gets carrier-flagged — set `TWILIO_CALLER_IDS`
+(comma-separated) instead; see `.env.example` for details.
 
 ### 3. Run the app + calling server together
 
@@ -77,10 +80,10 @@ separate backend hosting needed. Two things to set up in the Vercel project:
 
 1. **Environment variables** — Project Settings → Environment Variables, add
    `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`,
-   `TWILIO_TWIML_APP_SID`, `TWILIO_CALLER_ID` (same values as your local
-   `.env`). Do **not** set `VITE_CALL_SERVER_URL` here — leaving it unset
-   makes the frontend call `/api/token` on the same domain, which is what
-   you want in production.
+   `TWILIO_TWIML_APP_SID`, `TWILIO_CALLER_ID` (or `TWILIO_CALLER_IDS` for
+   rotation — same values as your local `.env`). Do **not** set
+   `VITE_CALL_SERVER_URL` here — leaving it unset makes the frontend call
+   `/api/token` on the same domain, which is what you want in production.
 2. **TwiML App Voice webhook** — once deployed, point it at
    `https://<your-vercel-domain>/api/voice` (method `POST`) in the Twilio
    Console (Voice → TwiML → TwiML Apps).

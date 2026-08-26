@@ -5,7 +5,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { missingTwilioEnv, mintAccessToken, buildVoiceTwiml, sendSms } from "./twilioCore.js";
+import { missingTwilioEnv, mintAccessToken, buildVoiceTwiml, getCallerIdPool, sendSms } from "./twilioCore.js";
 import {
   isDbConfigured,
   ensureSchema,
@@ -52,6 +52,7 @@ import {
   inviteUser,
   updateUser,
   deleteUserById,
+  nextRotationIndex,
 } from "./db.js";
 import {
   getSessionUser,
@@ -379,8 +380,19 @@ app.get("/api/token", (req, res) => {
 // browser device places a call, and we tell it who to actually dial
 // and what caller ID to show — mirroring GHL's "call bridges through
 // our number" behaviour.
-app.post("/api/voice", (req, res) => {
-  res.type("text/xml").send(buildVoiceTwiml(req.body.To));
+app.post("/api/voice", async (req, res) => {
+  const pool = getCallerIdPool();
+  let callerId = pool[0];
+  if (pool.length > 1) {
+    try {
+      await ensureSchema();
+      const counter = await nextRotationIndex();
+      callerId = pool[counter % pool.length];
+    } catch (err) {
+      console.error("[api/voice] rotation lookup failed, using the first caller ID", err);
+    }
+  }
+  res.type("text/xml").send(buildVoiceTwiml(req.body.To, callerId));
 });
 
 // Call status callback — set this as the TwiML App / <Dial> status
