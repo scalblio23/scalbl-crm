@@ -64,12 +64,29 @@ function toE164(rawPhone) {
   return cleaned;
 }
 
-// Places an outbound call to `phoneNumber` and returns the live Call
-// object — attach 'accept' / 'disconnect' / 'cancel' / 'error'
-// listeners to it to drive UI state.
+// Asks the backend which caller ID this call should go out from —
+// same rotation /api/voice itself uses (see server/twilioCore.js's
+// getCallerIdPool) — so the UI can show it *before* the call connects,
+// and so the number displayed is guaranteed to be the one Twilio
+// actually dials from rather than each side picking independently.
+async function fetchNextCallerId() {
+  const res = await fetch(`${CALL_SERVER_URL}/api/next-caller-id`, {
+    method: "POST",
+    credentials: "include",
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Could not pick a caller ID (${res.status})`);
+  return body.callerId;
+}
+
+// Places an outbound call to `phoneNumber`. Returns { call, callerId }
+// — `call` is the live Twilio Call object (attach 'accept' /
+// 'disconnect' / 'cancel' / 'error' listeners to it to drive UI
+// state), `callerId` is the number it's calling from.
 export async function placeCall(phoneNumber, identity = "rep") {
-  const dev = await getDevice(identity);
-  return dev.connect({ params: { To: toE164(phoneNumber) } });
+  const [dev, callerId] = await Promise.all([getDevice(identity), fetchNextCallerId()]);
+  const call = await dev.connect({ params: { To: toE164(phoneNumber), callerId } });
+  return { call, callerId };
 }
 
 // Ends whatever call is currently in progress on this device, if any.

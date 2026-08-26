@@ -1638,6 +1638,7 @@ export default function SimpleCRM() {
   // through the rep's mic/speakers via the backend in /server.
   const [callStatus, setCallStatus] = useState("idle"); // idle | connecting | in-progress
   const [callError, setCallError] = useState("");
+  const [activeCallerId, setActiveCallerId] = useState(""); // which of the rotated Twilio numbers is placing the current call
   const activeCallRef = useRef(null);
   const callStartRef = useRef(null); // when the current call was placed, for duration
   const callEndedRef = useRef(false); // guards against double-processing one call's end
@@ -2090,11 +2091,13 @@ export default function SimpleCRM() {
     setActiveLeadId(lead.id);
     setCalling(true);
     setCallStatus("connecting");
+    setActiveCallerId("");
     callEndedRef.current = false;
     try {
-      const call = await placeCall(lead.phone);
+      const { call, callerId } = await placeCall(lead.phone);
       activeCallRef.current = call;
       callStartRef.current = Date.now();
+      setActiveCallerId(callerId);
 
       // Shared end-of-call handling for disconnect/cancel/error alike —
       // guarded so it only ever runs once per call, however it ends
@@ -2104,6 +2107,7 @@ export default function SimpleCRM() {
         callEndedRef.current = true;
         setCalling(false);
         setCallStatus("idle");
+        setActiveCallerId("");
         activeCallRef.current = null;
         if (err) setCallError(err.message || "The call failed.");
         const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
@@ -2120,6 +2124,7 @@ export default function SimpleCRM() {
       setCallError(err.message || "Could not start the call — check your Twilio setup.");
       setCalling(false);
       setCallStatus("idle");
+      setActiveCallerId("");
     }
   };
 
@@ -3259,6 +3264,11 @@ export default function SimpleCRM() {
                       >
                         {callStatus === "connecting" ? "Connecting…" : "Live call"}
                       </div>
+                      {activeCallerId && (
+                        <div className="flex items-center gap-1 text-xs text-gray-500 bg-white/70 border border-green-100 rounded-full px-2.5 py-1">
+                          <PhoneCall size={11} /> Calling from {activeCallerId}
+                        </div>
+                      )}
                     </div>
                     <button
                       onClick={endCall}

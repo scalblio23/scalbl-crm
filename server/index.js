@@ -382,8 +382,12 @@ app.get("/api/token", (req, res) => {
 // our number" behaviour.
 app.post("/api/voice", async (req, res) => {
   const pool = getCallerIdPool();
-  let callerId = pool[0];
-  if (pool.length > 1) {
+  // Trust the browser's already-picked/displayed caller ID (see
+  // /api/next-caller-id) as long as it's one of ours, so the number
+  // shown in the UI matches the one Twilio actually dials from.
+  const requested = req.body?.callerId;
+  let callerId = requested && pool.includes(requested) ? requested : pool[0];
+  if (!(requested && pool.includes(requested)) && pool.length > 1) {
     try {
       await ensureSchema();
       const counter = await nextRotationIndex();
@@ -394,6 +398,22 @@ app.post("/api/voice", async (req, res) => {
   }
   res.type("text/xml").send(buildVoiceTwiml(req.body.To, callerId));
 });
+
+// Lets the browser know — and show — which number is about to place
+// the call, before it actually dials. See api/next-caller-id.js.
+app.post(
+  "/api/next-caller-id",
+  dbRoute(async (req, res) => {
+    const pool = getCallerIdPool();
+    if (!pool.length) return res.status(500).json({ error: "No Twilio caller ID configured." });
+    let callerId = pool[0];
+    if (pool.length > 1) {
+      const counter = await nextRotationIndex();
+      callerId = pool[counter % pool.length];
+    }
+    res.json({ callerId });
+  })
+);
 
 // Call status callback — set this as the TwiML App / <Dial> status
 // callback URL to log ringing/in-progress/completed events against a
