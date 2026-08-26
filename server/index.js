@@ -37,6 +37,7 @@ import {
   getDialLists,
   createDialList,
   addLeadsToDialList,
+  removeLeadFromDialLists,
   deleteDialList,
   getCalledLeadIds,
   markLeadCalled,
@@ -334,7 +335,7 @@ app.get(
   dbRoute(async (req, res) => {
     const allowedTags = scopeTagsForUser(req.user);
     const scoped = allowedTags !== null;
-    const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, calledLeadIds, callLog] =
+    const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, callLog] =
       await Promise.all([
         scoped ? [] : getClients(),
         scoped ? [] : getClientColumns(),
@@ -342,7 +343,6 @@ app.get(
         getContactColumns(),
         getConversations(allowedTags),
         scoped ? [] : getDialLists(),
-        getCalledLeadIds(),
         getCallLog(allowedTags),
       ]);
     res.setHeader("Cache-Control", "no-store");
@@ -353,7 +353,6 @@ app.get(
       contactColumns: contactColumnsData,
       conversations,
       dialLists,
-      calledLeadIds,
       callLog,
     });
   })
@@ -694,7 +693,13 @@ app.post(
 app.patch(
   "/api/dial-lists",
   dbRoute(async (req, res) => {
-    const { id, leadIds } = req.body || {};
+    const { id, leadIds, removeLeadId } = req.body || {};
+
+    if (removeLeadId) {
+      await removeLeadFromDialLists(removeLeadId);
+      return res.json(await getDialLists());
+    }
+
     if (!id || !Array.isArray(leadIds) || !leadIds.length) {
       return res.status(400).json({ error: "Missing id or leadIds" });
     }
@@ -723,7 +728,6 @@ app.post(
     res.status(204).end();
   })
 );
-
 app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog(scopeTagsForUser(req.user)))));
 app.post(
   "/api/call-log",

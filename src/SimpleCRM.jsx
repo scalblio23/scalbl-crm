@@ -421,7 +421,6 @@ export default function SimpleCRM() {
           contactColumns: contactColumnsData,
           conversations: conversationsData,
           dialLists: dialListsData,
-          calledLeadIds: calledLeadIdsData,
           callLog: callLogData,
         } = await api.get("/api/bootstrap");
         if (cancelled) return;
@@ -431,7 +430,6 @@ export default function SimpleCRM() {
         setContactColumns(contactColumnsData);
         setConversations(conversationsData);
         setDialLists(dialListsData);
-        setCalledLeadIds(calledLeadIdsData);
         setCallLog(callLogData);
       } catch (err) {
         if (!cancelled) {
@@ -1783,7 +1781,17 @@ export default function SimpleCRM() {
 
   const [selectedLeadIds, setSelectedLeadIds] = useState([]);
   const [newListName, setNewListName] = useState("");
-  const [calledLeadIds, setCalledLeadIds] = useState([]); // leads already worked, across all lists
+  // A Powerlist's own leadIds *are* the "still to call" queue — once a
+  // call to a lead actually completes, it's removed from every list
+  // it's in (see removeLeadFromLists below), so "N to call" always
+  // just reflects the list's current membership. No separate
+  // called/not-called flag to keep in sync.
+  const removeLeadFromLists = (leadId) => {
+    setDialLists((lists) => lists.map((l) => ({ ...l, leadIds: l.leadIds.filter((id) => id !== leadId) })));
+    api.patch("/api/dial-lists", { removeLeadId: leadId }).catch((err) => {
+      setDbError(err.message || "Could not update the Powerlist.");
+    });
+  };
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
   const [wrapUp, setWrapUp] = useState(null); // { lead, customStage, notes, secondsLeft }
@@ -1868,8 +1876,11 @@ export default function SimpleCRM() {
   const toggleLeadSelected = (id) =>
     setSelectedLeadIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
 
-  const remainingInList = (leadIds) =>
-    leadIds.filter((id) => !calledLeadIds.includes(id) && dialQueue.some((l) => l.id === id));
+  // A list's leadIds already only ever contains leads still worth
+  // calling (removeLeadFromLists drops one the moment its call
+  // actually completes) — this just filters out any that no longer
+  // exist as contacts at all.
+  const remainingInList = (leadIds) => leadIds.filter((id) => dialQueue.some((l) => l.id === id));
 
   const saveSelectedAsList = async () => {
     if (!newListName.trim() || selectedLeadIds.length === 0) return;
@@ -1967,7 +1978,7 @@ export default function SimpleCRM() {
         if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
       })
       .catch((err) => setDbError(err.message || "Could not save the call log entry."));
-    api.post("/api/called-leads", { leadId: lead.id }).catch(() => {});
+    removeLeadFromLists(lead.id);
   };
 
   // Called whenever a call ends (hung up, disconnected, or failed).
@@ -2033,7 +2044,6 @@ export default function SimpleCRM() {
       },
       ...log,
     ]);
-    setCalledLeadIds((ids) => [...ids, lead.id]);
     setWrapUp(null);
 
     // Persist to the database — fire-and-forget, surfaced as a banner
@@ -2056,7 +2066,7 @@ export default function SimpleCRM() {
         if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
       })
       .catch((err) => setDbError(err.message || "Could not save the call log entry."));
-    api.post("/api/called-leads", { leadId: lead.id }).catch(() => {});
+    removeLeadFromLists(lead.id);
 
     if (!session) return;
     const remainingQueue = session.queue.filter((id) => id !== lead.id);
@@ -2109,9 +2119,25 @@ export default function SimpleCRM() {
         setCallStatus("idle");
         setActiveCallerId("");
         activeCallRef.current = null;
-        if (err) setCallError(err.message || "The call failed.");
         const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
         callStartRef.current = null;
+
+        if (err) {
+          // A technical/connection-level failure (bad caller ID,
+          // signaling error, …) never actually reached the lead —
+          // it isn't a real dial attempt, so don't log it and don't
+          // mark the lead called. Pausing an active session here also
+          // matters: a failure like this is usually systemic (it'll
+          // repeat for every subsequent lead too), so auto-advancing
+          // straight into the next call would just as silently mark
+          // the whole rest of the list "called" without ever actually
+          // ringing anyone — surface the error and let the rep decide
+          // instead of burning through the list.
+          setCallError(err.message || "The call failed.");
+          if (sessionRef.current) setSessionPaused(true);
+          return;
+        }
+
         logCallToConversation(lead, durationMs);
         handleCallEnded(lead, durationMs);
       };

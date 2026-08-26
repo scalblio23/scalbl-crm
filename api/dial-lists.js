@@ -1,4 +1,11 @@
-import { ensureSchema, getDialLists, createDialList, addLeadsToDialList, deleteDialList } from "../server/db.js";
+import {
+  ensureSchema,
+  getDialLists,
+  createDialList,
+  addLeadsToDialList,
+  removeLeadFromDialLists,
+  deleteDialList,
+} from "../server/db.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
 
 export default async function handler(req, res) {
@@ -22,7 +29,15 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "PATCH") {
-      const { id, leadIds } = req.body || {};
+      const { id, leadIds, removeLeadId } = req.body || {};
+
+      // A call to this lead actually completed — drop it from every
+      // Powerlist it's in, across the board, not just one list.
+      if (removeLeadId) {
+        await removeLeadFromDialLists(removeLeadId);
+        return res.status(200).json(await getDialLists());
+      }
+
       if (!id || !Array.isArray(leadIds) || !leadIds.length) {
         return res.status(400).json({ error: "Missing id or leadIds" });
       }

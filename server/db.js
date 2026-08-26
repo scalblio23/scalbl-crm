@@ -956,6 +956,20 @@ export async function addLeadsToDialList(id, leadIds) {
   return { id: updated[0].id, name: updated[0].name, leadIds: updated[0].lead_ids || [] };
 }
 
+// Removes a lead from every Powerlist it's currently in — called once
+// a call to that lead actually completes, so a list's own leadIds
+// always just *is* the "still to call" queue: no separate called/
+// not-called flag to keep in sync with it.
+export async function removeLeadFromDialLists(leadId) {
+  const rows = await query("SELECT id, lead_ids FROM dial_lists WHERE lead_ids @> $1::jsonb", [
+    JSON.stringify([leadId]),
+  ]);
+  for (const row of rows) {
+    const next = (row.lead_ids || []).filter((id) => id !== leadId);
+    await query("UPDATE dial_lists SET lead_ids = $2 WHERE id = $1", [row.id, JSON.stringify(next)]);
+  }
+}
+
 export async function getCalledLeadIds() {
   const rows = await query("SELECT lead_id FROM called_leads");
   return rows.map((r) => r.lead_id);
