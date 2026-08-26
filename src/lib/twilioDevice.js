@@ -14,6 +14,20 @@ const CALL_SERVER_URL = import.meta.env.VITE_CALL_SERVER_URL || "";
 
 let device = null;
 let deviceReady = null;
+// The pool of caller IDs to rotate through, and where in it the next
+// call should pick from — both fetched once alongside the Access
+// Token (not per call). Rotating locally like this means placing a
+// call never waits on a network round-trip to decide which number to
+// use — it used to, via a dedicated endpoint that picked the next
+// number from the database, and that round-trip (serverless
+// cold-start + a database wake-up) was adding several seconds to
+// every single dial. Each browser tab keeps its own rotation
+// position, so it isn't perfectly globally synchronized across
+// multiple reps dialing at once, but it still spreads calls across
+// every configured number, which is the actual goal — avoiding one
+// number absorbing all the call volume and getting carrier-flagged.
+let callerIdPool = [];
+let nextCallerIdIndex = 0;
 
 async function fetchToken(identity) {
   let res;
@@ -34,12 +48,14 @@ async function fetchToken(identity) {
 }
 
 // Lazily creates and registers the Twilio Voice Device. Safe to call
-// repeatedly — the same device is reused for every call.
+// repeatedly — the same device (and caller ID pool) is reused for
+// every call.
 async function getDevice(identity) {
   if (device) return device;
   if (!deviceReady) {
     deviceReady = fetchToken(identity)
-      .then(({ token }) => {
+      .then(({ token, callerIds }) => {
+        callerIdPool = Array.isArray(callerIds) ? callerIds : [];
         device = new Device(token, { logLevel: "warn" });
         return device.register().then(() => device);
       })
@@ -49,6 +65,15 @@ async function getDevice(identity) {
       });
   }
   return deviceReady;
+}
+
+// Picks the next caller ID in rotation — plain local array indexing,
+// no network call.
+function nextCallerId() {
+  if (!callerIdPool.length) return "";
+  const id = callerIdPool[nextCallerIdIndex % callerIdPool.length];
+  nextCallerIdIndex++;
+  return id;
 }
 
 // Twilio requires E.164 (e.g. +61412334556) to actually route a call —
@@ -64,27 +89,13 @@ function toE164(rawPhone) {
   return cleaned;
 }
 
-// Asks the backend which caller ID this call should go out from —
-// same rotation /api/voice itself uses (see server/twilioCore.js's
-// getCallerIdPool) — so the UI can show it *before* the call connects,
-// and so the number displayed is guaranteed to be the one Twilio
-// actually dials from rather than each side picking independently.
-async function fetchNextCallerId() {
-  const res = await fetch(`${CALL_SERVER_URL}/api/next-caller-id`, {
-    method: "POST",
-    credentials: "include",
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `Could not pick a caller ID (${res.status})`);
-  return body.callerId;
-}
-
 // Places an outbound call to `phoneNumber`. Returns { call, callerId }
 // — `call` is the live Twilio Call object (attach 'accept' /
 // 'disconnect' / 'cancel' / 'error' listeners to it to drive UI
 // state), `callerId` is the number it's calling from.
 export async function placeCall(phoneNumber, identity = "rep") {
-  const [dev, callerId] = await Promise.all([getDevice(identity), fetchNextCallerId()]);
+  const dev = await getDevice(identity);
+  const callerId = nextCallerId();
   const call = await dev.connect({ params: { To: toE164(phoneNumber), callerId } });
   return { call, callerId };
 }

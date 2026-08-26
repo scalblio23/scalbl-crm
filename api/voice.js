@@ -2,34 +2,20 @@
 // TwiML App's Voice webhook once deployed:
 // https://<your-domain>/api/voice
 import { buildVoiceTwiml, getCallerIdPool } from "../server/twilioCore.js";
-import { ensureSchema, nextRotationIndex } from "../server/db.js";
 
-export default async function handler(req, res) {
+export default function handler(req, res) {
   const to = req.body?.To;
   const pool = getCallerIdPool();
 
-  // The browser normally already picked (and is displaying) the
-  // caller ID via /api/next-caller-id before placing this call, and
-  // passes it through as a custom connect() param — trust it as long
-  // as it's actually one of our own numbers, so the number shown in
-  // the UI is guaranteed to be the exact one Twilio dials from
-  // (rather than each independently consuming a turn of the rotation
-  // and landing on two different numbers for the same call).
+  // The browser picks which number to rotate to itself (see
+  // src/lib/twilioDevice.js) and passes it through as a custom
+  // connect() param — trust it as long as it's actually one of our
+  // own numbers, so a stale/tampered value can't set an arbitrary
+  // caller ID. No database round-trip on the hot path: falling back
+  // to the first configured number if the passed one is missing or
+  // invalid is a plain, instant default, not a second rotation pick.
   const requested = req.body?.callerId;
-  let callerId = requested && pool.includes(requested) ? requested : pool[0];
-
-  // Fallback path: no valid caller ID was passed (e.g. an older
-  // client, or the /api/next-caller-id call failed) — pick one here
-  // instead, the same way that endpoint does.
-  if (!(requested && pool.includes(requested)) && pool.length > 1) {
-    try {
-      await ensureSchema();
-      const counter = await nextRotationIndex();
-      callerId = pool[counter % pool.length];
-    } catch (err) {
-      console.error("[api/voice] rotation lookup failed, using the first caller ID", err);
-    }
-  }
+  const callerId = requested && pool.includes(requested) ? requested : pool[0];
 
   res.setHeader("Content-Type", "text/xml");
   res.status(200).send(buildVoiceTwiml(to, callerId));

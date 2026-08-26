@@ -53,7 +53,6 @@ import {
   inviteUser,
   updateUser,
   deleteUserById,
-  nextRotationIndex,
 } from "./db.js";
 import {
   getSessionUser,
@@ -371,7 +370,7 @@ app.get("/api/token", (req, res) => {
     });
   }
   const identity = req.query.identity || "rep";
-  res.json({ token: mintAccessToken(identity), identity });
+  res.json({ token: mintAccessToken(identity), identity, callerIds: getCallerIdPool() });
 });
 
 // TwiML voice webhook. This is the URL you paste into the TwiML App's
@@ -379,40 +378,18 @@ app.get("/api/token", (req, res) => {
 // browser device places a call, and we tell it who to actually dial
 // and what caller ID to show — mirroring GHL's "call bridges through
 // our number" behaviour.
-app.post("/api/voice", async (req, res) => {
+app.post("/api/voice", (req, res) => {
   const pool = getCallerIdPool();
-  // Trust the browser's already-picked/displayed caller ID (see
-  // /api/next-caller-id) as long as it's one of ours, so the number
-  // shown in the UI matches the one Twilio actually dials from.
+  // The browser picks which number to rotate to itself (see
+  // src/lib/twilioDevice.js) and passes it through as a custom
+  // connect() param — trust it as long as it's actually one of our
+  // own numbers. No database round-trip on the hot path: falling back
+  // to the first configured number if the passed one is missing or
+  // invalid is a plain, instant default, not a second rotation pick.
   const requested = req.body?.callerId;
-  let callerId = requested && pool.includes(requested) ? requested : pool[0];
-  if (!(requested && pool.includes(requested)) && pool.length > 1) {
-    try {
-      await ensureSchema();
-      const counter = await nextRotationIndex();
-      callerId = pool[counter % pool.length];
-    } catch (err) {
-      console.error("[api/voice] rotation lookup failed, using the first caller ID", err);
-    }
-  }
+  const callerId = requested && pool.includes(requested) ? requested : pool[0];
   res.type("text/xml").send(buildVoiceTwiml(req.body.To, callerId));
 });
-
-// Lets the browser know — and show — which number is about to place
-// the call, before it actually dials. See api/next-caller-id.js.
-app.post(
-  "/api/next-caller-id",
-  dbRoute(async (req, res) => {
-    const pool = getCallerIdPool();
-    if (!pool.length) return res.status(500).json({ error: "No Twilio caller ID configured." });
-    let callerId = pool[0];
-    if (pool.length > 1) {
-      const counter = await nextRotationIndex();
-      callerId = pool[counter % pool.length];
-    }
-    res.json({ callerId });
-  })
-);
 
 // Call status callback — set this as the TwiML App / <Dial> status
 // callback URL to log ringing/in-progress/completed events against a

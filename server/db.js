@@ -195,17 +195,6 @@ export async function ensureSchema() {
         last_used_at TIMESTAMPTZ
       )
     `);
-    // One-row counter backing outbound caller-ID rotation (see
-    // nextRotationIndex / TWILIO_CALLER_IDS) — a plain in-memory
-    // counter wouldn't work since serverless functions don't share
-    // memory between invocations, so the round-robin position has to
-    // live somewhere every request can see and atomically advance.
-    await query(`
-      CREATE TABLE IF NOT EXISTS call_rotation (
-        id INTEGER PRIMARY KEY,
-        counter INTEGER NOT NULL DEFAULT 0
-      )
-    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1134,21 +1123,4 @@ export async function touchApiKeyLastUsed(id) {
 
 export async function deleteApiKey(id) {
   await query("DELETE FROM api_keys WHERE id = $1", [id]);
-}
-
-// ---------- Outbound caller-ID rotation ----------
-
-// Atomically advances and returns the rotation counter — used to pick
-// `pool[counter % pool.length]` as the caller ID for the next
-// outbound call. INSERT .. ON CONFLICT DO UPDATE is a single atomic
-// statement in Postgres, so concurrent calls each get a distinct,
-// strictly-increasing counter value with no risk of two calls racing
-// to read the same one.
-export async function nextRotationIndex() {
-  const rows = await query(
-    `INSERT INTO call_rotation (id, counter) VALUES (1, 0)
-     ON CONFLICT (id) DO UPDATE SET counter = call_rotation.counter + 1
-     RETURNING counter`
-  );
-  return rows[0].counter;
 }
