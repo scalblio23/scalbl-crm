@@ -3647,19 +3647,22 @@ export default function SimpleCRM() {
 
             <div className="p-8 space-y-8">
               {/* Big-number KPIs */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                 <div className="border border-gray-200 rounded-2xl p-5">
                   <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Calls made</div>
                   <div className="text-4xl font-bold mt-2 tabular-nums">{reportsTotalCalls}</div>
                 </div>
-                {reportsIsClientView ? (
-                  <div className="border border-gray-200 rounded-2xl p-5">
-                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                      Successful bookings
-                    </div>
-                    <div className="text-4xl font-bold mt-2 tabular-nums">{reportsBookedCalls}</div>
+                <div className="border border-green-200 bg-green-50/40 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-green-700 uppercase tracking-wide">Bookings</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums text-green-800">{reportsBookedCalls}</div>
+                </div>
+                <div className="border border-gray-200 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Booking rate</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums">
+                    {reportsTotalCalls ? Math.round((reportsBookedCalls / reportsTotalCalls) * 100) : 0}%
                   </div>
-                ) : (
+                </div>
+                {!reportsIsClientView && (
                   <>
                     <div className="border border-gray-200 rounded-2xl p-5">
                       <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
@@ -3683,16 +3686,6 @@ export default function SimpleCRM() {
                   <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Leads contacted</div>
                   <div className="text-4xl font-bold mt-2 tabular-nums">{reportsUniqueLeads}</div>
                 </div>
-                {reportsIsClientView && (
-                  <div className="border border-gray-200 rounded-2xl p-5">
-                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                      Booking rate
-                    </div>
-                    <div className="text-4xl font-bold mt-2 tabular-nums">
-                      {reportsTotalCalls ? Math.round((reportsBookedCalls / reportsTotalCalls) * 100) : 0}%
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Breakdown tables — rep/client performance is internal,
@@ -3707,6 +3700,7 @@ export default function SimpleCRM() {
                           <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
                             <th className="px-5 py-2.5 font-medium">Rep</th>
                             <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                            <th className="px-5 py-2.5 font-medium text-right">Booked</th>
                             <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
                           </tr>
                         </thead>
@@ -3715,6 +3709,7 @@ export default function SimpleCRM() {
                             <tr key={row.key} className="border-b border-gray-50 last:border-0">
                               <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
                               <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                              <td className="px-5 py-2.5 text-right tabular-nums text-green-700">{row.bookedCalls}</td>
                               <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
                                 {formatCallDuration(row.avgSeconds * 1000)}
                               </td>
@@ -3722,7 +3717,7 @@ export default function SimpleCRM() {
                           ))}
                           {reportsByUser.length === 0 && (
                             <tr>
-                              <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
+                              <td colSpan={4} className="px-5 py-8 text-center text-sm text-gray-400">
                                 No calls in this range
                               </td>
                             </tr>
@@ -3740,6 +3735,7 @@ export default function SimpleCRM() {
                           <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
                             <th className="px-5 py-2.5 font-medium">Client</th>
                             <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                            <th className="px-5 py-2.5 font-medium text-right">Booked</th>
                             <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
                           </tr>
                         </thead>
@@ -3748,6 +3744,7 @@ export default function SimpleCRM() {
                             <tr key={row.key} className="border-b border-gray-50 last:border-0">
                               <td className="px-5 py-2.5 font-medium whitespace-nowrap">{row.key}</td>
                               <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                              <td className="px-5 py-2.5 text-right tabular-nums text-green-700">{row.bookedCalls}</td>
                               <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
                                 {formatCallDuration(row.avgSeconds * 1000)}
                               </td>
@@ -3755,7 +3752,7 @@ export default function SimpleCRM() {
                           ))}
                           {reportsByClient.length === 0 && (
                             <tr>
-                              <td colSpan={3} className="px-5 py-8 text-center text-sm text-gray-400">
+                              <td colSpan={4} className="px-5 py-8 text-center text-sm text-gray-400">
                                 No calls in this range
                               </td>
                             </tr>
@@ -3775,13 +3772,13 @@ export default function SimpleCRM() {
                       <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
                         <th className="px-5 py-2.5 font-medium">Tag</th>
                         <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Booked</th>
                         {!reportsIsClientView && (
                           <>
                             <th className="px-5 py-2.5 font-medium text-right">Avg / call</th>
                             <th className="px-5 py-2.5 font-medium text-right">Total talk time</th>
                           </>
                         )}
-                        {reportsIsClientView && <th className="px-5 py-2.5 font-medium text-right">Booked</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -3793,6 +3790,7 @@ export default function SimpleCRM() {
                             </span>
                           </td>
                           <td className="px-5 py-2.5 text-right tabular-nums">{row.calls}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-green-700">{row.bookedCalls}</td>
                           {!reportsIsClientView && (
                             <>
                               <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
@@ -3803,16 +3801,11 @@ export default function SimpleCRM() {
                               </td>
                             </>
                           )}
-                          {reportsIsClientView && (
-                            <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
-                              {row.bookedCalls}
-                            </td>
-                          )}
                         </tr>
                       ))}
                       {reportsByTag.length === 0 && (
                         <tr>
-                          <td colSpan={reportsIsClientView ? 3 : 4} className="px-5 py-8 text-center text-sm text-gray-400">
+                          <td colSpan={reportsIsClientView ? 3 : 5} className="px-5 py-8 text-center text-sm text-gray-400">
                             No calls in this range
                           </td>
                         </tr>
