@@ -1,4 +1,11 @@
-import { ensureSchema, getClients, createClient, updateClient, deleteClients } from "../server/db.js";
+import {
+  ensureSchema,
+  getClients,
+  createClient,
+  updateClient,
+  deleteClients,
+  regenerateClientWebhookToken,
+} from "../server/db.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
 
 export default async function handler(req, res) {
@@ -18,9 +25,11 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "PATCH") {
-      const { id, ...patch } = req.body || {};
+      const { id, regenerateWebhookToken, ...patch } = req.body || {};
       if (!id) return res.status(400).json({ error: "Missing id" });
-      const client = await updateClient(id, patch);
+      const client = regenerateWebhookToken
+        ? await regenerateClientWebhookToken(id)
+        : await updateClient(id, patch);
       if (!client) return res.status(404).json({ error: "Client not found" });
       return res.status(200).json(client);
     }

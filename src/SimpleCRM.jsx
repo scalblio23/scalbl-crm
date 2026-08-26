@@ -30,6 +30,9 @@ import {
   ChevronDown,
   BarChart3,
   CheckCircle2,
+  Link2,
+  Copy,
+  RefreshCw,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -924,6 +927,41 @@ export default function SimpleCRM() {
       await api.patch("/api/clients", { id: clientId, name });
     } catch (err) {
       setDbError(err.message || "Could not save the change.");
+    }
+  };
+
+  // Each client's webhook URL is what a lead-gen platform (a form,
+  // Zapier/Make, GoHighLevel, Meta Lead Ads, …) posts new leads to —
+  // see api/lead-webhook.js. The token in it doubles as that
+  // endpoint's whole auth model, so it stays visible/copyable here
+  // rather than shown once like an API key.
+  const [copiedWebhookClientId, setCopiedWebhookClientId] = useState(null);
+
+  const webhookUrlForClient = (client) => `${window.location.origin}/api/lead-webhook?token=${client.webhookToken}`;
+
+  const copyClientWebhookUrl = async (client) => {
+    const url = webhookUrlForClient(client);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedWebhookClientId(client.id);
+      setTimeout(() => setCopiedWebhookClientId((id) => (id === client.id ? null : id)), 2000);
+    } catch {
+      window.prompt("Copy this webhook URL:", url);
+    }
+  };
+
+  const regenerateClientWebhook = async (client) => {
+    if (
+      !window.confirm(
+        `Generate a new webhook URL for ${client.name}? The old one will stop accepting leads immediately — update it wherever it's currently pasted in.`
+      )
+    )
+      return;
+    try {
+      const updated = await api.patch("/api/clients", { id: client.id, regenerateWebhookToken: true });
+      setClients((cs) => cs.map((c) => (c.id === client.id ? updated : c)));
+    } catch (err) {
+      setDbError(err.message || "Could not regenerate the webhook URL.");
     }
   };
 
@@ -4138,6 +4176,39 @@ export default function SimpleCRM() {
                         </a>
                       )}
                     </div>
+                    {cl.webhookToken && (
+                      <div className="mt-3 pt-3 border-t border-gray-100">
+                        <div className="flex items-center gap-1.5 text-xs font-medium text-gray-500 mb-1.5">
+                          <Link2 size={12} /> Lead webhook
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            readOnly
+                            value={webhookUrlForClient(cl)}
+                            onFocus={(e) => e.target.select()}
+                            className="flex-1 min-w-0 border border-gray-200 rounded-md px-2 py-1.5 text-[11px] text-gray-500 bg-gray-50 outline-none font-mono"
+                          />
+                          <button
+                            onClick={() => copyClientWebhookUrl(cl)}
+                            title="Copy webhook URL"
+                            className="shrink-0 flex items-center gap-1 text-[11px] font-medium px-2 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                          >
+                            <Copy size={12} />
+                            {copiedWebhookClientId === cl.id ? "Copied" : "Copy"}
+                          </button>
+                          <button
+                            onClick={() => regenerateClientWebhook(cl)}
+                            title="Regenerate webhook URL"
+                            className="shrink-0 flex items-center text-gray-400 hover:text-gray-700 p-1.5 rounded-md border border-gray-200 hover:bg-gray-50"
+                          >
+                            <RefreshCw size={12} />
+                          </button>
+                        </div>
+                        <div className="text-[11px] text-gray-400 mt-1">
+                          New leads posted here land in Contacts tagged "{cl.name}".
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

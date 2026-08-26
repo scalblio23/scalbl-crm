@@ -13,6 +13,8 @@ import {
   createClient,
   updateClient,
   deleteClients,
+  findClientByWebhookToken,
+  regenerateClientWebhookToken,
   getClientColumns,
   createClientColumn,
   deleteClientColumn,
@@ -95,6 +97,9 @@ const PUBLIC_PATHS = new Set([
   "/api/auth-set-password",
   "/api/auth-logout",
   "/api/auth-me",
+  // Auth here is the per-client token in the URL itself (?token=),
+  // checked inside the route below — see api/lead-webhook.js.
+  "/api/lead-webhook",
 ]);
 
 app.use(async (req, res, next) => {
@@ -462,6 +467,83 @@ app.post("/api/sms-inbound", async (req, res) => {
   }
 });
 
+// ---------- Lead webhook ----------
+// Public — auth is the per-client token in ?token=, not the session
+// cookie (see PUBLIC_PATHS above and api/lead-webhook.js, which this
+// mirrors). One URL per client, pasted into whatever their leads come
+// from, lands new leads in Contacts already tagged into that client's
+// tab.
+const LEAD_WEBHOOK_CORE_ALIASES = {
+  name: ["name", "full_name", "fullName", "fullname"],
+  phone: ["phone", "phone_number", "phoneNumber", "mobile", "mobile_number"],
+  email: ["email", "email_address", "emailAddress"],
+  notes: ["notes", "message", "comment", "comments"],
+};
+const LEAD_WEBHOOK_RECOGNIZED_KEYS = new Set(
+  Object.values(LEAD_WEBHOOK_CORE_ALIASES)
+    .flat()
+    .concat(["first_name", "firstName", "last_name", "lastName", "tag", "client", "status", "lead_date", "leadDate"])
+);
+
+function leadWebhookPick(body, keys) {
+  for (const key of keys) {
+    const v = body?.[key];
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
+  }
+  return "";
+}
+
+function leadWebhookName(body) {
+  const direct = leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.name);
+  if (direct) return direct;
+  const first = leadWebhookPick(body, ["first_name", "firstName"]);
+  const last = leadWebhookPick(body, ["last_name", "lastName"]);
+  return [first, last].filter(Boolean).join(" ").trim();
+}
+
+function leadWebhookRecordFromBody(body, client) {
+  const fields = {};
+  for (const [key, value] of Object.entries(body || {})) {
+    if (LEAD_WEBHOOK_RECOGNIZED_KEYS.has(key)) continue;
+    if (value === undefined || value === null || String(value).trim() === "") continue;
+    fields[key] = value;
+  }
+  return {
+    name: leadWebhookName(body) || "Unknown",
+    email: leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.email),
+    phone: leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.phone),
+    notes: leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.notes),
+    status: (body?.status && String(body.status).trim()) || "New Lead",
+    lastContact: "Today",
+    leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
+    tag: client.name,
+    client: client.name,
+    fields,
+  };
+}
+
+app.post("/api/lead-webhook", async (req, res) => {
+  try {
+    await ensureSchema();
+    const token = req.query?.token;
+    if (!token) return res.status(401).json({ error: "Missing ?token= in the webhook URL" });
+    const client = await findClientByWebhookToken(String(token));
+    if (!client) return res.status(401).json({ error: "Invalid or revoked webhook token" });
+
+    const payloads = Array.isArray(req.body) ? req.body : [req.body];
+    const withPhone = payloads.filter((b) => b && leadWebhookPick(b, LEAD_WEBHOOK_CORE_ALIASES.phone));
+    const skipped = payloads.length - withPhone.length;
+    if (!withPhone.length) return res.status(400).json({ error: "No phone number found in the request body" });
+
+    const records = withPhone.map((b) => leadWebhookRecordFromBody(b, client));
+    const result = await importContactsBulk(records);
+    res.status(200).json({ ok: true, client: client.name, ...result, skipped });
+  } catch (err) {
+    console.error("[db] /api/lead-webhook", err);
+    res.status(500).json({ error: err.message || "Webhook failed" });
+  }
+});
+
 // ---------- Database ----------
 
 app.get("/api/clients", dbRoute(async (req, res) => res.json(await getClients())));
@@ -472,9 +554,9 @@ app.post(
 app.patch(
   "/api/clients",
   dbRoute(async (req, res) => {
-    const { id, ...patch } = req.body || {};
+    const { id, regenerateWebhookToken, ...patch } = req.body || {};
     if (!id) return res.status(400).json({ error: "Missing id" });
-    const client = await updateClient(id, patch);
+    const client = regenerateWebhookToken ? await regenerateClientWebhookToken(id) : await updateClient(id, patch);
     if (!client) return res.status(404).json({ error: "Client not found" });
     res.json(client);
   })
