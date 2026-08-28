@@ -66,10 +66,11 @@ resulting URL + `/api/voice` into the TwiML App's Voice webhook (method
   fetches a token, registers the browser as a calling device, places/ends calls.
 - `server/index.js` — **local dev only** (used by `npm run dev:all`). Mints
   Access Tokens (`GET /api/token`), answers Twilio's voice webhook
-  (`POST /api/voice`), and logs call status (`POST /api/status`).
-- `api/*.js` — the same three endpoints as Vercel serverless functions,
-  deployed automatically alongside the frontend when you deploy to Vercel.
-  Both paths share their Twilio logic from `server/twilioCore.js`.
+  (`POST /api/voice`), logs call status (`POST /api/status`), and drives
+  multi-line dialling (`/api/multiline-*`, see below).
+- `api/*.js` — the same endpoints as Vercel serverless functions, deployed
+  automatically alongside the frontend when you deploy to Vercel. Both paths
+  share their Twilio logic from `server/twilioCore.js`.
 - If Twilio isn't configured yet, the Call button surfaces a clear error in
   the Powerdialler instead of failing silently.
 
@@ -91,6 +92,29 @@ separate backend hosting needed. Two things to set up in the Vercel project:
 Redeploy after changing env vars (Vercel only picks them up on a fresh
 build). You can sanity-check they're set correctly by visiting
 `https://<your-vercel-domain>/api/health` — it should return `{"ok":true}`.
+
+### Multi-line dialling
+
+The "Lines" selector on the Powerdialler (next to the Dialler lists) dials
+several leads at once instead of one at a time — whoever answers first gets
+bridged to the rep, and every other line gets hung up immediately. Under the
+hood, the rep's own browser leg and each lead's leg (placed via the Twilio
+REST API) all join the same Twilio Conference; the first leg to report
+`in-progress` wins, and the rest are cancelled.
+
+This needs a real, publicly-reachable URL Twilio can fetch — see `PUBLIC_URL`
+in `.env.example`. It's automatic on Vercel; in local dev, set it to the same
+ngrok URL used for the Voice webhook above. Without it, starting a multi-line
+dial fails with a clear error rather than silently placing calls Twilio can't
+call back.
+
+There's no answering-machine detection and no participant muting — every
+leg that connects is immediately audible, so two lines answering within the
+same instant can briefly cross-talk before the loser is dropped (usually well
+under a second). Dialling more lines than you have reps to answer them is a
+regulated practice in a lot of places (the US TCPA/TSR's abandoned-call rules
+in particular) — that's on whoever's operating this CRM to stay within, not
+something the app enforces.
 
 ## SMS (Twilio)
 

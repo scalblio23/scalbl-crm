@@ -237,6 +237,38 @@ export async function ensureSchema() {
     // key until someone generates the new single one from Settings.
     await query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS raw_key TEXT`);
     await query(`DELETE FROM api_keys WHERE raw_key IS NULL`);
+    // ---------- Multi-line dialling (see server/twilioCore.js's
+    // conference helpers and api/multiline-*.js) ----------
+    // One batch per "dial N leads at once" attempt. winner_call_sid is
+    // claimed atomically (first call to answer wins — see
+    // claimMultilineWinner below) and is how every other leg in the
+    // batch gets identified as a loser and hung up.
+    await query(`
+      CREATE TABLE IF NOT EXISTS multiline_batches (
+        id SERIAL PRIMARY KEY,
+        conference_name TEXT UNIQUE NOT NULL,
+        created_by TEXT,
+        winner_call_sid TEXT,
+        winner_lead_id INTEGER,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // One row per lead dialled as part of a batch. call_sid starts
+    // null (assigned right after Twilio accepts the call.create()
+    // request) so a row can be inserted — and its id embedded in that
+    // call's own TwiML/status-callback URLs — before the SID exists.
+    await query(`
+      CREATE TABLE IF NOT EXISTS multiline_batch_calls (
+        id SERIAL PRIMARY KEY,
+        batch_id INTEGER REFERENCES multiline_batches(id) ON DELETE CASCADE,
+        lead_id INTEGER,
+        name TEXT,
+        phone TEXT,
+        call_sid TEXT,
+        status TEXT DEFAULT 'placed',
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1188,4 +1220,90 @@ export async function findApiKeyByHash(keyHash) {
 
 export async function touchApiKeyLastUsed(id) {
   await query("UPDATE api_keys SET last_used_at = now() WHERE id = $1", [id]);
+}
+
+// ---------- Multi-line dialling ----------
+// "Dial N leads at once, whoever answers first gets bridged to the
+// rep, the rest get hung up" — see server/twilioCore.js for the
+// conference TwiML and api/multiline-*.js for the endpoints that use
+// these. A batch's calls only ever end in one of these statuses:
+// placed | ringing | in-progress | completed | busy | failed |
+// no-answer | canceled — the first three are "still live", the rest
+// are terminal.
+const MULTILINE_TERMINAL_STATUSES = ["completed", "busy", "failed", "no-answer", "canceled"];
+
+export async function createMultilineBatch({ conferenceName, createdBy }) {
+  const rows = await query(
+    "INSERT INTO multiline_batches (conference_name, created_by) VALUES ($1,$2) RETURNING *",
+    [conferenceName, createdBy || null]
+  );
+  return rows[0];
+}
+
+// Inserted before the Twilio call is placed — its id gets embedded in
+// that call's TwiML/status-callback URLs, then setMultilineBatchCallSid
+// fills in the resulting call_sid once Twilio hands one back.
+export async function addMultilineBatchCall({ batchId, leadId, name, phone }) {
+  const rows = await query(
+    "INSERT INTO multiline_batch_calls (batch_id, lead_id, name, phone) VALUES ($1,$2,$3,$4) RETURNING *",
+    [batchId, leadId, name, phone]
+  );
+  return rows[0];
+}
+
+export async function setMultilineBatchCallSid(rowId, callSid) {
+  await query("UPDATE multiline_batch_calls SET call_sid = $2, status = 'ringing' WHERE id = $1", [rowId, callSid]);
+}
+
+export async function updateMultilineBatchCallStatusByRowId(rowId, status) {
+  await query("UPDATE multiline_batch_calls SET status = $2 WHERE id = $1", [rowId, status]);
+}
+
+// The whole feature's concurrency-safety hinges on this one atomic
+// UPDATE: whichever of a batch's calls reaches "answered" first is
+// the only one that can ever successfully set winner_call_sid (the
+// WHERE clause makes every later attempt a no-op that returns no
+// row), so two legs racing to claim it can never both win.
+export async function claimMultilineWinner({ batchId, callSid, leadId }) {
+  const rows = await query(
+    "UPDATE multiline_batches SET winner_call_sid = $2, winner_lead_id = $3 WHERE id = $1 AND winner_call_sid IS NULL RETURNING *",
+    [batchId, callSid, leadId]
+  );
+  return rows[0] || null;
+}
+
+// Every other leg in the batch still in a non-terminal state once a
+// winner's been claimed (or the rep bailed out before anyone
+// answered) — these all need to be hung up/cancelled.
+export async function getOtherPendingMultilineBatchCalls(batchId, excludeCallSid) {
+  const rows = await query(
+    `SELECT * FROM multiline_batch_calls
+     WHERE batch_id = $1 AND status NOT IN (${MULTILINE_TERMINAL_STATUSES.map((_, i) => `$${i + 3}`).join(",")})
+       AND ($2::text IS NULL OR call_sid IS DISTINCT FROM $2)`,
+    [batchId, excludeCallSid || null, ...MULTILINE_TERMINAL_STATUSES]
+  );
+  return rows;
+}
+
+// Polled by the frontend while a batch is in flight. status is
+// derived rather than stored: 'connected' once a winner's been
+// claimed, 'no-answer' once every leg has reached a terminal state
+// with nobody winning, otherwise still 'dialing'.
+export async function getMultilineBatchWithCalls(id) {
+  const batches = await query("SELECT * FROM multiline_batches WHERE id = $1", [id]);
+  const batch = batches[0];
+  if (!batch) return null;
+  const calls = await query("SELECT * FROM multiline_batch_calls WHERE batch_id = $1 ORDER BY id", [id]);
+  const status = batch.winner_call_sid
+    ? "connected"
+    : calls.length && calls.every((c) => MULTILINE_TERMINAL_STATUSES.includes(c.status))
+    ? "no-answer"
+    : "dialing";
+  const winnerCall = batch.winner_call_sid ? calls.find((c) => c.call_sid === batch.winner_call_sid) : null;
+  return {
+    id: batch.id,
+    status,
+    winner: winnerCall ? { leadId: batch.winner_lead_id, name: winnerCall.name, phone: winnerCall.phone } : null,
+    calls: calls.map((c) => ({ leadId: c.lead_id, name: c.name, phone: c.phone, status: c.status })),
+  };
 }

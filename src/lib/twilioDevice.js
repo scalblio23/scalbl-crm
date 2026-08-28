@@ -100,6 +100,18 @@ export async function placeCall(phoneNumber, identity = "rep") {
   return { call, callerId };
 }
 
+// Multi-line dialling — joins this browser's own leg into a Twilio
+// Conference instead of dialing a number directly, so it can be
+// bridged to whichever of several leads (dialled separately via the
+// backend REST API — see api/multiline-start.js) answers first. Same
+// return shape as placeCall, for the same event-driven UI wiring.
+export async function joinConference(conferenceName, identity = "rep") {
+  const dev = await getDevice(identity);
+  const callerId = nextCallerId();
+  const call = await dev.connect({ params: { Conference: conferenceName, callerId } });
+  return { call, callerId };
+}
+
 // Ends whatever call is currently in progress on this device, if any.
 export function hangUp() {
   device?.disconnectAll();

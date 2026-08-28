@@ -5,7 +5,18 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { missingTwilioEnv, mintAccessToken, buildVoiceTwiml, getCallerIdPool, sendSms } from "./twilioCore.js";
+import {
+  missingTwilioEnv,
+  mintAccessToken,
+  buildVoiceTwiml,
+  buildConferenceTwiml,
+  getCallerIdPool,
+  sendSms,
+  generateMultilineConferenceName,
+  placeConferenceLeg,
+  endOrCancelCall,
+  publicBaseUrl,
+} from "./twilioCore.js";
 import {
   isDbConfigured,
   ensureSchema,
@@ -52,6 +63,13 @@ import {
   deleteApiKey,
   findApiKeyByHash,
   touchApiKeyLastUsed,
+  createMultilineBatch,
+  addMultilineBatchCall,
+  setMultilineBatchCallSid,
+  updateMultilineBatchCallStatusByRowId,
+  claimMultilineWinner,
+  getOtherPendingMultilineBatchCalls,
+  getMultilineBatchWithCalls,
   getUsers,
   getUserById,
   inviteUser,
@@ -103,6 +121,12 @@ const PUBLIC_PATHS = new Set([
   // (?token=) and checked inside the route below — see
   // api/lead-webhook.js.
   "/api/lead-webhook",
+  // Multi-line dialling's per-lead-leg TwiML and status callback —
+  // Twilio-only, identified by the batch/row ids baked into the URL
+  // (see api/multiline-start.js), same trust model as /api/voice and
+  // /api/sms-inbound above.
+  "/api/voice-multiline-leg",
+  "/api/multiline-status",
 ]);
 
 app.use(async (req, res, next) => {
@@ -128,6 +152,9 @@ app.use(
     "/api/contacts-bulk-import",
     "/api/dial-lists",
     "/api/sms-bulk-send",
+    "/api/multiline-start",
+    "/api/multiline-batch",
+    "/api/multiline-cancel",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -393,6 +420,17 @@ app.get("/api/token", (req, res) => {
 // and what caller ID to show — mirroring GHL's "call bridges through
 // our number" behaviour.
 app.post("/api/voice", (req, res) => {
+  res.type("text/xml");
+
+  // Multi-line dialling: the rep's own browser leg connects here with
+  // a Conference param (see src/lib/twilioDevice.js's joinConference)
+  // instead of a To number — join them into that conference rather
+  // than dialing out. See "Multi-line dialling" below.
+  const conferenceName = req.body?.Conference;
+  if (conferenceName) {
+    return res.send(buildConferenceTwiml({ conferenceName, isRep: true }));
+  }
+
   const pool = getCallerIdPool();
   // The browser picks which number to rotate to itself (see
   // src/lib/twilioDevice.js) and passes it through as a custom
@@ -402,7 +440,7 @@ app.post("/api/voice", (req, res) => {
   // invalid is a plain, instant default, not a second rotation pick.
   const requested = req.body?.callerId;
   const callerId = requested && pool.includes(requested) ? requested : pool[0];
-  res.type("text/xml").send(buildVoiceTwiml(req.body.To, callerId));
+  res.send(buildVoiceTwiml(req.body.To, callerId));
 });
 
 // Call status callback — set this as the TwiML App / <Dial> status
@@ -419,6 +457,128 @@ app.post("/api/status", (req, res) => {
   );
   res.sendStatus(204);
 });
+
+// ---------- Multi-line dialling ----------
+// "Dial N leads at once, whoever answers first gets bridged to the
+// rep, the rest get hung up" — see server/twilioCore.js's conference
+// helpers and the matching api/multiline-*.js files, which this
+// mirrors route-for-route.
+const MULTILINE_MAX_LINES = 6;
+
+app.post(
+  "/api/multiline-start",
+  dbRoute(async (req, res) => {
+    const missing = missingTwilioEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const base = publicBaseUrl();
+    if (!base) {
+      return res.status(500).json({
+        error:
+          "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
+      });
+    }
+    const ids = Array.isArray(req.body?.leadIds) ? req.body.leadIds.map(Number).filter(Boolean) : [];
+    if (!ids.length) return res.status(400).json({ error: "Select at least one lead to dial" });
+
+    const contacts = await getContactsByIds(ids);
+    const withPhone = contacts.filter((c) => c.phone).slice(0, MULTILINE_MAX_LINES);
+    if (!withPhone.length) {
+      return res.status(400).json({ error: "None of the selected leads have a phone number" });
+    }
+
+    const conferenceName = generateMultilineConferenceName();
+    const batch = await createMultilineBatch({ conferenceName, createdBy: String(req.user.id) });
+    const pool = getCallerIdPool();
+
+    const candidates = await mapWithConcurrency(withPhone, withPhone.length, async (contact, i) => {
+      const row = await addMultilineBatchCall({
+        batchId: batch.id,
+        leadId: contact.id,
+        name: contact.name,
+        phone: contact.phone,
+      });
+      try {
+        const call = await placeConferenceLeg({
+          to: contact.phone,
+          from: pool[i % pool.length],
+          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(conferenceName)}`,
+          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batch.id}&leadId=${contact.id}`,
+        });
+        await setMultilineBatchCallSid(row.id, call.sid);
+      } catch (err) {
+        console.error("[multiline-start] leg failed", contact.id, err.message);
+        await updateMultilineBatchCallStatusByRowId(row.id, "failed");
+      }
+      return { leadId: contact.id, name: contact.name, phone: contact.phone };
+    });
+
+    res.status(201).json({ batchId: batch.id, conferenceName, candidates });
+  })
+);
+
+// Public — TwiML for one lead leg, joining it into the conference.
+app.post("/api/voice-multiline-leg", (req, res) => {
+  const conferenceName = req.query?.conf;
+  res.type("text/xml");
+  if (!conferenceName) return res.status(400).send("<Response><Say>Missing conference.</Say></Response>");
+  res.send(buildConferenceTwiml({ conferenceName, isRep: false }));
+});
+
+// Public — Twilio's status callback for one lead leg. Decides the
+// winner the instant a leg turns "in-progress" (answered) — see
+// api/multiline-status.js for the full reasoning.
+app.post("/api/multiline-status", async (req, res) => {
+  try {
+    await ensureSchema();
+    const rowId = Number(req.query?.rowId);
+    const batchId = Number(req.query?.batchId);
+    const leadId = Number(req.query?.leadId);
+    const callSid = req.body?.CallSid;
+    const callStatus = req.body?.CallStatus;
+    if (!rowId || !batchId || !callSid || !callStatus) return res.status(400).end();
+
+    await updateMultilineBatchCallStatusByRowId(rowId, callStatus);
+
+    if (callStatus === "in-progress") {
+      const won = await claimMultilineWinner({ batchId, callSid, leadId });
+      if (won) {
+        const others = await getOtherPendingMultilineBatchCalls(batchId, callSid);
+        Promise.all(others.filter((o) => o.call_sid).map((o) => endOrCancelCall(o.call_sid))).catch(() => {});
+      } else {
+        await endOrCancelCall(callSid);
+      }
+    }
+    res.status(204).end();
+  } catch (err) {
+    console.error("[db] /api/multiline-status", err);
+    res.status(204).end();
+  }
+});
+
+app.get(
+  "/api/multiline-batch",
+  dbRoute(async (req, res) => {
+    const id = Number(req.query?.id);
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    const batch = await getMultilineBatchWithCalls(id);
+    if (!batch) return res.status(404).json({ error: "Batch not found" });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(batch);
+  })
+);
+
+app.post(
+  "/api/multiline-cancel",
+  dbRoute(async (req, res) => {
+    const batchId = Number(req.body?.batchId);
+    if (!batchId) return res.status(400).json({ error: "Missing batchId" });
+    const pending = await getOtherPendingMultilineBatchCalls(batchId, null);
+    await Promise.all(pending.filter((c) => c.call_sid).map((c) => endOrCancelCall(c.call_sid)));
+    res.status(204).end();
+  })
+);
 
 // ---------- SMS ----------
 

@@ -1,9 +1,22 @@
 // Vercel serverless function — this is the URL to paste into the
 // TwiML App's Voice webhook once deployed:
 // https://<your-domain>/api/voice
-import { buildVoiceTwiml, getCallerIdPool } from "../server/twilioCore.js";
+import { buildVoiceTwiml, buildConferenceTwiml, getCallerIdPool } from "../server/twilioCore.js";
 
 export default function handler(req, res) {
+  res.setHeader("Content-Type", "text/xml");
+
+  // Multi-line dialling: the rep's own browser leg connects here with
+  // a Conference param (see src/lib/twilioDevice.js's joinConference)
+  // instead of a To number — join them into that conference rather
+  // than dialing out, so whichever lead's leg (placed separately via
+  // the REST API — see api/multiline-start.js) answers first can be
+  // bridged to them.
+  const conferenceName = req.body?.Conference;
+  if (conferenceName) {
+    return res.status(200).send(buildConferenceTwiml({ conferenceName, isRep: true }));
+  }
+
   const to = req.body?.To;
   const pool = getCallerIdPool();
 
@@ -17,6 +30,5 @@ export default function handler(req, res) {
   const requested = req.body?.callerId;
   const callerId = requested && pool.includes(requested) ? requested : pool[0];
 
-  res.setHeader("Content-Type", "text/xml");
   res.status(200).send(buildVoiceTwiml(to, callerId));
 }

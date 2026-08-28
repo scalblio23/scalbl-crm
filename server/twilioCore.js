@@ -4,6 +4,7 @@
 // this in one place means the local and production calling paths can
 // never drift apart.
 import twilio from "twilio";
+import crypto from "crypto";
 
 const REQUIRED_ENV_KEYS = [
   "TWILIO_ACCOUNT_SID",
@@ -113,4 +114,96 @@ export async function sendSms({ to, body }, env = process.env) {
   }
   const message = await client.messages.create(params);
   return { sid: message.sid, status: message.status };
+}
+
+// ---------- Multi-line dialling ----------
+// "Dial N leads at once, whoever answers first gets bridged to the
+// rep" is built on a Twilio Conference: the rep's browser leg (see
+// api/voice.js's Conference branch) and each lead's REST-placed leg
+// (see below) all join the same conference by name. The rep's leg
+// both starts it (so they hear default hold music while lines ring)
+// and ends it on exit (so hanging up tears the whole thing down);
+// every lead leg does neither, so a losing leg being hung up — or
+// even one ringing out to voicemail on its own — never touches the
+// conference itself.
+//
+// There's no participant mute/unmute choreography here — every leg
+// that reaches the conference is audible immediately. In practice the
+// rep's leg (a fast WebRTC connect) is almost always already in place
+// long before any PSTN line rings through, and the moment a second
+// line answers it's cancelled within one status-callback round trip
+// (well under a second) — but a rep dialling several lines at once
+// should know a brief moment of cross-talk between two answered lines
+// is possible before the loser is dropped.
+export function generateMultilineConferenceName() {
+  return `ml_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+// Twilio needs a real, publicly-reachable URL to fetch each lead
+// leg's TwiML and hit its status callback — unlike /api/voice and
+// /api/sms-inbound (fixed webhook URLs pasted into the Twilio Console
+// once), these are generated fresh per batch with query params baked
+// in, so they can't be pre-configured. On Vercel this just works via
+// the deployment's own VERCEL_URL; local dev (no public hostname of
+// its own) needs PUBLIC_URL set to the same ngrok tunnel already used
+// for the Voice webhook — see .env.example.
+export function publicBaseUrl(env = process.env) {
+  if (env.PUBLIC_URL) return env.PUBLIC_URL.replace(/\/+$/, "");
+  if (env.VERCEL_URL) return `https://${env.VERCEL_URL}`;
+  return "";
+}
+
+export function buildConferenceTwiml({ conferenceName, isRep }) {
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.dial().conference(
+    {
+      startConferenceOnEnter: isRep,
+      endConferenceOnExit: isRep,
+      beep: false,
+    },
+    conferenceName
+  );
+  return twiml.toString();
+}
+
+// Places one leg of a multi-line batch via the REST API (as opposed
+// to the rep's own leg, which the browser places itself as a WebRTC
+// Device connection — see src/lib/twilioDevice.js). `url` is what
+// Twilio fetches once the call is answered (the conference-join
+// TwiML); `statusCallback` is hit on every status transition
+// (ringing/in-progress/completed/…) so the batch's progress — and
+// which leg wins — can be tracked server-side.
+export async function placeConferenceLeg({ to, from, url, statusCallback }, env = process.env) {
+  const client = restClient(env);
+  const call = await client.calls.create({
+    to,
+    from,
+    url,
+    statusCallback,
+    statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+    statusCallbackMethod: "POST",
+  });
+  return { sid: call.sid, status: call.status };
+}
+
+// Hangs up (if it's already answered/in-progress) or cancels (if
+// it's still queued/ringing) one call by SID — used both to drop a
+// losing leg the instant a batch has a winner, and to abort every
+// still-pending leg if the rep hangs up before anyone answers. Twilio
+// rejects "completed" on a call that hasn't been answered yet (and
+// vice versa for "canceled"), and there's no cheap way to know which
+// state a given leg is in from here without an extra lookup, so this
+// just tries both — the second is a harmless no-op once the first has
+// already taken effect, and either failing outright (call already
+// ended on its own) is fine to swallow.
+export async function endOrCancelCall(sid, env = process.env) {
+  const client = restClient(env);
+  for (const status of ["completed", "canceled"]) {
+    try {
+      await client.calls(sid).update({ status });
+      return;
+    } catch {
+      // try the next status, or give up silently — see comment above
+    }
+  }
 }

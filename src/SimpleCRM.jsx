@@ -44,7 +44,7 @@ import {
   RefreshCw,
   Send,
 } from "lucide-react";
-import { placeCall, hangUp } from "./lib/twilioDevice";
+import { placeCall, hangUp, joinConference } from "./lib/twilioDevice";
 import { api } from "./lib/api";
 
 // ---------- Sample data ----------
@@ -285,6 +285,30 @@ function formatCallDuration(ms) {
   const m = Math.floor(totalSeconds / 60);
   const s = totalSeconds % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// One multi-line dial candidate's status → a friendly label/color for
+// the "Dialling N lines" panel. Mirrors the statuses a Twilio call
+// leg actually reports (see api/multiline-status.js).
+const MULTILINE_STATUS_LABELS = {
+  placed: "Dialling…",
+  queued: "Dialling…",
+  initiated: "Dialling…",
+  ringing: "Ringing…",
+  "in-progress": "Answered",
+  completed: "Ended",
+  busy: "Busy",
+  failed: "Failed",
+  "no-answer": "No answer",
+  canceled: "Cancelled",
+};
+function multilineStatusLabel(status) {
+  return MULTILINE_STATUS_LABELS[status] || status || "Dialling…";
+}
+function multilineStatusColor(status) {
+  if (status === "in-progress") return "bg-green-100 text-green-700";
+  if (status === "placed" || status === "ringing") return "bg-blue-100 text-blue-700";
+  return "bg-gray-100 text-gray-500";
 }
 
 // ---------- Sidebar ----------
@@ -1739,6 +1763,24 @@ export default function SimpleCRM() {
   const callStartRef = useRef(null); // when the current call was placed, for duration
   const callEndedRef = useRef(false); // guards against double-processing one call's end
 
+  // Multi-line dialling — how many leads to ring simultaneously per
+  // round (1 = today's normal one-at-a-time dialling). See
+  // startMultilineCall/dialNextInQueue below for how this plugs into
+  // the existing session/queue machinery.
+  const [lines, setLines] = useState(1);
+  const [multilineBatch, setMultilineBatch] = useState(null); // { id, candidates: [{leadId,name,phone,status}] } | null
+  const multilineBatchIdRef = useRef(null); // current batch id, for cancelling on an early hang-up
+  const multilineWinnerRef = useRef(null); // resolved winning lead, read once the rep's own leg disconnects
+  const multilinePollRef = useRef(null);
+  // Kept in sync with dialQueue so the polling loop below (a
+  // setInterval callback, not re-created every render) always reads
+  // the current contact list rather than whatever it was when the
+  // batch started — same pattern as sessionRef.
+  const dialQueueRef = useRef(dialQueue);
+  useEffect(() => {
+    dialQueueRef.current = dialQueue;
+  }, [dialQueue]);
+
   // Shared by every system message logged into a lead's conversation
   // thread (call summaries, stage/outcome updates, …) — creates a new
   // thread if one doesn't exist yet, otherwise appends to it and bumps
@@ -2068,14 +2110,14 @@ export default function SimpleCRM() {
     setWrapUp(null);
     setSessionPaused(false);
     setSession({ listName, queue });
-    const firstLead = dialQueue.find((l) => l.id === queue[0]);
-    if (firstLead) startCall(firstLead);
+    dialNextInQueue(queue);
   };
 
   const stopSession = () => {
     setSession(null);
     setSessionPaused(false);
     setWrapUp(null);
+    if (multilineBatchIdRef.current) cancelMultilineBatch(multilineBatchIdRef.current);
     if (calling) {
       hangUp();
       activeCallRef.current = null;
@@ -2093,8 +2135,7 @@ export default function SimpleCRM() {
     const next = !sessionPaused;
     setSessionPaused(next);
     if (!next && !calling && !wrapUp && session?.queue.length) {
-      const nextLead = dialQueue.find((l) => l.id === session.queue[0]);
-      if (nextLead) startCall(nextLead);
+      dialNextInQueue(session.queue);
     }
   };
 
@@ -2244,8 +2285,7 @@ export default function SimpleCRM() {
     }
     setSession({ ...session, queue: remainingQueue });
     if (sessionPaused) return; // stay put — Resume will dial the next lead
-    const nextLead = dialQueue.find((l) => l.id === remainingQueue[0]);
-    if (nextLead) startCall(nextLead);
+    dialNextInQueue(remainingQueue);
   };
 
   // Wrap-up countdown — ticks every second, auto-advancing at zero.
@@ -2325,9 +2365,160 @@ export default function SimpleCRM() {
 
   const endCall = () => {
     // Just hang up — the call's own 'disconnect' event (registered in
-    // startCall) does the actual state reset, logging, and wrap-up, so
-    // it only ever happens once no matter how the call ends.
+    // startCall/startMultilineCall) does the actual state reset,
+    // logging, and wrap-up, so it only ever happens once no matter how
+    // the call ends. Also doubles as "Cancel" on a multi-line dial in
+    // progress — same hang-up, just before anyone's answered yet.
     hangUp();
+  };
+
+  const stopMultilinePolling = () => {
+    if (multilinePollRef.current) {
+      clearInterval(multilinePollRef.current);
+      multilinePollRef.current = null;
+    }
+  };
+
+  // Best-effort — drops every still-ringing/placed leg in a batch.
+  // Used whenever a multi-line dial ends without a winner (the rep
+  // hung up early, or their own leg never connected) so the other
+  // lines don't keep ringing out on their own. Safe to call even
+  // after a winner's already been decided — nothing's left pending to
+  // cancel at that point, so it's just a no-op.
+  const cancelMultilineBatch = (batchId) => {
+    api.post("/api/multiline-cancel", { batchId }).catch(() => {});
+  };
+
+  const startMultilinePolling = (batchId) => {
+    stopMultilinePolling();
+    multilinePollRef.current = setInterval(async () => {
+      let data;
+      try {
+        data = await api.get(`/api/multiline-batch?id=${batchId}`);
+      } catch {
+        return; // transient — try again next tick
+      }
+      setMultilineBatch((b) => (b && b.id === batchId ? { ...b, candidates: data.calls } : b));
+
+      if (data.status === "connected" && data.winner && !multilineWinnerRef.current) {
+        stopMultilinePolling();
+        // Prefer the live contact (has notes/fields/tag/etc. for the
+        // wrap-up screen and call script) — data.winner is just the
+        // id/name/phone snapshot taken when the batch started, used
+        // only as a fallback if the contact's since disappeared.
+        const winnerLead = dialQueueRef.current.find((l) => l.id === data.winner.leadId) || {
+          id: data.winner.leadId,
+          name: data.winner.name,
+          phone: data.winner.phone,
+        };
+        multilineWinnerRef.current = winnerLead;
+        callStartRef.current = Date.now();
+        setActiveLeadId(winnerLead.id);
+        setActiveCallPhone(data.winner.phone);
+        setCallStatus("in-progress");
+        setMultilineBatch(null);
+      } else if (data.status === "no-answer") {
+        stopMultilinePolling();
+        setCallError("No answer on any line.");
+        // Ends the rep's own conference leg — same 'disconnect' path
+        // as hanging up any other call, just with no winner to log.
+        hangUp();
+      }
+    }, 1200);
+  };
+
+  // Dials several leads at once (see startSession/togglePause/
+  // finishWrapUp below), bridging the rep to whichever answers first.
+  // The rep's browser leg joins the shared conference immediately;
+  // the backend places every lead's leg via the REST API (see
+  // api/multiline-start.js), and polling (above) is how the browser
+  // finds out who — if anyone — actually picked up.
+  const startMultilineCall = async (leadsToTry) => {
+    if (!leadsToTry.length || calling) return;
+    setCallError("");
+    setCalling(true);
+    setCallStatus("connecting");
+    setActiveLeadId(null);
+    setActiveCallPhone("");
+    setActiveCallerId("");
+    setLastAdHocCall(null);
+    multilineWinnerRef.current = null;
+    callEndedRef.current = false;
+
+    let batchId;
+    try {
+      const started = await api.post("/api/multiline-start", { leadIds: leadsToTry.map((l) => l.id) });
+      batchId = started.batchId;
+      multilineBatchIdRef.current = batchId;
+      setMultilineBatch({ id: batchId, candidates: started.candidates.map((c) => ({ ...c, status: "placed" })) });
+
+      const { call, callerId } = await joinConference(started.conferenceName);
+      activeCallRef.current = call;
+      setActiveCallerId(callerId);
+
+      // Same shared end-of-call handling as startCall, plus tearing
+      // down whatever's left of the batch.
+      const onCallEnded = (err) => {
+        if (callEndedRef.current) return;
+        callEndedRef.current = true;
+        setCalling(false);
+        setCallStatus("idle");
+        setActiveCallerId("");
+        activeCallRef.current = null;
+        stopMultilinePolling();
+        setMultilineBatch(null);
+        if (multilineBatchIdRef.current) {
+          cancelMultilineBatch(multilineBatchIdRef.current);
+          multilineBatchIdRef.current = null;
+        }
+        const winner = multilineWinnerRef.current;
+        multilineWinnerRef.current = null;
+        const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
+        callStartRef.current = null;
+
+        if (err) {
+          setCallError(err.message || "The call failed.");
+          if (sessionRef.current) setSessionPaused(true);
+          return;
+        }
+        if (!winner) return; // rep hung up (or nothing answered) before anyone was bridged — nothing to log
+
+        logCallToConversation(winner, durationMs);
+        handleCallEnded(winner, durationMs);
+      };
+
+      call.on("disconnect", () => onCallEnded());
+      call.on("cancel", () => onCallEnded());
+      call.on("error", (err) => onCallEnded(err));
+
+      startMultilinePolling(batchId);
+    } catch (err) {
+      setCallError(err.message || "Could not start multi-line dialling.");
+      setCalling(false);
+      setCallStatus("idle");
+      setMultilineBatch(null);
+      if (batchId) cancelMultilineBatch(batchId);
+      multilineBatchIdRef.current = null;
+    }
+  };
+
+  // Shared by session start/resume/advance — dials the next lead(s)
+  // in the queue, using multi-line dialling when `lines` > 1 and more
+  // than one lead is left to try this round (falls back to a normal
+  // single call otherwise, same as lines === 1 always does).
+  const dialNextInQueue = (leadIds) => {
+    if (!leadIds.length) return;
+    if (lines > 1) {
+      const batch = leadIds
+        .slice(0, lines)
+        .map((id) => dialQueue.find((l) => l.id === id))
+        .filter(Boolean);
+      if (batch.length > 1) return startMultilineCall(batch);
+      if (batch.length === 1) return startCall(batch[0]);
+      return;
+    }
+    const lead = dialQueue.find((l) => l.id === leadIds[0]);
+    if (lead) startCall(lead);
   };
 
   // Double-dialling — offered on the wrap-up screen (mid-session) and
@@ -3367,8 +3558,31 @@ export default function SimpleCRM() {
 
             {/* Dialler lists — segments the Power Dialler can run through */}
             <div className="px-8 pt-6">
-              <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
-                Dialler lists
+              <div className="flex items-center justify-between flex-wrap gap-3 mb-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Dialler lists</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-gray-500">Lines</span>
+                  <div className="flex border border-gray-200 rounded-lg overflow-hidden">
+                    {[1, 2, 3, 4].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        disabled={!!session || calling}
+                        onClick={() => setLines(n)}
+                        title={
+                          n === 1
+                            ? "Dial one lead at a time"
+                            : `Dial ${n} leads at once — first to answer gets connected, the rest hang up`
+                        }
+                        className={`px-2.5 py-1 text-xs font-semibold border-r border-gray-200 last:border-r-0 disabled:cursor-not-allowed disabled:opacity-40 ${
+                          lines === n ? "bg-gray-900 text-white" : "bg-white text-gray-500 hover:bg-gray-50"
+                        }`}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
               <div className="flex flex-wrap gap-3">
                 {(() => {
@@ -3491,7 +3705,39 @@ export default function SimpleCRM() {
 
             {/* Hotseat — the live call, or the post-call wrap-up */}
             <div className="px-8 pt-6">
-              {wrapUp ? (
+              {multilineBatch ? (
+                <div className="bg-blue-50 border border-blue-200 rounded-2xl px-6 py-5">
+                  <div className="flex items-center justify-between gap-4 flex-wrap">
+                    <div className="flex items-center gap-2.5">
+                      <Loader2 size={16} className="animate-spin text-blue-600 shrink-0" />
+                      <div className="text-sm font-semibold text-blue-800">
+                        Dialling {multilineBatch.candidates.length} lines at once — first to answer gets connected
+                      </div>
+                    </div>
+                    <button
+                      onClick={endCall}
+                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
+                    >
+                      <PhoneOff size={15} /> Cancel
+                    </button>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {multilineBatch.candidates.map((c) => (
+                      <div
+                        key={c.leadId}
+                        className="flex items-center justify-between gap-2 bg-white border border-blue-100 rounded-lg px-3 py-2 text-sm"
+                      >
+                        <span className="font-medium truncate">{c.name}</span>
+                        <span
+                          className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${multilineStatusColor(c.status)}`}
+                        >
+                          {multilineStatusLabel(c.status)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : wrapUp ? (
                 <div className="bg-amber-50 border border-amber-200 rounded-2xl px-6 py-5">
                   <div className="flex items-start justify-between gap-4">
                     <div>
