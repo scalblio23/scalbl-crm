@@ -43,6 +43,7 @@ import {
   Copy,
   RefreshCw,
   Send,
+  Layers,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -316,6 +317,7 @@ const navItems = [
   { key: "conversation", label: "Conversation", icon: MessageSquare },
   { key: "contacts", label: "Contacts", icon: Users },
   { key: "powerdialler", label: "Powerdialler", icon: Phone },
+  { key: "multiline", label: "Multi Line", icon: Layers },
   { key: "bulk-sms", label: "Bulk SMS", icon: Send },
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
@@ -1763,11 +1765,13 @@ export default function SimpleCRM() {
   const callStartRef = useRef(null); // when the current call was placed, for duration
   const callEndedRef = useRef(false); // guards against double-processing one call's end
 
-  // Multi-line dialling — how many leads to ring simultaneously per
-  // round (1 = today's normal one-at-a-time dialling). See
+  // Multi-line dialling (Multi Line tab only — Powerdialler always
+  // dials one at a time) — how many leads to ring simultaneously per
+  // round, chosen once when a session starts and carried on `session`
+  // itself (session.lines) so it can't change mid-session. See
   // startMultilineCall/dialNextInQueue below for how this plugs into
-  // the existing session/queue machinery.
-  const [lines, setLines] = useState(1);
+  // the same session/queue engine Powerdialler uses.
+  const [multiLines, setMultiLines] = useState(2);
   const [multilineBatch, setMultilineBatch] = useState(null); // { id, candidates: [{leadId,name,phone,status}] } | null
   const multilineBatchIdRef = useRef(null); // current batch id, for cancelling on an early hang-up
   const multilineWinnerRef = useRef(null); // resolved winning lead, read once the rep's own leg disconnects
@@ -2102,15 +2106,18 @@ export default function SimpleCRM() {
     api.delete(`/api/dial-lists?id=${id}`).catch((err) => setDbError(err.message || "Could not delete the list."));
   };
 
-  // Kicks off a Power Dialler session: works through `leadIds` in
-  // order, top to bottom, placing the first call immediately.
-  const startSession = (listName, leadIds) => {
+  // Kicks off a Power Dialler (or Multi Line) session: works through
+  // `leadIds` in order, top to bottom, placing the first call/round
+  // immediately. `lines` — 1 for a normal single-line session,
+  // Multi Line's chosen line count otherwise — is stuck onto the
+  // session itself so it stays fixed for its whole duration.
+  const startSession = (listName, leadIds, lines = 1) => {
     const queue = remainingInList(leadIds);
     if (!queue.length) return;
     setWrapUp(null);
     setSessionPaused(false);
-    setSession({ listName, queue });
-    dialNextInQueue(queue);
+    setSession({ listName, queue, lines });
+    dialNextInQueue(queue, lines);
   };
 
   const stopSession = () => {
@@ -2135,7 +2142,7 @@ export default function SimpleCRM() {
     const next = !sessionPaused;
     setSessionPaused(next);
     if (!next && !calling && !wrapUp && session?.queue.length) {
-      dialNextInQueue(session.queue);
+      dialNextInQueue(session.queue, session.lines);
     }
   };
 
@@ -2285,7 +2292,7 @@ export default function SimpleCRM() {
     }
     setSession({ ...session, queue: remainingQueue });
     if (sessionPaused) return; // stay put — Resume will dial the next lead
-    dialNextInQueue(remainingQueue);
+    dialNextInQueue(remainingQueue, session.lines);
   };
 
   // Wrap-up countdown — ticks every second, auto-advancing at zero.
@@ -2415,6 +2422,11 @@ export default function SimpleCRM() {
         callStartRef.current = Date.now();
         setActiveLeadId(winnerLead.id);
         setActiveCallPhone(data.winner.phone);
+        // Overrides the rep's own conference-join caller id with the
+        // number this particular lead was actually dialled from —
+        // that's what shows up as "Calling from…" in the live-call
+        // view, and it's the number that matters to the lead/rep here.
+        if (data.winner.fromNumber) setActiveCallerId(data.winner.fromNumber);
         setCallStatus("in-progress");
         setMultilineBatch(null);
       } else if (data.status === "no-answer") {
@@ -2506,7 +2518,7 @@ export default function SimpleCRM() {
   // in the queue, using multi-line dialling when `lines` > 1 and more
   // than one lead is left to try this round (falls back to a normal
   // single call otherwise, same as lines === 1 always does).
-  const dialNextInQueue = (leadIds) => {
+  const dialNextInQueue = (leadIds, lines = 1) => {
     if (!leadIds.length) return;
     if (lines > 1) {
       const batch = leadIds
@@ -2692,9 +2704,10 @@ export default function SimpleCRM() {
       </aside>
 
       {/* Secondary sidebar — narrower + a touch darker than the main
-          nav, lets you browse Contacts by client and Powerdialler by
-          saved powerlist without leaving the page. */}
-      {(page === "contacts" || page === "powerdialler") && (
+          nav, lets you browse Contacts by client and Powerdialler (or
+          Multi Line, which shares the same powerlists) by saved
+          powerlist without leaving the page. */}
+      {(page === "contacts" || page === "powerdialler" || page === "multiline") && (
         <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
           {page === "contacts" && (
             <>
@@ -2751,7 +2764,7 @@ export default function SimpleCRM() {
             </>
           )}
 
-          {page === "powerdialler" && (
+          {(page === "powerdialler" || page === "multiline") && (
             <>
               <div className="px-4 pt-5 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
                 Powerlists
@@ -3558,31 +3571,8 @@ export default function SimpleCRM() {
 
             {/* Dialler lists — segments the Power Dialler can run through */}
             <div className="px-8 pt-6">
-              <div className="flex items-center justify-between flex-wrap gap-3 mb-2">
-                <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Dialler lists</div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium text-gray-500">Lines</span>
-                  <div className="flex border border-gray-200 rounded-lg overflow-hidden">
-                    {[1, 2, 3, 4].map((n) => (
-                      <button
-                        key={n}
-                        type="button"
-                        disabled={!!session || calling}
-                        onClick={() => setLines(n)}
-                        title={
-                          n === 1
-                            ? "Dial one lead at a time"
-                            : `Dial ${n} leads at once — first to answer gets connected, the rest hang up`
-                        }
-                        className={`px-2.5 py-1 text-xs font-semibold border-r border-gray-200 last:border-r-0 disabled:cursor-not-allowed disabled:opacity-40 ${
-                          lines === n ? "bg-gray-900 text-white" : "bg-white text-gray-500 hover:bg-gray-50"
-                        }`}
-                      >
-                        {n}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+                Dialler lists
               </div>
               <div className="flex flex-wrap gap-3">
                 {(() => {
@@ -3705,6 +3695,714 @@ export default function SimpleCRM() {
 
             {/* Hotseat — the live call, or the post-call wrap-up */}
             <div className="px-8 pt-6">
+              {wrapUp ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl px-6 py-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-widest text-amber-700">
+                        Wrap up
+                      </div>
+                      <div className="text-xl font-bold mt-0.5">{wrapUp.lead.name}</div>
+                      <div className="text-sm text-gray-600 mt-1">
+                        {wrapUp.lead.phone} · {wrapUp.lead.client}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div
+                        className={`text-3xl font-bold tabular-nums ${
+                          sessionPaused ? "text-gray-400" : "text-amber-600"
+                        }`}
+                      >
+                        {wrapUp.secondsLeft}s
+                      </div>
+                      <div className="text-xs text-gray-400">{sessionPaused ? "paused" : "auto-advancing"}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 h-1.5 bg-amber-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-1000 ease-linear ${
+                        sessionPaused ? "bg-gray-300" : "bg-amber-500"
+                      }`}
+                      style={{ width: `${(wrapUp.secondsLeft / WRAP_UP_SECONDS) * 100}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="relative">
+                      <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
+                      {(() => {
+                        const stageCol = contactColumns.find((c) => c.key === "stage");
+                        const options = stageCol?.options || [];
+                        return (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
+                              className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
+                            >
+                              {wrapUp.customStage ? (
+                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(stageCol || {}, wrapUp.customStage)}`}>
+                                  {wrapUp.customStage}
+                                </span>
+                              ) : (
+                                <span className="text-gray-300 text-xs">—</span>
+                              )}
+                              <ChevronDown size={14} className="text-gray-400" />
+                            </button>
+                            {wrapUpStatusMenuOpen && (
+                              <>
+                                <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
+                                <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full max-h-64 overflow-y-auto">
+                                  <button
+                                    onClick={() => {
+                                      setWrapUp((w) => (w ? { ...w, customStage: "" } : w));
+                                      setWrapUpStatusMenuOpen(false);
+                                    }}
+                                    className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 text-xs text-gray-400"
+                                  >
+                                    —
+                                  </button>
+                                  {options.map((o) => (
+                                    <button
+                                      key={o.value}
+                                      onClick={() => {
+                                        setWrapUp((w) => (w ? { ...w, customStage: o.value } : w));
+                                        setWrapUpStatusMenuOpen(false);
+                                      }}
+                                      className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
+                                    >
+                                      <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${SELECT_COLORS[o.color] || SELECT_COLORS.gray}`}>
+                                        {o.value}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">Notes</label>
+                      <textarea
+                        value={wrapUp.notes}
+                        onChange={(e) => setWrapUp((w) => (w ? { ...w, notes: e.target.value } : w))}
+                        rows={2}
+                        placeholder="What happened on this call?"
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 resize-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() =>
+                          callLeadAgain(wrapUp.lead, { customStage: wrapUp.customStage, notes: wrapUp.notes })
+                        }
+                        className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                      >
+                        <PhoneCall size={14} /> Call again
+                      </button>
+                      <button
+                        onClick={() =>
+                          callLeadAgainWithDifferentNumber(wrapUp.lead, {
+                            customStage: wrapUp.customStage,
+                            notes: wrapUp.notes,
+                          })
+                        }
+                        className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                      >
+                        <PhoneCall size={14} /> Call again with different number
+                      </button>
+                    </div>
+                    <button
+                      onClick={finishWrapUp}
+                      className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-semibold"
+                    >
+                      Next lead
+                    </button>
+                  </div>
+                </div>
+              ) : calling && activeLead ? (
+                <div className="bg-green-50 border border-green-200 rounded-2xl px-6 py-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <span className="relative flex h-3 w-3 shrink-0">
+                        <span
+                          className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                            callStatus === "connecting" ? "bg-amber-400" : "bg-green-400"
+                          }`}
+                        />
+                        <span
+                          className={`relative inline-flex rounded-full h-3 w-3 ${
+                            callStatus === "connecting" ? "bg-amber-500" : "bg-green-600"
+                          }`}
+                        />
+                      </span>
+                      <div
+                        className={`text-xs font-semibold uppercase tracking-widest ${
+                          callStatus === "connecting" ? "text-amber-700" : "text-green-700"
+                        }`}
+                      >
+                        {callStatus === "connecting" ? "Connecting…" : "Live call"}
+                      </div>
+                      {activeCallerId && (
+                        <div className="flex items-center gap-1 text-xs text-gray-500 bg-white/70 border border-green-100 rounded-full px-2.5 py-1">
+                          <PhoneCall size={11} /> Calling from {activeCallerId}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={endCall}
+                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
+                    >
+                      <PhoneOff size={15} /> End call
+                    </button>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-[1fr_1.3fr] gap-6 md:items-center">
+                    {/* Left: who you're talking to */}
+                    <div>
+                      <div className="text-xl font-bold">{activeLead.name}</div>
+                      <div className="text-sm text-gray-600 mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                        <span>
+                          {activeCallPhone || activeLead.phone}
+                          {activeCallPhone && activeCallPhone !== activeLead.phone && (
+                            <span className="ml-1.5 text-xs text-amber-600 font-medium">(different number)</span>
+                          )}
+                        </span>
+                        <span>{activeLead.email}</span>
+                        <span>{activeLead.client}</span>
+                      </div>
+                      {activeLead.notes && (
+                        <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2 text-sm text-gray-600">
+                          {activeLead.notes}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Right: the client's call script, front and centre */}
+                    {(() => {
+                      const activeClient = getClient(activeLead.client);
+                      return (
+                        <div className="bg-white border border-green-100 rounded-xl px-5 py-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                              {activeLead.client} script
+                            </div>
+                            {activeClient?.script && (
+                              <a
+                                href={activeClient.script}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700"
+                              >
+                                <ExternalLink size={12} /> Full script
+                              </a>
+                            )}
+                          </div>
+                          {activeClient?.scriptSteps?.length ? (
+                            <ol className="space-y-1.5 text-sm text-gray-700 list-decimal list-inside">
+                              {activeClient.scriptSteps.map((step, i) => (
+                                <li key={i}>{step}</li>
+                              ))}
+                            </ol>
+                          ) : (
+                            <div className="text-sm text-gray-400">No script on file for this client.</div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              ) : lastAdHocCall ? (
+                // A one-off call (outside a session) has no forced wrap-up,
+                // but still gets offered a quick redial before this card is
+                // replaced by the next call or dismissed.
+                <div className="bg-gray-50 border border-gray-200 rounded-2xl px-6 py-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+                        Call ended
+                      </div>
+                      <div className="text-xl font-bold mt-0.5">{lastAdHocCall.lead.name}</div>
+                      <div className="text-sm text-gray-500 mt-1">
+                        {lastAdHocCall.lead.phone} · {formatCallDuration(lastAdHocCall.durationMs)}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setLastAdHocCall(null)}
+                      title="Dismiss"
+                      className="text-gray-300 hover:text-gray-600 shrink-0"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <div className="mt-4 flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={() => callLeadAgain(lastAdHocCall.lead)}
+                      className="flex items-center gap-1.5 border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                    >
+                      <PhoneCall size={14} /> Call again
+                    </button>
+                    <button
+                      onClick={() => callLeadAgainWithDifferentNumber(lastAdHocCall.lead)}
+                      className="flex items-center gap-1.5 border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                    >
+                      <PhoneCall size={14} /> Call again with different number
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 border border-dashed border-gray-200 rounded-2xl px-6 py-5 text-gray-400">
+                  <Phone size={18} />
+                  <span className="text-sm">
+                    No live call — hit <span className="font-medium text-gray-500">Call</span> on a lead below to start the hotseat.
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="p-8">
+              <div className="border border-gray-200 rounded-xl overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                      <th className="pl-5 pr-2 py-3 font-medium w-8" />
+                      <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
+                      <th className="px-5 py-3 font-medium">Name</th>
+                      <th className="px-5 py-3 font-medium">Email</th>
+                      <th className="px-5 py-3 font-medium">Phone</th>
+                      <th className="px-5 py-3 font-medium">Client</th>
+                      <th className="px-5 py-3 font-medium whitespace-nowrap">Stage</th>
+                      <th className="px-5 py-3 font-medium">Notes</th>
+                      <th className="px-5 py-3 font-medium">Status</th>
+                      {visibleDialColumns.map((col) => (
+                        <th key={col.id} className="px-5 py-3 font-medium whitespace-nowrap">
+                          {col.label}
+                        </th>
+                      ))}
+                      <th className="px-5 py-3 font-medium">Script</th>
+                      <th className="px-5 py-3 font-medium text-right">Action</th>
+                    </tr>
+                    <tr className="border-b border-gray-100 bg-gray-50/60">
+                      <th className="pl-5 pr-2 pb-3" />
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.leadDate}
+                          onChange={(e) => updateDialFilter("leadDate", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.name}
+                          onChange={(e) => updateDialFilter("name", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.email}
+                          onChange={(e) => updateDialFilter("email", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.phone}
+                          onChange={(e) => updateDialFilter("phone", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <select
+                          value={dialFilters.client}
+                          onChange={(e) => updateDialFilter("client", e.target.value)}
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        >
+                          {dialClientOptions.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        {stageColumnDef && renderDialColumnFilter(stageColumnDef)}
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <input
+                          value={dialFilters.notes}
+                          onChange={(e) => updateDialFilter("notes", e.target.value)}
+                          placeholder="Filter…"
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        />
+                      </th>
+                      <th className="px-5 pb-3 font-normal">
+                        <select
+                          value={dialFilters.status}
+                          onChange={(e) => updateDialFilter("status", e.target.value)}
+                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
+                        >
+                          {dialStatusOptions.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                      </th>
+                      {visibleDialColumns.map((col) => (
+                        <th key={col.id} className="px-5 pb-3 font-normal">
+                          {renderDialColumnFilter(col)}
+                        </th>
+                      ))}
+                      <th className="px-5 pb-3" />
+                      <th className="px-5 pb-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedDialQueue.map((lead) => (
+                      <tr
+                        key={lead.id}
+                        className={`border-b border-gray-50 last:border-0 hover:bg-gray-50 ${
+                          activeLead?.id === lead.id ? "bg-gray-50" : ""
+                        }`}
+                      >
+                        <td className="pl-5 pr-2 py-3.5">
+                          <input
+                            type="checkbox"
+                            checked={selectedLeadIds.includes(lead.id)}
+                            onChange={() => toggleLeadSelected(lead.id)}
+                            className="w-4 h-4 rounded border-gray-300"
+                          />
+                        </td>
+                        <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{lead.leadDate || "—"}</td>
+                        <td className="px-5 py-3.5 font-medium">{lead.name}</td>
+                        <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
+                        <td className="px-5 py-3.5 text-gray-600">{lead.phone}</td>
+                        <td className="px-5 py-3.5 text-gray-600">{lead.client}</td>
+                        <td className="px-5 py-3.5">
+                          {lead.fields?.stage ? (
+                            <span
+                              className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(
+                                stageColumnDef || {},
+                                lead.fields.stage
+                              )}`}
+                            >
+                              {lead.fields.stage}
+                            </span>
+                          ) : (
+                            <span className="text-gray-300 text-xs">—</span>
+                          )}
+                        </td>
+                        <td className="px-5 py-3.5 text-gray-500 max-w-xs truncate" title={lead.notes}>
+                          {lead.notes}
+                        </td>
+                        <td className="px-5 py-3.5">
+                          <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[lead.status]}`}>
+                            {lead.status}
+                          </span>
+                        </td>
+                        {visibleDialColumns.map((col) => {
+                          const val = lead.fields?.[col.key];
+                          if (col.type === "checkbox") {
+                            return (
+                              <td key={col.id} className="px-5 py-3.5 text-gray-500">
+                                {val ? "Yes" : "No"}
+                              </td>
+                            );
+                          }
+                          if (col.type === "select") {
+                            return (
+                              <td key={col.id} className="px-5 py-3.5">
+                                {val ? (
+                                  <span
+                                    className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(
+                                      col,
+                                      val
+                                    )}`}
+                                  >
+                                    {val}
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-300 text-xs">—</span>
+                                )}
+                              </td>
+                            );
+                          }
+                          const display = formatDynamicCellDisplay(col, val);
+                          return (
+                            <td key={col.id} className="px-5 py-3.5 text-gray-500 max-w-xs truncate" title={display}>
+                              {display !== null ? display : <span className="text-gray-300">—</span>}
+                            </td>
+                          );
+                        })}
+                        <td className="px-5 py-3.5">
+                          {getClient(lead.client)?.script ? (
+                            <a
+                              href={getClient(lead.client).script}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700"
+                            >
+                              <ExternalLink size={13} /> Script
+                            </a>
+                          ) : (
+                            <span className="text-xs text-gray-300">—</span>
+                          )}
+                        </td>
+                        <td className="px-5 py-3.5 text-right">
+                          {calling && activeLead?.id === lead.id ? (
+                            <button
+                              onClick={endCall}
+                              className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-600 hover:text-red-700"
+                            >
+                              <PhoneOff size={14} /> End
+                            </button>
+                          ) : (
+                            <button
+                              disabled={calling}
+                              onClick={() => startCall(lead)}
+                              className="inline-flex items-center gap-1.5 text-xs font-semibold text-green-600 hover:text-green-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              <PhoneCall size={14} /> Call
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {filteredDialQueue.length === 0 && (
+                      <tr>
+                        <td
+                          colSpan={11 + visibleDialColumns.length}
+                          className="px-5 py-10 text-center text-sm text-gray-400"
+                        >
+                          No leads match the current filters
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {filteredDialQueue.length > DIAL_QUEUE_PAGE_SIZE && (
+                <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 text-sm text-gray-500">
+                  <span>
+                    {dialQueuePage * DIAL_QUEUE_PAGE_SIZE + 1}–
+                    {Math.min((dialQueuePage + 1) * DIAL_QUEUE_PAGE_SIZE, filteredDialQueue.length)} of{" "}
+                    {filteredDialQueue.length}
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setDialQueuePage((p) => Math.max(0, p - 1))}
+                      disabled={dialQueuePage === 0}
+                      className="px-3 py-1.5 rounded-lg border border-gray-200 font-medium hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-xs text-gray-400">
+                      Page {dialQueuePage + 1} of {totalDialQueuePages}
+                    </span>
+                    <button
+                      onClick={() => setDialQueuePage((p) => Math.min(totalDialQueuePages - 1, p + 1))}
+                      disabled={dialQueuePage >= totalDialQueuePages - 1}
+                      className="px-3 py-1.5 rounded-lg border border-gray-200 font-medium hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Multi Line — same dialler lists/queue/wrap-up engine as
+            Powerdialler, forced into multi-line mode (see startSession's
+            `lines` argument and dialNextInQueue) */}
+        {page === "multiline" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
+              <div>
+                <h1 className="text-xl font-bold">Multi Line</h1>
+                <div className="text-sm text-gray-400 mt-0.5">
+                  {filteredDialQueue.length} lead{filteredDialQueue.length === 1 ? "" : "s"} · newest first
+                  {dialListFilter !== "all" &&
+                    ` · ${dialLists.find((dl) => dl.id === dialListFilter)?.name || "list"}`}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                {dialListFilter !== "all" && (
+                  <button
+                    onClick={() => setDialListFilter("all")}
+                    className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
+                  >
+                    <X size={14} /> Clear powerlist
+                  </button>
+                )}
+                {dialFiltersActive && (
+                  <button
+                    onClick={clearAllDialFilters}
+                    className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
+                  >
+                    <X size={14} /> Clear filters
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Dialler lists — segments the Power Dialler can run through */}
+            <div className="px-8 pt-6">
+              <div className="flex items-center justify-between flex-wrap gap-3 mb-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Dialler lists</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-gray-500">Lines</span>
+                  <div className="flex border border-gray-200 rounded-lg overflow-hidden">
+                    {[2, 3, 4].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        disabled={!!session || calling}
+                        onClick={() => setMultiLines(n)}
+                        title={`Dial ${n} leads at once — first to answer gets connected, the rest hang up`}
+                        className={`px-2.5 py-1 text-xs font-semibold border-r border-gray-200 last:border-r-0 disabled:cursor-not-allowed disabled:opacity-40 ${
+                          multiLines === n ? "bg-gray-900 text-white" : "bg-white text-gray-500 hover:bg-gray-50"
+                        }`}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {(() => {
+                  const allLeadsIds = filteredDialQueue.map((l) => l.id);
+                  const allLeadsRemaining = remainingInList(allLeadsIds);
+                  return (
+                    <div className="border border-gray-200 rounded-xl px-4 py-3 flex items-center gap-4 min-w-[220px]">
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold">All leads</div>
+                        <div className="text-xs text-gray-400">
+                          {allLeadsRemaining.length} to call{dialFiltersActive ? " (filtered)" : ""}
+                        </div>
+                      </div>
+                      <button
+                        disabled={!!session || !allLeadsRemaining.length}
+                        onClick={() => startSession("All leads", allLeadsIds, multiLines)}
+                        className="flex items-center gap-1.5 bg-gray-900 text-white text-xs px-3 py-2 rounded-lg font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        <PhoneCall size={13} /> Start Multi-Line Dialler
+                      </button>
+                    </div>
+                  );
+                })()}
+                {dialLists.map((list) => {
+                  const remaining = remainingInList(list.leadIds);
+                  return (
+                    <div
+                      key={list.id}
+                      className="border border-gray-200 rounded-xl px-4 py-3 flex items-center gap-4 min-w-[220px]"
+                    >
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold">{list.name}</div>
+                        <div className="text-xs text-gray-400">{remaining.length} to call</div>
+                      </div>
+                      <button
+                        disabled={!!session || !remaining.length}
+                        onClick={() => startSession(list.name, list.leadIds, multiLines)}
+                        className="flex items-center gap-1.5 bg-gray-900 text-white text-xs px-3 py-2 rounded-lg font-semibold disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        <PhoneCall size={13} /> Start Multi-Line Dialler
+                      </button>
+                      <button
+                        onClick={() => deleteDialList(list.id)}
+                        title="Delete list"
+                        className="text-gray-300 hover:text-red-500"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Selected-rows → save as a new dialler list */}
+            {selectedLeadIds.length > 0 && (
+              <div className="mx-8 mt-4 flex flex-wrap items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+                <ListChecks size={16} className="text-blue-600 shrink-0" />
+                <span className="text-sm font-medium text-blue-800">{selectedLeadIds.length} selected</span>
+                <input
+                  value={newListName}
+                  onChange={(e) => setNewListName(e.target.value)}
+                  placeholder="Name this list…"
+                  className="border border-blue-200 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-blue-400 bg-white flex-1 min-w-[160px]"
+                />
+                <button
+                  disabled={!newListName.trim()}
+                  onClick={saveSelectedAsList}
+                  className="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Save as list
+                </button>
+                <button
+                  onClick={() => setSelectedLeadIds([])}
+                  className="text-sm text-blue-700/70 hover:text-blue-900"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
+
+            {/* Active Power Dialler session */}
+            {session && (
+              <div
+                className={`mx-8 mt-4 flex items-center justify-between border rounded-xl px-4 py-3 ${
+                  sessionPaused ? "bg-gray-50 border-gray-200" : "bg-indigo-50 border-indigo-200"
+                }`}
+              >
+                <div className={`text-sm ${sessionPaused ? "text-gray-700" : "text-indigo-800"}`}>
+                  <span className="font-semibold">
+                    {sessionPaused ? "Multi-Line Dialler paused:" : "Multi-Line Dialler running:"}
+                  </span>{" "}
+                  {session.listName} — {session.queue.length} lead{session.queue.length === 1 ? "" : "s"} remaining
+                </div>
+                <div className="flex items-center gap-4">
+                  <button
+                    onClick={togglePause}
+                    className={`text-sm font-medium ${
+                      sessionPaused ? "text-gray-700 hover:text-gray-900" : "text-indigo-700 hover:text-indigo-900"
+                    }`}
+                  >
+                    {sessionPaused ? "Resume" : "Pause"}
+                  </button>
+                  <button onClick={stopSession} className="text-sm font-medium text-red-600 hover:text-red-800">
+                    Stop session
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {callError && (
+              <div className="mx-8 mt-4 flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
+                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                <div className="flex-1">{callError}</div>
+                <button onClick={() => setCallError("")} className="text-red-400 hover:text-red-600">
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
+            {/* Hotseat — the live call, or the post-call wrap-up */}
+            <div className="px-8 pt-6">
               {multilineBatch ? (
                 <div className="bg-blue-50 border border-blue-200 rounded-2xl px-6 py-5">
                   <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -3725,9 +4423,15 @@ export default function SimpleCRM() {
                     {multilineBatch.candidates.map((c) => (
                       <div
                         key={c.leadId}
-                        className="flex items-center justify-between gap-2 bg-white border border-blue-100 rounded-lg px-3 py-2 text-sm"
+                        className="flex items-center justify-between gap-3 bg-white border border-blue-100 rounded-lg px-3 py-2 text-sm"
                       >
-                        <span className="font-medium truncate">{c.name}</span>
+                        <div className="min-w-0">
+                          <div className="font-medium truncate">{c.name}</div>
+                          <div className="text-xs text-gray-400 truncate">
+                            {c.phone}
+                            {c.fromNumber && <span> · from {c.fromNumber}</span>}
+                          </div>
+                        </div>
                         <span
                           className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${multilineStatusColor(c.status)}`}
                         >

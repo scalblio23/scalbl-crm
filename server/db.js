@@ -269,6 +269,9 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // Added after the table first shipped — which caller ID each leg
+    // was dialled from, shown per-line on the Multi Line tab.
+    await query(`ALTER TABLE multiline_batch_calls ADD COLUMN IF NOT EXISTS from_number TEXT`);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1243,10 +1246,10 @@ export async function createMultilineBatch({ conferenceName, createdBy }) {
 // Inserted before the Twilio call is placed — its id gets embedded in
 // that call's TwiML/status-callback URLs, then setMultilineBatchCallSid
 // fills in the resulting call_sid once Twilio hands one back.
-export async function addMultilineBatchCall({ batchId, leadId, name, phone }) {
+export async function addMultilineBatchCall({ batchId, leadId, name, phone, fromNumber }) {
   const rows = await query(
-    "INSERT INTO multiline_batch_calls (batch_id, lead_id, name, phone) VALUES ($1,$2,$3,$4) RETURNING *",
-    [batchId, leadId, name, phone]
+    "INSERT INTO multiline_batch_calls (batch_id, lead_id, name, phone, from_number) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+    [batchId, leadId, name, phone, fromNumber || null]
   );
   return rows[0];
 }
@@ -1303,7 +1306,15 @@ export async function getMultilineBatchWithCalls(id) {
   return {
     id: batch.id,
     status,
-    winner: winnerCall ? { leadId: batch.winner_lead_id, name: winnerCall.name, phone: winnerCall.phone } : null,
-    calls: calls.map((c) => ({ leadId: c.lead_id, name: c.name, phone: c.phone, status: c.status })),
+    winner: winnerCall
+      ? { leadId: batch.winner_lead_id, name: winnerCall.name, phone: winnerCall.phone, fromNumber: winnerCall.from_number }
+      : null,
+    calls: calls.map((c) => ({
+      leadId: c.lead_id,
+      name: c.name,
+      phone: c.phone,
+      fromNumber: c.from_number,
+      status: c.status,
+    })),
   };
 }

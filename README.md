@@ -95,12 +95,16 @@ build). You can sanity-check they're set correctly by visiting
 
 ### Multi-line dialling
 
-The "Lines" selector on the Powerdialler (next to the Dialler lists) dials
-several leads at once instead of one at a time — whoever answers first gets
-bridged to the rep, and every other line gets hung up immediately. Under the
-hood, the rep's own browser leg and each lead's leg (placed via the Twilio
-REST API) all join the same Twilio Conference; the first leg to report
-`in-progress` wins, and the rest are cancelled.
+The **Multi Line** tab is a separate mode of the same Powerdialler engine —
+same dialler lists, same lead queue/filters, same wrap-up flow — with its
+"Lines" selector (2-4) forcing every round to dial that many leads at once
+instead of one at a time. Whoever answers first gets bridged to the rep, and
+every other line gets hung up immediately; while lines are still ringing, the
+tab shows each one's lead, phone number, and which caller ID it's dialling
+from. Under the hood, the rep's own browser leg and each lead's leg (placed
+via the Twilio REST API) all join the same Twilio Conference; the first leg
+to report `in-progress` wins, and the rest are cancelled. The regular
+Powerdialler tab is unaffected — it always dials one lead at a time.
 
 This needs a real, publicly-reachable URL Twilio can fetch — see `PUBLIC_URL`
 in `.env.example`. It's automatic on Vercel; in local dev, set it to the same

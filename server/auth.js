@@ -24,6 +24,7 @@ const FULL_ACCESS_TABS = [
   "conversation",
   "contacts",
   "powerdialler",
+  "multiline",
   "bulk-sms",
   "log",
   "clients",

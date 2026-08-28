@@ -493,16 +493,18 @@ app.post(
     const pool = getCallerIdPool();
 
     const candidates = await mapWithConcurrency(withPhone, withPhone.length, async (contact, i) => {
+      const fromNumber = pool[i % pool.length];
       const row = await addMultilineBatchCall({
         batchId: batch.id,
         leadId: contact.id,
         name: contact.name,
         phone: contact.phone,
+        fromNumber,
       });
       try {
         const call = await placeConferenceLeg({
           to: contact.phone,
-          from: pool[i % pool.length],
+          from: fromNumber,
           url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(conferenceName)}`,
           statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batch.id}&leadId=${contact.id}`,
         });
@@ -511,7 +513,7 @@ app.post(
         console.error("[multiline-start] leg failed", contact.id, err.message);
         await updateMultilineBatchCallStatusByRowId(row.id, "failed");
       }
-      return { leadId: contact.id, name: contact.name, phone: contact.phone };
+      return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
 
     res.status(201).json({ batchId: batch.id, conferenceName, candidates });
