@@ -45,21 +45,23 @@ async function query(text, params = []) {
   return rows;
 }
 
-// ---------- Tag webhook tokens (for /api/lead-webhook) ----------
-// One token per Contacts tag (the "tab" shown in the Contacts sidebar)
-// rather than per client — a client's row name in the Clients tab
-// rarely matches the tag naming a CRM actually accumulates (e.g.
-// "2. Wilco Rel..."), so the webhook targets the tag directly. Not
-// hashed like an API key — unlike a key, this token needs to stay
-// visible/copyable indefinitely (it's embedded in a URL pasted into a
-// lead-gen platform), not just shown once at creation. It only grants
-// "create a lead under this one tag" on a public endpoint, not
-// general CRM access, so storing it in the clear is an acceptable
-// trade for that usability.
-const WEBHOOK_TOKEN_PREFIX = "whk_";
-
-function generateWebhookToken() {
-  return WEBHOOK_TOKEN_PREFIX + crypto.randomBytes(20).toString("hex");
+// Runs `fn` over `items` with at most `limit` in flight at once —
+// used by /api/sms-bulk-send so a large selection doesn't fire
+// hundreds of Twilio sends simultaneously, while still going faster
+// than one-at-a-time. Order of the returned results matches `items`;
+// one item's rejection doesn't stop the others (callers pass an `fn`
+// that catches its own errors into the result instead of throwing).
+export async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 // Idempotent — safe to call on every request. Creates the schema on
@@ -123,17 +125,6 @@ export async function ensureSchema() {
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS fields JSONB DEFAULT '{}'`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS lead_date TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS tag TEXT`);
-    // One webhook per tag (see findTagByWebhookToken/ensureTagWebhookToken
-    // below) — created on demand from the Contacts sidebar, not
-    // pre-populated for every tag, so this starts empty.
-    await query(`
-      CREATE TABLE IF NOT EXISTS tag_webhooks (
-        id SERIAL PRIMARY KEY,
-        tag TEXT UNIQUE NOT NULL,
-        token TEXT UNIQUE NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT now()
-      )
-    `);
     await query(`
       CREATE TABLE IF NOT EXISTS contact_columns (
         id SERIAL PRIMARY KEY,
@@ -217,6 +208,14 @@ export async function ensureSchema() {
     // they can manage other users (see server/auth.js).
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'`);
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tags JSONB DEFAULT '[]'`);
+    // Single global credential (see getApiKey/regenerateApiKey below) —
+    // used both as the Bearer/X-Api-Key for programmatic CRM access
+    // and as the ?token= on the public /api/lead-webhook endpoint,
+    // replacing what used to be a list of keys plus a separate
+    // per-tag webhook token. The table can still only ever hold at
+    // most one row; kept as a table rather than a single settings row
+    // so the existing hash-lookup/last-used-at plumbing didn't need
+    // to change shape.
     await query(`
       CREATE TABLE IF NOT EXISTS api_keys (
         id SERIAL PRIMARY KEY,
@@ -228,6 +227,16 @@ export async function ensureSchema() {
         last_used_at TIMESTAMPTZ
       )
     `);
+    // raw_key holds the key in the clear so Settings can always show
+    // it (not just once at creation) — needed now that it's also the
+    // webhook URL's token, which has to stay copyable indefinitely.
+    // Any key created before this column existed only ever had its
+    // hash stored and can't be recovered for display, so it's cleared
+    // out here — a one-time, self-limiting cleanup (nothing matches
+    // once every row has a raw_key) that leaves the account with no
+    // key until someone generates the new single one from Settings.
+    await query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS raw_key TEXT`);
+    await query(`DELETE FROM api_keys WHERE raw_key IS NULL`);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -608,57 +617,13 @@ export async function deleteContacts(ids) {
   await query("DELETE FROM contacts WHERE id = ANY($1::int[])", [ids]);
 }
 
-// ---------- Tag webhooks (for /api/lead-webhook) ----------
-// One row per tag that's had a webhook URL generated for it — see
-// generateWebhookToken above. Not every tag has one; they're created
-// on demand from the "Webhooks" panel on the Contacts sidebar.
-
-function tagWebhookFromRow(r) {
-  return { tag: r.tag, token: r.token, createdAt: r.created_at };
-}
-
-export async function getTagWebhooks() {
-  const rows = await query("SELECT * FROM tag_webhooks ORDER BY tag");
-  return rows.map(tagWebhookFromRow);
-}
-
-// Returns the webhook for `tag`, creating one the first time it's
-// asked for. ON CONFLICT rather than a plain check-then-insert so two
-// concurrent requests for a brand-new tag can't race into a duplicate
-// insert and a unique-constraint error.
-export async function ensureTagWebhookToken(tag) {
-  const rows = await query(
-    `INSERT INTO tag_webhooks (tag, token) VALUES ($1,$2)
-     ON CONFLICT (tag) DO UPDATE SET tag = EXCLUDED.tag
-     RETURNING *`,
-    [tag, generateWebhookToken()]
-  );
-  return tagWebhookFromRow(rows[0]);
-}
-
-// Looks up which tag a /api/lead-webhook request belongs to — the
-// token in its URL is that endpoint's whole auth model, so this is
-// effectively its login.
-export async function findTagByWebhookToken(token) {
-  if (!token) return null;
-  const rows = await query("SELECT * FROM tag_webhooks WHERE token = $1", [token]);
-  return rows[0] ? tagWebhookFromRow(rows[0]) : null;
-}
-
-// Issues a fresh token for a tag's webhook, immediately invalidating
-// its old URL — for when one leaks or needs reconnecting to a
-// different platform. No-op (returns null) if that tag never had a
-// webhook to begin with.
-export async function regenerateTagWebhookToken(tag) {
-  const rows = await query("UPDATE tag_webhooks SET token = $2 WHERE tag = $1 RETURNING *", [
-    tag,
-    generateWebhookToken(),
-  ]);
-  return rows[0] ? tagWebhookFromRow(rows[0]) : null;
-}
-
-export async function deleteTagWebhook(tag) {
-  await query("DELETE FROM tag_webhooks WHERE tag = $1", [tag]);
+// Used by /api/sms-bulk-send to resolve the selected contact ids to
+// names/phones/tags right before sending, rather than trusting
+// whatever the client had cached.
+export async function getContactsByIds(ids) {
+  if (!ids || !ids.length) return [];
+  const rows = await query("SELECT * FROM contacts WHERE id = ANY($1::int[])", [ids]);
+  return rows.map(contactFromRow);
 }
 
 // ---------- Contact table columns (dynamic schema, same pattern as
@@ -1169,33 +1134,51 @@ export async function deleteUserById(id) {
   await query("DELETE FROM users WHERE id = $1", [id]);
 }
 
-// ---------- API keys (for programmatic/agent access) ----------
-// The raw key is only ever known at creation time — only its hash is
-// stored, same principle as a password. key_prefix is a few
-// characters of the raw key kept in the clear purely so the UI can
-// show which key is which without ever displaying the full secret.
+// ---------- API key (single global credential) ----------
+// Exactly one key exists at a time — it's both the Bearer/X-Api-Key
+// for programmatic CRM access (see server/auth.js) and the ?token= on
+// the public /api/lead-webhook endpoint. There's no per-tag token
+// anymore: a lead posted through the webhook carries its own tag in
+// the payload instead of the tag being implied by which token was
+// used. raw_key is kept in the clear (alongside key_hash, still used
+// to verify it) so Settings can always display the current key rather
+// than only once at creation.
 
-export async function createApiKey({ label, keyHash, keyPrefix, createdBy }) {
-  const rows = await query(
-    "INSERT INTO api_keys (label, key_hash, key_prefix, created_by) VALUES ($1,$2,$3,$4) RETURNING *",
-    [label, keyHash, keyPrefix, createdBy || null]
-  );
-  return rows[0];
-}
-
-export async function getApiKeys() {
-  const rows = await query(
-    "SELECT ak.id, ak.label, ak.key_prefix, ak.created_at, ak.last_used_at, u.name AS created_by_name " +
-      "FROM api_keys ak LEFT JOIN users u ON u.id = ak.created_by ORDER BY ak.created_at DESC"
-  );
-  return rows.map((r) => ({
+function apiKeyFromRow(r) {
+  return {
     id: r.id,
-    label: r.label,
+    key: r.raw_key,
     keyPrefix: r.key_prefix,
     createdAt: r.created_at,
     lastUsedAt: r.last_used_at,
     createdByName: r.created_by_name,
-  }));
+  };
+}
+
+export async function getApiKey() {
+  const rows = await query(
+    "SELECT ak.*, u.name AS created_by_name FROM api_keys ak " +
+      "LEFT JOIN users u ON u.id = ak.created_by ORDER BY ak.created_at DESC LIMIT 1"
+  );
+  return rows[0] ? apiKeyFromRow(rows[0]) : null;
+}
+
+// Replaces whatever key exists (if any) with a brand-new one —
+// covers both "generate the first key" and "regenerate it", since
+// only one row is ever allowed to exist.
+export async function regenerateApiKey({ key, keyHash, keyPrefix, createdBy }) {
+  await query("DELETE FROM api_keys");
+  const rows = await query(
+    "INSERT INTO api_keys (label, key_hash, key_prefix, raw_key, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+    ["CRM API key", keyHash, keyPrefix, key, createdBy || null]
+  );
+  const created = rows[0];
+  const withName = createdBy ? await getUserById(createdBy) : null;
+  return apiKeyFromRow({ ...created, created_by_name: withName?.name || null });
+}
+
+export async function deleteApiKey() {
+  await query("DELETE FROM api_keys");
 }
 
 export async function findApiKeyByHash(keyHash) {
@@ -1205,8 +1188,4 @@ export async function findApiKeyByHash(keyHash) {
 
 export async function touchApiKeyLastUsed(id) {
   await query("UPDATE api_keys SET last_used_at = now() WHERE id = $1", [id]);
-}
-
-export async function deleteApiKey(id) {
-  await query("DELETE FROM api_keys WHERE id = $1", [id]);
 }

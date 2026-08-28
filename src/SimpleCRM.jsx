@@ -30,9 +30,9 @@ import {
   ChevronDown,
   BarChart3,
   CheckCircle2,
-  Zap,
   Copy,
   RefreshCw,
+  Send,
 } from "lucide-react";
 import { placeCall, hangUp } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -282,6 +282,7 @@ const navItems = [
   { key: "conversation", label: "Conversation", icon: MessageSquare },
   { key: "contacts", label: "Contacts", icon: Users },
   { key: "powerdialler", label: "Powerdialler", icon: Phone },
+  { key: "bulk-sms", label: "Bulk SMS", icon: Send },
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "clients", label: "Clients", icon: Briefcase },
@@ -602,91 +603,6 @@ export default function SimpleCRM() {
     return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
   };
 
-  // Lead webhooks — one URL per tag (see api/lead-webhook.js). A
-  // lead-gen platform posts to that URL and the lead lands straight
-  // on that tag's tab, no manual import. Loaded lazily the first time
-  // the panel's opened rather than on every bootstrap, since it's an
-  // occasional admin action.
-  const [showTagWebhooks, setShowTagWebhooks] = useState(false);
-  const [tagWebhooks, setTagWebhooks] = useState([]); // [{ tag, token }]
-  const [loadingTagWebhooks, setLoadingTagWebhooks] = useState(false);
-  const [newWebhookTag, setNewWebhookTag] = useState("");
-  const [copiedWebhookTag, setCopiedWebhookTag] = useState(null);
-  const [copiedTokenTag, setCopiedTokenTag] = useState(null);
-
-  const openTagWebhooks = async () => {
-    setShowTagWebhooks(true);
-    setLoadingTagWebhooks(true);
-    try {
-      setTagWebhooks(await api.get("/api/tag-webhooks"));
-    } catch (err) {
-      setDbError(err.message || "Could not load webhooks.");
-    } finally {
-      setLoadingTagWebhooks(false);
-    }
-  };
-
-  const webhookUrlForTag = (token) => `${window.location.origin}/api/lead-webhook?token=${token}`;
-
-  const copyTagWebhookUrl = async (row) => {
-    const url = webhookUrlForTag(row.token);
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopiedWebhookTag(row.tag);
-      setTimeout(() => setCopiedWebhookTag((t) => (t === row.tag ? null : t)), 2000);
-    } catch {
-      window.prompt("Copy this webhook URL:", url);
-    }
-  };
-
-  // Same token that's embedded in the URL — surfaced on its own for
-  // platforms that want an endpoint plus a separate auth token/header
-  // rather than a token baked into the URL.
-  const copyTagToken = async (row) => {
-    try {
-      await navigator.clipboard.writeText(row.token);
-      setCopiedTokenTag(row.tag);
-      setTimeout(() => setCopiedTokenTag((t) => (t === row.tag ? null : t)), 2000);
-    } catch {
-      window.prompt("Copy this token:", row.token);
-    }
-  };
-
-  const createTagWebhook = async (tag) => {
-    const trimmed = tag.trim();
-    if (!trimmed) return;
-    try {
-      const row = await api.post("/api/tag-webhooks", { tag: trimmed });
-      setTagWebhooks((rows) => [...rows.filter((r) => r.tag !== row.tag), row].sort((a, b) => a.tag.localeCompare(b.tag)));
-      setNewWebhookTag("");
-    } catch (err) {
-      setDbError(err.message || "Could not create the webhook.");
-    }
-  };
-
-  const regenerateTagWebhook = async (tag) => {
-    if (
-      !window.confirm(`Generate a new webhook URL for "${tag}"? The old one will stop accepting leads immediately.`)
-    )
-      return;
-    try {
-      const row = await api.patch("/api/tag-webhooks", { tag });
-      setTagWebhooks((rows) => rows.map((r) => (r.tag === tag ? row : r)));
-    } catch (err) {
-      setDbError(err.message || "Could not regenerate the webhook URL.");
-    }
-  };
-
-  const deleteTagWebhookRow = async (tag) => {
-    if (!window.confirm(`Delete the webhook for "${tag}"? Anything still posting to its URL will start failing.`)) return;
-    setTagWebhooks((rows) => rows.filter((r) => r.tag !== tag));
-    try {
-      await api.delete(`/api/tag-webhooks?tag=${encodeURIComponent(tag)}`);
-    } catch (err) {
-      setDbError(err.message || "Could not delete the webhook.");
-    }
-  };
-
   // Filter bar (Contacts) — any number of filters, each on any
   // column (fixed fields or any of the imported criteria), each with
   // is / is not / is empty / is not empty. "is"/"is not" means
@@ -974,6 +890,58 @@ export default function SimpleCRM() {
     }
   };
 
+  // ----- Bulk SMS tab — pick contacts individually or by tag, send
+  // the same text to all of them via /api/sms-bulk-send. Its own
+  // selection state, independent of the Contacts table's, since it
+  // filters/selects over the full `contacts` list rather than one
+  // filtered/paginated view. -----
+  const [bulkSmsTag, setBulkSmsTag] = useState(""); // "" = all tags
+  const [bulkSmsSearch, setBulkSmsSearch] = useState("");
+  const [bulkSmsSelectedIds, setBulkSmsSelectedIds] = useState([]);
+  const [bulkSmsMessage, setBulkSmsMessage] = useState("");
+  const [bulkSmsSending, setBulkSmsSending] = useState(false);
+  const [bulkSmsResult, setBulkSmsResult] = useState(null); // { total, sent, failed, skipped } | null
+
+  const BULK_SMS_DISPLAY_LIMIT = 500;
+  const bulkSmsFiltered = contacts.filter((c) => {
+    if (!c.phone) return false;
+    if (bulkSmsTag && (c.tag || "Untagged") !== bulkSmsTag) return false;
+    const q = bulkSmsSearch.trim().toLowerCase();
+    if (!q) return true;
+    return c.name?.toLowerCase().includes(q) || c.phone?.toLowerCase().includes(q);
+  });
+  const bulkSmsVisible = bulkSmsFiltered.slice(0, BULK_SMS_DISPLAY_LIMIT);
+
+  const toggleBulkSmsContact = (id) =>
+    setBulkSmsSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const allBulkSmsFilteredSelected =
+    bulkSmsFiltered.length > 0 && bulkSmsFiltered.every((c) => bulkSmsSelectedIds.includes(c.id));
+  const toggleSelectAllBulkSmsFiltered = () =>
+    setBulkSmsSelectedIds((ids) =>
+      allBulkSmsFilteredSelected
+        ? ids.filter((id) => !bulkSmsFiltered.some((c) => c.id === id))
+        : [...ids, ...bulkSmsFiltered.filter((c) => !ids.includes(c.id)).map((c) => c.id)]
+    );
+
+  const handleSendBulkSms = async () => {
+    const text = bulkSmsMessage.trim();
+    const count = bulkSmsSelectedIds.length;
+    if (!text || !count || bulkSmsSending) return;
+    if (!window.confirm(`Send this text to ${count} contact${count === 1 ? "" : "s"}? This can't be undone.`)) return;
+    setBulkSmsSending(true);
+    setBulkSmsResult(null);
+    try {
+      const result = await api.post("/api/sms-bulk-send", { contactIds: bulkSmsSelectedIds, text });
+      setBulkSmsResult(result);
+      setBulkSmsMessage("");
+      setBulkSmsSelectedIds([]);
+    } catch (err) {
+      setDbError(err.message || "Could not send the bulk message.");
+    } finally {
+      setBulkSmsSending(false);
+    }
+  };
+
   // ----- Client table (Grid / List view, dynamic column types) -----
   const [clientView, setClientView] = useState("list"); // 'list' | 'grid'
   const [selectedClientIds, setSelectedClientIds] = useState([]);
@@ -1139,29 +1107,32 @@ export default function SimpleCRM() {
     }
   };
 
-  // ----- API keys (Settings page) — lets a script or agent read/
-  // write this CRM without a browser login. Loaded lazily since
-  // they're only needed while actually on the Settings page. -----
-  const [apiKeys, setApiKeys] = useState([]);
-  const [apiKeysLoading, setApiKeysLoading] = useState(false);
-  const [newKeyLabel, setNewKeyLabel] = useState("");
-  const [creatingKey, setCreatingKey] = useState(false);
-  const [revealedKey, setRevealedKey] = useState(null); // { key, label } — shown once, right after creation
+  // ----- API key (Settings page) — one single key/token that lets a
+  // script or agent read/write this CRM without a browser login, and
+  // that also authenticates /api/lead-webhook (see api/api-keys.js).
+  // Loaded lazily since it's only needed while actually on the
+  // Settings page. Always shown in full (not just once at creation),
+  // since it doubles as a webhook token that needs to stay copyable.
+  const [apiKey, setApiKey] = useState(null); // { key, keyPrefix, createdAt, lastUsedAt, createdByName } | null
+  const [apiKeyLoading, setApiKeyLoading] = useState(false);
+  const [generatingKey, setGeneratingKey] = useState(false);
+  const [copiedApiKey, setCopiedApiKey] = useState(false);
+  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
 
   useEffect(() => {
     if (page !== "settings" || !authUser) return;
     let cancelled = false;
-    setApiKeysLoading(true);
+    setApiKeyLoading(true);
     api
       .get("/api/api-keys")
-      .then((keys) => {
-        if (!cancelled) setApiKeys(keys);
+      .then((key) => {
+        if (!cancelled) setApiKey(key);
       })
       .catch((err) => {
-        if (!cancelled) setDbError(err.message || "Could not load API keys.");
+        if (!cancelled) setDbError(err.message || "Could not load the API key.");
       })
       .finally(() => {
-        if (!cancelled) setApiKeysLoading(false);
+        if (!cancelled) setApiKeyLoading(false);
       });
     return () => {
       cancelled = true;
@@ -1258,39 +1229,58 @@ export default function SimpleCRM() {
   };
   const canDeleteTeamUser = (targetRole) => canManageUsers && targetRole !== "owner";
 
-  const handleCreateApiKey = async (e) => {
-    e.preventDefault();
-    if (!newKeyLabel.trim()) return;
-    setCreatingKey(true);
+  // Generates the key the first time, or replaces the existing one —
+  // there's only ever at most one (see api/api-keys.js). Regenerating
+  // immediately breaks anything still using the old value, so confirm
+  // when one's already live.
+  const handleGenerateApiKey = async () => {
+    if (
+      apiKey &&
+      !window.confirm(
+        "Generate a new API key? The current one — and any webhook URL built from it — will stop working immediately."
+      )
+    )
+      return;
+    setGeneratingKey(true);
     try {
-      const created = await api.post("/api/api-keys", { label: newKeyLabel.trim() });
-      setApiKeys((keys) => [
-        {
-          id: created.id,
-          label: created.label,
-          keyPrefix: created.keyPrefix,
-          createdAt: created.createdAt,
-          lastUsedAt: null,
-          createdByName: authUser?.name,
-        },
-        ...keys,
-      ]);
-      setRevealedKey({ key: created.key, label: created.label });
-      setNewKeyLabel("");
+      setApiKey(await api.post("/api/api-keys", {}));
     } catch (err) {
-      setDbError(err.message || "Could not create the API key.");
+      setDbError(err.message || "Could not generate the API key.");
     } finally {
-      setCreatingKey(false);
+      setGeneratingKey(false);
     }
   };
 
-  const handleDeleteApiKey = async (id) => {
-    if (!window.confirm("Revoke this API key? Anything using it will stop working immediately.")) return;
-    setApiKeys((keys) => keys.filter((k) => k.id !== id));
+  const handleDeleteApiKey = async () => {
+    if (!window.confirm("Revoke the API key? Anything using it — including the lead webhook — will stop working immediately."))
+      return;
+    setApiKey(null);
     try {
-      await api.delete(`/api/api-keys?id=${id}`);
+      await api.delete("/api/api-keys");
     } catch (err) {
       setDbError(err.message || "Could not revoke the API key.");
+    }
+  };
+
+  const webhookUrl = apiKey ? `${window.location.origin}/api/lead-webhook?token=${apiKey.key}` : "";
+  const copyApiKeyValue = async () => {
+    if (!apiKey) return;
+    try {
+      await navigator.clipboard.writeText(apiKey.key);
+      setCopiedApiKey(true);
+      setTimeout(() => setCopiedApiKey(false), 2000);
+    } catch {
+      window.prompt("Copy this API key:", apiKey.key);
+    }
+  };
+  const copyWebhookUrl = async () => {
+    if (!webhookUrl) return;
+    try {
+      await navigator.clipboard.writeText(webhookUrl);
+      setCopiedWebhookUrl(true);
+      setTimeout(() => setCopiedWebhookUrl(false), 2000);
+    } catch {
+      window.prompt("Copy this webhook URL:", webhookUrl);
     }
   };
 
@@ -2401,15 +2391,8 @@ export default function SimpleCRM() {
         <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
           {page === "contacts" && (
             <>
-              <div className="px-4 pt-5 pb-2 flex items-center justify-between">
+              <div className="px-4 pt-5 pb-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Tags</span>
-                <button
-                  onClick={openTagWebhooks}
-                  title="Lead webhooks — post new leads straight into a tag"
-                  className="text-amber-500 hover:text-amber-600"
-                >
-                  <Zap size={15} fill="currentColor" />
-                </button>
               </div>
               <nav className="flex-1 pb-4">
                 <button
@@ -3091,6 +3074,146 @@ export default function SimpleCRM() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Bulk SMS */}
+        {page === "bulk-sms" && (
+          <div className="flex flex-1 overflow-hidden">
+            {/* Contact picker */}
+            <div className="flex-1 flex flex-col overflow-hidden border-r border-gray-200">
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <h1 className="text-xl font-bold">Bulk SMS</h1>
+                  <div className="text-sm text-gray-400 mt-0.5">
+                    {bulkSmsSelectedIds.length} selected
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <select
+                    value={bulkSmsTag}
+                    onChange={(e) => setBulkSmsTag(e.target.value)}
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    <option value="">All tags</option>
+                    {contactTagNames.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="relative">
+                    <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-300" />
+                    <input
+                      value={bulkSmsSearch}
+                      onChange={(e) => setBulkSmsSearch(e.target.value)}
+                      placeholder="Search name or phone"
+                      className="border border-gray-200 rounded-lg pl-8 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-48"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-6 py-2.5 border-b border-gray-100 flex items-center justify-between text-xs">
+                <label className="flex items-center gap-2 text-gray-500 cursor-pointer">
+                  <input type="checkbox" checked={allBulkSmsFilteredSelected} onChange={toggleSelectAllBulkSmsFiltered} />
+                  Select all {bulkSmsFiltered.length} matching contact{bulkSmsFiltered.length === 1 ? "" : "s"}
+                </label>
+                {bulkSmsSelectedIds.length > 0 && (
+                  <button
+                    onClick={() => setBulkSmsSelectedIds([])}
+                    className="text-gray-400 hover:text-gray-700 font-medium"
+                  >
+                    Clear selection
+                  </button>
+                )}
+              </div>
+
+              <div className="flex-1 overflow-y-auto">
+                {bulkSmsVisible.length === 0 ? (
+                  <div className="text-sm text-gray-400 text-center py-12">
+                    No contacts with a phone number match this filter.
+                  </div>
+                ) : (
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {bulkSmsVisible.map((c) => (
+                        <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50/60">
+                          <td className="pl-6 pr-2 py-2 w-8">
+                            <input
+                              type="checkbox"
+                              checked={bulkSmsSelectedIds.includes(c.id)}
+                              onChange={() => toggleBulkSmsContact(c.id)}
+                            />
+                          </td>
+                          <td className="px-2 py-2 font-medium">{c.name}</td>
+                          <td className="px-2 py-2 text-gray-500">{c.phone}</td>
+                          <td className="px-2 py-2">
+                            {c.tag ? (
+                              <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(c.tag)}`}>
+                                {c.tag}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-300">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {bulkSmsFiltered.length > BULK_SMS_DISPLAY_LIMIT && (
+                  <div className="text-xs text-gray-400 text-center py-3">
+                    Showing first {BULK_SMS_DISPLAY_LIMIT} of {bulkSmsFiltered.length} — narrow your search or tag
+                    to see more ("Select all" still selects every match, not just what's shown).
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Compose */}
+            <div className="w-96 flex flex-col shrink-0">
+              <div className="px-6 py-4 border-b border-gray-100">
+                <span className="font-semibold">Message</span>
+              </div>
+              <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-3">
+                <textarea
+                  value={bulkSmsMessage}
+                  onChange={(e) => setBulkSmsMessage(e.target.value)}
+                  placeholder="Type the message to send…"
+                  rows={8}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 resize-none"
+                />
+                <div className="text-xs text-gray-400">{bulkSmsMessage.length} characters</div>
+
+                {bulkSmsResult && (
+                  <div className="border border-gray-200 rounded-lg p-3 text-xs space-y-1">
+                    <div className="font-medium text-gray-700">
+                      Sent to {bulkSmsResult.sent} of {bulkSmsResult.total} contact
+                      {bulkSmsResult.total === 1 ? "" : "s"}
+                    </div>
+                    {bulkSmsResult.skipped > 0 && (
+                      <div className="text-gray-400">{bulkSmsResult.skipped} skipped (no phone number)</div>
+                    )}
+                    {bulkSmsResult.failed?.length > 0 && (
+                      <div className="text-red-600">
+                        {bulkSmsResult.failed.length} failed: {bulkSmsResult.failed.map((f) => f.name).join(", ")}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="px-6 py-4 border-t border-gray-100">
+                <button
+                  onClick={handleSendBulkSms}
+                  disabled={bulkSmsSending || !bulkSmsMessage.trim() || !bulkSmsSelectedIds.length}
+                  className="w-full flex items-center justify-center gap-2 bg-gray-900 text-white text-sm px-4 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {bulkSmsSending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                  Send to {bulkSmsSelectedIds.length} contact{bulkSmsSelectedIds.length === 1 ? "" : "s"}
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -4466,111 +4589,100 @@ export default function SimpleCRM() {
 
             <div className="px-8 pb-10 max-w-2xl">
               <div className="border-t border-gray-100 pt-8">
-                <h2 className="text-base font-bold">API keys</h2>
+                <h2 className="text-base font-bold">API key</h2>
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
-                  Let a script or agent read and write this CRM's data without a browser login — e.g. to run a
-                  bulk lead import. A key works exactly like being logged in, so treat it like a password:
-                  anyone with it has full access to this shared CRM.
+                  One key controls everything — a script or agent uses it to read and write this CRM's data
+                  without a browser login (e.g. to run a bulk lead import), and it's also the token that
+                  authenticates the lead webhook below. It works exactly like being logged in, so treat it like
+                  a password: anyone with it has full access to this shared CRM.
                 </p>
 
-                {revealedKey && (
-                  <div className="mt-4 border border-amber-200 bg-amber-50 rounded-xl p-4">
-                    <div className="text-sm font-semibold text-amber-800">
-                      "{revealedKey.label}" created — copy this now
+                {apiKeyLoading ? (
+                  <div className="mt-5 flex items-center justify-center py-8 text-gray-400">
+                    <Loader2 size={18} className="animate-spin" />
+                  </div>
+                ) : !apiKey ? (
+                  <div className="mt-5 border border-gray-200 rounded-xl p-5 text-center">
+                    <p className="text-sm text-gray-500 mb-3">No API key yet.</p>
+                    <button
+                      onClick={handleGenerateApiKey}
+                      disabled={generatingKey}
+                      className="inline-flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                    >
+                      {generatingKey && <Loader2 size={14} className="animate-spin" />}
+                      Generate key
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-5 space-y-4">
+                    <div className="border border-gray-200 rounded-xl p-4">
+                      <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                        API key / token
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          readOnly
+                          value={apiKey.key}
+                          onFocus={(e) => e.target.select()}
+                          className="flex-1 min-w-0 border border-gray-200 rounded-md px-2.5 py-2 text-xs text-gray-600 bg-gray-50 outline-none font-mono"
+                        />
+                        <button
+                          onClick={copyApiKeyValue}
+                          title="Copy API key"
+                          className="shrink-0 flex items-center gap-1 text-xs font-medium px-2.5 py-2 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                        >
+                          <Copy size={12} />
+                          {copiedApiKey ? "Copied" : "Copy"}
+                        </button>
+                        <button
+                          onClick={handleGenerateApiKey}
+                          title="Regenerate key"
+                          className="shrink-0 flex items-center text-gray-400 hover:text-gray-700 p-2 rounded-md border border-gray-200 hover:bg-gray-50"
+                        >
+                          <RefreshCw size={12} />
+                        </button>
+                        <button
+                          onClick={handleDeleteApiKey}
+                          title="Revoke key"
+                          className="shrink-0 flex items-center text-gray-300 hover:text-red-500 p-2 rounded-md border border-gray-200 hover:bg-red-50"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                      <div className="text-xs text-gray-400 mt-2">
+                        Created {apiKey.createdAt ? new Date(apiKey.createdAt).toLocaleDateString() : "—"}
+                        {apiKey.createdByName ? ` by ${apiKey.createdByName}` : ""} · Last used{" "}
+                        {apiKey.lastUsedAt ? new Date(apiKey.lastUsedAt).toLocaleString() : "never"}
+                      </div>
                     </div>
-                    <div className="text-xs text-amber-700 mt-0.5 mb-2.5">
-                      This is the only time the full key is shown. If you lose it, revoke it and create a new one.
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <code className="flex-1 bg-white border border-amber-200 rounded-lg px-3 py-2 text-xs font-mono overflow-x-auto whitespace-nowrap">
-                        {revealedKey.key}
-                      </code>
-                      <button
-                        onClick={() => navigator.clipboard?.writeText(revealedKey.key)}
-                        className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-2 rounded-lg font-medium"
-                      >
-                        Copy
-                      </button>
-                      <button
-                        onClick={() => setRevealedKey(null)}
-                        className="shrink-0 text-amber-700 hover:text-amber-900 text-xs px-2 py-2 font-medium"
-                      >
-                        Done
-                      </button>
+
+                    <div className="border border-gray-200 rounded-xl p-4">
+                      <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1.5">
+                        Lead webhook URL{" "}
+                        <span className="normal-case text-gray-300 font-normal">
+                          — post a new lead here from Zapier/Make/GoHighLevel/etc, with a "tag" field set to
+                          which Contacts tab it should land on
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          readOnly
+                          value={webhookUrl}
+                          onFocus={(e) => e.target.select()}
+                          className="flex-1 min-w-0 border border-gray-200 rounded-md px-2.5 py-2 text-xs text-gray-600 bg-gray-50 outline-none font-mono"
+                        />
+                        <button
+                          onClick={copyWebhookUrl}
+                          title="Copy webhook URL"
+                          className="shrink-0 flex items-center gap-1 text-xs font-medium px-2.5 py-2 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                        >
+                          <Copy size={12} />
+                          {copiedWebhookUrl ? "Copied" : "Copy"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
-
-                <form onSubmit={handleCreateApiKey} className="flex items-end gap-2 mt-4">
-                  <div className="flex-1 max-w-xs">
-                    <label className="text-xs font-medium block mb-1.5 text-gray-500">Label</label>
-                    <input
-                      value={newKeyLabel}
-                      onChange={(e) => setNewKeyLabel(e.target.value)}
-                      placeholder="e.g. Lead import agent"
-                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={creatingKey || !newKeyLabel.trim()}
-                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {creatingKey && <Loader2 size={14} className="animate-spin" />}
-                    Create key
-                  </button>
-                </form>
-
-                <div className="mt-5 border border-gray-200 rounded-xl overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
-                        <th className="px-4 py-2.5 font-medium">Label</th>
-                        <th className="px-4 py-2.5 font-medium">Key</th>
-                        <th className="px-4 py-2.5 font-medium">Created</th>
-                        <th className="px-4 py-2.5 font-medium">Last used</th>
-                        <th className="px-4 py-2.5"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {apiKeys.map((k) => (
-                        <tr key={k.id} className="border-b border-gray-50 last:border-0">
-                          <td className="px-4 py-3 font-medium">{k.label}</td>
-                          <td className="px-4 py-3 font-mono text-xs text-gray-500">{k.keyPrefix}…</td>
-                          <td className="px-4 py-3 text-gray-500">
-                            {k.createdAt ? new Date(k.createdAt).toLocaleDateString() : "—"}
-                          </td>
-                          <td className="px-4 py-3 text-gray-500">
-                            {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : "Never"}
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <button
-                              onClick={() => handleDeleteApiKey(k.id)}
-                              className="text-gray-300 hover:text-red-500"
-                              title="Revoke key"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                      {!apiKeysLoading && apiKeys.length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
-                            No API keys yet
-                          </td>
-                        </tr>
-                      )}
-                      {apiKeysLoading && (
-                        <tr>
-                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
-                            <Loader2 size={14} className="animate-spin inline" />
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
 
                 <div className="mt-5">
                   <div className="text-xs font-medium text-gray-500 mb-1.5">How an agent uses it</div>
@@ -4898,138 +5010,6 @@ export default function SimpleCRM() {
                   Add column
                 </button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Lead webhooks — one URL per tag, see api/lead-webhook.js */}
-      {showTagWebhooks && (
-        <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
-          onClick={() => setShowTagWebhooks(false)}
-        >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-              <div>
-                <h2 className="text-lg font-bold">Lead webhooks</h2>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  One URL per tag — post a new lead to it and it lands straight on that tag's tab in Contacts.
-                </p>
-              </div>
-              <button onClick={() => setShowTagWebhooks(false)} className="text-gray-400 hover:text-gray-700">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="px-6 py-4 max-h-[55vh] overflow-y-auto">
-              {loadingTagWebhooks ? (
-                <div className="flex items-center justify-center py-10 text-gray-400">
-                  <Loader2 size={18} className="animate-spin" />
-                </div>
-              ) : tagWebhooks.length === 0 ? (
-                <div className="text-sm text-gray-400 py-6 text-center">
-                  No webhooks yet — create one for a tag below.
-                </div>
-              ) : (
-                <div className="space-y-2.5">
-                  {tagWebhooks.map((row) => (
-                    <div key={row.tag} className="border border-gray-200 rounded-lg p-3">
-                      <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(row.tag)}`}>
-                          {row.tag}
-                        </span>
-                        <button
-                          onClick={() => deleteTagWebhookRow(row.tag)}
-                          title="Delete this webhook"
-                          className="text-gray-300 hover:text-red-500"
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                      <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1">URL</div>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          readOnly
-                          value={webhookUrlForTag(row.token)}
-                          onFocus={(e) => e.target.select()}
-                          className="flex-1 min-w-0 border border-gray-200 rounded-md px-2 py-1.5 text-[11px] text-gray-500 bg-gray-50 outline-none font-mono"
-                        />
-                        <button
-                          onClick={() => copyTagWebhookUrl(row)}
-                          title="Copy webhook URL"
-                          className="shrink-0 flex items-center gap-1 text-[11px] font-medium px-2 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
-                        >
-                          <Copy size={12} />
-                          {copiedWebhookTag === row.tag ? "Copied" : "Copy"}
-                        </button>
-                        <button
-                          onClick={() => regenerateTagWebhook(row.tag)}
-                          title="Regenerate webhook URL (and token)"
-                          className="shrink-0 flex items-center text-gray-400 hover:text-gray-700 p-1.5 rounded-md border border-gray-200 hover:bg-gray-50"
-                        >
-                          <RefreshCw size={12} />
-                        </button>
-                      </div>
-                      <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-1 mt-2">
-                        Token{" "}
-                        <span className="normal-case text-gray-300 font-normal">
-                          — for platforms that want it separately from the URL
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          readOnly
-                          value={row.token}
-                          onFocus={(e) => e.target.select()}
-                          className="flex-1 min-w-0 border border-gray-200 rounded-md px-2 py-1.5 text-[11px] text-gray-500 bg-gray-50 outline-none font-mono"
-                        />
-                        <button
-                          onClick={() => copyTagToken(row)}
-                          title="Copy token"
-                          className="shrink-0 flex items-center gap-1 text-[11px] font-medium px-2 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
-                        >
-                          <Copy size={12} />
-                          {copiedTokenTag === row.tag ? "Copied" : "Copy"}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                createTagWebhook(newWebhookTag);
-              }}
-              className="px-6 py-4 border-t border-gray-100 flex items-end gap-2"
-            >
-              <div className="flex-1">
-                <label className="text-xs font-medium block mb-1.5 text-gray-500">
-                  Create a webhook for a tag
-                </label>
-                <input
-                  list="tag-webhook-existing-tags"
-                  value={newWebhookTag}
-                  onChange={(e) => setNewWebhookTag(e.target.value)}
-                  placeholder="Pick an existing tag, or type a new one"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
-                />
-                <datalist id="tag-webhook-existing-tags">
-                  {contactTagNames.map((t) => (
-                    <option key={t} value={t} />
-                  ))}
-                </datalist>
-              </div>
-              <button
-                type="submit"
-                disabled={!newWebhookTag.trim()}
-                className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Create
-              </button>
             </form>
           </div>
         </div>

@@ -1,11 +1,15 @@
-// Public endpoint (no session cookie or API key) — reachable at
-// /api/lead-webhook?token=<per-tag token>. The token in the URL *is*
-// the auth: paste this one URL into whatever a lead comes from (a
-// form's webhook, Zapier/Make, GoHighLevel, Meta Lead Ads via
-// Zapier, …) and every new lead it posts lands in Contacts already
-// on that tag's tab — see PUBLIC_PATHS in server/index.js, and the
-// "Webhooks" panel on the Contacts sidebar for each tag's URL.
-import { ensureSchema, findTagByWebhookToken, importContactsBulk } from "../server/db.js";
+// Public endpoint (no session cookie required) — reachable at
+// /api/lead-webhook?token=<the CRM's one API key>. The token in the
+// URL is the same single API key shown in Settings (see
+// api/api-keys.js) — there's no per-tag token anymore, so which
+// Contacts tab a lead lands on comes from a "tag" (or "client") field
+// in the posted data instead of from which URL was used. Paste this
+// one URL into whatever a lead comes from (a form's webhook, Zapier/
+// Make, GoHighLevel, Meta Lead Ads via Zapier, …) and map its tag
+// field to whichever Contacts tag it should land on — see
+// PUBLIC_PATHS in server/index.js.
+import { ensureSchema, findApiKeyByHash, touchApiKeyLastUsed, importContactsBulk } from "../server/db.js";
+import { hashApiKey } from "../server/auth.js";
 
 // Lead-gen platforms don't agree on field names, so accept the common
 // spellings for each core field rather than forcing every integrator
@@ -29,6 +33,7 @@ const OTHER_RECOGNIZED_KEYS = [
   "token", // the auth token itself, present alongside lead data on a GET request
 ];
 const RECOGNIZED_KEYS = new Set(Object.values(CORE_ALIASES).flat().concat(OTHER_RECOGNIZED_KEYS));
+const FALLBACK_TAG = "Uncategorized";
 
 function pick(body, keys) {
   for (const key of keys) {
@@ -49,13 +54,17 @@ function nameFromBody(body) {
 // Everything not recognized as a core field becomes a custom Contacts
 // column, same as a bulk sheet import — a lead source can ask
 // whatever extra questions it wants and they still show up on the lead.
-function leadFromBody(body, tag) {
+function leadFromBody(body) {
   const fields = {};
   for (const [key, value] of Object.entries(body || {})) {
     if (RECOGNIZED_KEYS.has(key)) continue;
     if (value === undefined || value === null || String(value).trim() === "") continue;
     fields[key] = value;
   }
+  // Which Contacts tab this lands on — one shared webhook URL now
+  // covers every tag, so the tag has to come from the posted data
+  // itself (map it to whichever field the source platform sends).
+  const tag = pick(body, ["tag", "client"]) || FALLBACK_TAG;
   return {
     name: nameFromBody(body) || "Unknown",
     email: pick(body, CORE_ALIASES.email),
@@ -64,9 +73,6 @@ function leadFromBody(body, tag) {
     status: (body?.status && String(body.status).trim()) || "New Lead",
     lastContact: "Today",
     leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
-    // Which Contacts tab this lands on — fixed by the token, never
-    // taken from the request body, so one webhook can't post leads
-    // onto a different tag's tab.
     tag,
     client: tag,
     fields,
@@ -83,8 +89,9 @@ export default async function handler(req, res) {
 
     const token = req.query?.token;
     if (!token) return res.status(401).json({ error: "Missing ?token= in the webhook URL" });
-    const webhook = await findTagByWebhookToken(String(token));
-    if (!webhook) return res.status(401).json({ error: "Invalid or revoked webhook token" });
+    const keyRow = await findApiKeyByHash(hashApiKey(String(token)));
+    if (!keyRow) return res.status(401).json({ error: "Invalid or revoked API key" });
+    touchApiKeyLastUsed(keyRow.id).catch(() => {});
 
     // GET has no body — some simpler lead-gen platforms (and a quick
     // browser/curl test) can only fire a plain GET with the lead's
@@ -99,9 +106,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No phone number found in the request body" });
     }
 
-    const records = withPhone.map((b) => leadFromBody(b, webhook.tag));
+    const records = withPhone.map((b) => leadFromBody(b));
     const result = await importContactsBulk(records);
-    return res.status(200).json({ ok: true, tag: webhook.tag, ...result, skipped });
+    return res.status(200).json({ ok: true, ...result, skipped });
   } catch (err) {
     console.error("[api/lead-webhook]", err);
     return res.status(500).json({ error: err.message || "Webhook failed" });

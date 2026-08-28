@@ -20,7 +20,16 @@ import { findApiKeyByHash, touchApiKeyLastUsed, getUserById } from "./db.js";
 // client       — only Conversation/Contacts/Reports, and only leads
 //                whose tag is in that user's allowedTags.
 export const ROLES = ["owner", "super_admin", "admin", "client"];
-const FULL_ACCESS_TABS = ["conversation", "contacts", "powerdialler", "log", "clients", "reports", "settings"];
+const FULL_ACCESS_TABS = [
+  "conversation",
+  "contacts",
+  "powerdialler",
+  "bulk-sms",
+  "log",
+  "clients",
+  "reports",
+  "settings",
+];
 const CLIENT_TABS = ["conversation", "contacts", "reports"];
 
 export function tabsForRole(role) {
@@ -226,10 +235,12 @@ async function getUserFromApiKey(req) {
   touchApiKeyLastUsed(row.id).catch(() => {});
   // A key is only ever mintable by an already-logged-in user (see
   // api/api-keys.js), so it's treated as full access, same as admin —
-  // there's no "client-role key" concept.
+  // there's no "client-role key" concept. There's only ever the one
+  // key now (see server/db.js's getApiKey/regenerateApiKey), so
+  // there's no per-key label worth surfacing here anymore.
   return {
     id: `api-key:${row.id}`,
-    name: `API key (${row.label})`,
+    name: "API key",
     email: null,
     isApiKey: true,
     role: "admin",

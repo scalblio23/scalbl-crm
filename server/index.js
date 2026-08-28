@@ -13,11 +13,6 @@ import {
   createClient,
   updateClient,
   deleteClients,
-  getTagWebhooks,
-  ensureTagWebhookToken,
-  regenerateTagWebhookToken,
-  deleteTagWebhook,
-  findTagByWebhookToken,
   getClientColumns,
   createClientColumn,
   deleteClientColumn,
@@ -26,6 +21,7 @@ import {
   importContactDataBatch,
   getContacts,
   getContactById,
+  getContactsByIds,
   createContact,
   updateContact,
   deleteContacts,
@@ -39,6 +35,7 @@ import {
   logMessage,
   findContactByPhone,
   deleteConversations,
+  mapWithConcurrency,
   getDialLists,
   createDialList,
   addLeadsToDialList,
@@ -50,9 +47,11 @@ import {
   addCallLogEntry,
   getUserByEmail,
   claimUserPassword,
-  createApiKey,
-  getApiKeys,
+  getApiKey,
+  regenerateApiKey,
   deleteApiKey,
+  findApiKeyByHash,
+  touchApiKeyLastUsed,
   getUsers,
   getUserById,
   inviteUser,
@@ -100,8 +99,9 @@ const PUBLIC_PATHS = new Set([
   "/api/auth-set-password",
   "/api/auth-logout",
   "/api/auth-me",
-  // Auth here is the per-client token in the URL itself (?token=),
-  // checked inside the route below — see api/lead-webhook.js.
+  // Auth here is the CRM's single API key, passed in the URL itself
+  // (?token=) and checked inside the route below — see
+  // api/lead-webhook.js.
   "/api/lead-webhook",
 ]);
 
@@ -127,7 +127,7 @@ app.use(
     "/api/contacts-import",
     "/api/contacts-bulk-import",
     "/api/dial-lists",
-    "/api/tag-webhooks",
+    "/api/sms-bulk-send",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -229,17 +229,19 @@ app.post("/api/auth-logout", (req, res) => {
   res.status(204).end();
 });
 
-// ---------- API keys (programmatic/agent access) ----------
-// Session-only on purpose — a key should never be able to mint more
-// keys or see/revoke anyone else's, so this checks getSessionUser
-// directly rather than the global middleware's requireAuth (which
-// also accepts a key). Also blocked for the client role — a key is
-// equivalent to full admin access, so letting a tag-scoped client
-// mint one would be a privilege escalation around their own scoping.
+// ---------- API key (single global credential) ----------
+// Session-only on purpose — a key should never be able to regenerate
+// itself, so this checks getSessionUser directly rather than the
+// global middleware's requireAuth (which also accepts a key). Also
+// blocked for the client role — a key is equivalent to full admin
+// access, so letting a tag-scoped client mint one would be a
+// privilege escalation around their own scoping. There's only ever
+// at most one key (see server/db.js) — it doubles as the token on
+// /api/lead-webhook, replacing the old per-tag webhook tokens.
 async function requireKeyManager(req, res) {
   const user = await getSessionUser(req);
   if (!user) {
-    res.status(401).json({ error: "Log in to manage API keys." });
+    res.status(401).json({ error: "Log in to manage the API key." });
     return null;
   }
   if (user.role === "client") {
@@ -253,7 +255,7 @@ app.get(
   dbRoute(async (req, res) => {
     const user = await requireKeyManager(req, res);
     if (!user) return;
-    res.json(await getApiKeys());
+    res.json(await getApiKey());
   })
 );
 app.post(
@@ -261,16 +263,14 @@ app.post(
   dbRoute(async (req, res) => {
     const user = await requireKeyManager(req, res);
     if (!user) return;
-    const label = String(req.body?.label || "").trim();
-    if (!label) return res.status(400).json({ error: "Give the key a label (e.g. what agent it's for)." });
     const rawKey = generateApiKey();
-    const row = await createApiKey({
-      label,
+    const row = await regenerateApiKey({
+      key: rawKey,
       keyHash: hashApiKey(rawKey),
       keyPrefix: rawKey.slice(0, 11),
       createdBy: user.id,
     });
-    res.status(201).json({ id: row.id, label: row.label, key: rawKey, keyPrefix: row.key_prefix, createdAt: row.created_at });
+    res.status(201).json(row);
   })
 );
 app.delete(
@@ -278,9 +278,7 @@ app.delete(
   dbRoute(async (req, res) => {
     const user = await requireKeyManager(req, res);
     if (!user) return;
-    const id = req.query.id;
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    await deleteApiKey(id);
+    await deleteApiKey();
     res.status(204).end();
   })
 );
@@ -448,6 +446,45 @@ app.post(
   })
 );
 
+// Sends the same text to a batch of contacts (Bulk SMS tab — selected
+// individually or by tag) via the one wired-in Twilio number/
+// messaging service, logging each as an outbound message same as a
+// single send. Mirrors api/sms-bulk-send.js.
+const BULK_SMS_CONCURRENCY = 5;
+app.post(
+  "/api/sms-bulk-send",
+  dbRoute(async (req, res) => {
+    const missing = missingTwilioEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const text = String(req.body?.text || "").trim();
+    const ids = Array.isArray(req.body?.contactIds)
+      ? Array.from(new Set(req.body.contactIds.map(Number).filter(Boolean)))
+      : [];
+    if (!text) return res.status(400).json({ error: "Missing message text" });
+    if (!ids.length) return res.status(400).json({ error: "Select at least one contact" });
+
+    const contacts = await getContactsByIds(ids);
+    const withPhone = contacts.filter((c) => c.phone);
+    const skipped = contacts.length - withPhone.length;
+    const timeLabel = new Date().toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
+
+    const results = await mapWithConcurrency(withPhone, BULK_SMS_CONCURRENCY, async (c) => {
+      try {
+        await sendSms({ to: c.phone, body: text });
+        await logMessage({ leadId: c.id, name: c.name, text, time: timeLabel, type: "text", outgoing: true });
+        return { id: c.id, name: c.name, ok: true };
+      } catch (err) {
+        return { id: c.id, name: c.name, ok: false, error: err.message || "Send failed" };
+      }
+    });
+
+    const failed = results.filter((r) => !r.ok);
+    res.status(200).json({ total: ids.length, sent: results.length - failed.length, failed, skipped });
+  })
+);
+
 // Twilio's "A message comes in" webhook — set this as the number's
 // Messaging webhook (POST http://<ngrok-url>/api/sms-inbound in dev).
 // Deliberately NOT wrapped in dbRoute: Twilio gives up on this
@@ -479,10 +516,11 @@ app.post("/api/sms-inbound", async (req, res) => {
 });
 
 // ---------- Lead webhook ----------
-// Public — auth is the per-tag token in ?token=, not the session
-// cookie (see PUBLIC_PATHS above and api/lead-webhook.js, which this
-// mirrors). One URL per tag, pasted into whatever a lead comes from,
-// lands new leads in Contacts already on that tag's tab.
+// Public — auth is the CRM's single API key in ?token=, not the
+// session cookie (see PUBLIC_PATHS above and api/lead-webhook.js,
+// which this mirrors). One shared URL for every source; which
+// Contacts tag a lead lands on comes from a "tag"/"client" field in
+// the posted data instead of from which URL was used.
 const LEAD_WEBHOOK_CORE_ALIASES = {
   name: ["name", "full_name", "fullName", "fullname"],
   phone: ["phone", "phone_number", "phoneNumber", "mobile", "mobile_number"],
@@ -505,6 +543,7 @@ const LEAD_WEBHOOK_RECOGNIZED_KEYS = new Set(
       "token", // the auth token itself, present alongside lead data on a GET request
     ])
 );
+const LEAD_WEBHOOK_FALLBACK_TAG = "Uncategorized";
 
 function leadWebhookPick(body, keys) {
   for (const key of keys) {
@@ -522,13 +561,14 @@ function leadWebhookName(body) {
   return [first, last].filter(Boolean).join(" ").trim();
 }
 
-function leadWebhookRecordFromBody(body, tag) {
+function leadWebhookRecordFromBody(body) {
   const fields = {};
   for (const [key, value] of Object.entries(body || {})) {
     if (LEAD_WEBHOOK_RECOGNIZED_KEYS.has(key)) continue;
     if (value === undefined || value === null || String(value).trim() === "") continue;
     fields[key] = value;
   }
+  const tag = leadWebhookPick(body, ["tag", "client"]) || LEAD_WEBHOOK_FALLBACK_TAG;
   return {
     name: leadWebhookName(body) || "Unknown",
     email: leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.email),
@@ -537,8 +577,6 @@ function leadWebhookRecordFromBody(body, tag) {
     status: (body?.status && String(body.status).trim()) || "New Lead",
     lastContact: "Today",
     leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
-    // Fixed by the token, never taken from the request body, so one
-    // webhook can't post leads onto a different tag's tab.
     tag,
     client: tag,
     fields,
@@ -550,8 +588,9 @@ async function handleLeadWebhook(req, res) {
     await ensureSchema();
     const token = req.query?.token;
     if (!token) return res.status(401).json({ error: "Missing ?token= in the webhook URL" });
-    const webhook = await findTagByWebhookToken(String(token));
-    if (!webhook) return res.status(401).json({ error: "Invalid or revoked webhook token" });
+    const keyRow = await findApiKeyByHash(hashApiKey(String(token)));
+    if (!keyRow) return res.status(401).json({ error: "Invalid or revoked API key" });
+    touchApiKeyLastUsed(keyRow.id).catch(() => {});
 
     // GET has no body — some simpler lead-gen platforms (and a quick
     // browser/curl test) can only fire a plain GET with the lead's
@@ -563,9 +602,9 @@ async function handleLeadWebhook(req, res) {
     const skipped = payloads.length - withPhone.length;
     if (!withPhone.length) return res.status(400).json({ error: "No phone number found in the request body" });
 
-    const records = withPhone.map((b) => leadWebhookRecordFromBody(b, webhook.tag));
+    const records = withPhone.map((b) => leadWebhookRecordFromBody(b));
     const result = await importContactsBulk(records);
-    res.status(200).json({ ok: true, tag: webhook.tag, ...result, skipped });
+    res.status(200).json({ ok: true, ...result, skipped });
   } catch (err) {
     console.error("[db] /api/lead-webhook", err);
     res.status(500).json({ error: err.message || "Webhook failed" });
@@ -573,38 +612,6 @@ async function handleLeadWebhook(req, res) {
 }
 app.post("/api/lead-webhook", handleLeadWebhook);
 app.get("/api/lead-webhook", handleLeadWebhook);
-
-// Managing the webhooks themselves (list/create/regenerate/delete) —
-// session-only, mirrors api/tag-webhooks.js. Added to the
-// forbidClientRole list below alongside /api/dial-lists etc.
-app.get("/api/tag-webhooks", dbRoute(async (req, res) => res.json(await getTagWebhooks())));
-app.post(
-  "/api/tag-webhooks",
-  dbRoute(async (req, res) => {
-    const tag = String(req.body?.tag || "").trim();
-    if (!tag) return res.status(400).json({ error: "Missing tag" });
-    res.status(201).json(await ensureTagWebhookToken(tag));
-  })
-);
-app.patch(
-  "/api/tag-webhooks",
-  dbRoute(async (req, res) => {
-    const tag = String(req.body?.tag || "").trim();
-    if (!tag) return res.status(400).json({ error: "Missing tag" });
-    const row = await regenerateTagWebhookToken(tag);
-    if (!row) return res.status(404).json({ error: "That tag doesn't have a webhook yet" });
-    res.json(row);
-  })
-);
-app.delete(
-  "/api/tag-webhooks",
-  dbRoute(async (req, res) => {
-    const tag = String(req.query.tag || "").trim();
-    if (!tag) return res.status(400).json({ error: "Missing tag" });
-    await deleteTagWebhook(tag);
-    res.status(204).end();
-  })
-);
 
 // ---------- Database ----------
 
