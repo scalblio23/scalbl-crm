@@ -3366,7 +3366,7 @@ export default function SimpleCRM() {
                         Name {sortIndicator("__name")}
                       </button>
                     </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__phone")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -3374,7 +3374,7 @@ export default function SimpleCRM() {
                         Phone {sortIndicator("__phone")}
                       </button>
                     </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__client")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -3382,7 +3382,7 @@ export default function SimpleCRM() {
                         Client {sortIndicator("__client")}
                       </button>
                     </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__tag")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -3390,7 +3390,7 @@ export default function SimpleCRM() {
                         Tag {sortIndicator("__tag")}
                       </button>
                     </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("stage")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -3398,7 +3398,7 @@ export default function SimpleCRM() {
                         Stage {sortIndicator("stage")}
                       </button>
                     </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__status")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -3406,7 +3406,7 @@ export default function SimpleCRM() {
                         Status {sortIndicator("__status")}
                       </button>
                     </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
+                    <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__lastContact")}
                         className="flex items-center gap-1 hover:text-gray-700"
@@ -3415,7 +3415,7 @@ export default function SimpleCRM() {
                       </button>
                     </th>
                     {visibleContactColumns.map((col) => (
-                      <th key={col.id} className="px-3 py-2 font-medium whitespace-nowrap">
+                      <th key={col.id} className="px-5 py-2 font-medium whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
                           <button
                             onClick={() => toggleContactSort(col.key)}
@@ -3434,7 +3434,7 @@ export default function SimpleCRM() {
                         </div>
                       </th>
                     ))}
-                    <th className="px-3 py-2">
+                    <th className="px-5 py-2">
                       <button
                         onClick={() => setShowAddContactColumn(true)}
                         className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-800 whitespace-nowrap"
@@ -3457,9 +3457,9 @@ export default function SimpleCRM() {
                       </td>
                       <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{c.leadDate || "—"}</td>
                       <td className="px-5 py-2.5 font-medium whitespace-nowrap">{c.name}</td>
-                      <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
-                      <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.client}</td>
-                      <td className="py-2.5 whitespace-nowrap">
+                      <td className="px-5 py-2.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
+                      <td className="px-5 py-2.5 text-gray-600 whitespace-nowrap">{c.client}</td>
+                      <td className="px-5 py-2.5 whitespace-nowrap">
                         {c.tag ? (
                           <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(c.tag)}`}>
                             {c.tag}
@@ -3468,21 +3468,21 @@ export default function SimpleCRM() {
                           <span className="text-gray-300 text-xs">—</span>
                         )}
                       </td>
-                      <td className="py-2.5 whitespace-nowrap">
+                      <td className="px-5 py-2.5 whitespace-nowrap">
                         {stageColumnDef ? (
                           renderContactCell(c, stageColumnDef)
                         ) : (
                           <span className="text-gray-300 text-xs">—</span>
                         )}
                       </td>
-                      <td className="py-2.5 whitespace-nowrap">
+                      <td className="px-5 py-2.5 whitespace-nowrap">
                         <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[c.status]}`}>
                           {c.status}
                         </span>
                       </td>
-                      <td className="py-2.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
+                      <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
                       {visibleContactColumns.map((col) => (
-                        <td key={col.id} className="px-3 py-2.5 min-w-[130px] max-w-[220px]">
+                        <td key={col.id} className="px-5 py-2.5 min-w-[130px] max-w-[220px]">
                           {renderContactCell(c, col)}
                         </td>
                       ))}
