@@ -13,6 +13,7 @@ import {
   generateMultilineConferenceName,
   placeConferenceLeg,
   publicBaseUrl,
+  MULTILINE_RING_SECONDS,
 } from "../server/twilioCore.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
 
@@ -87,7 +88,9 @@ export default async function handler(req, res) {
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
 
-    return res.status(201).json({ batchId: batch.id, conferenceName, candidates });
+    return res
+      .status(201)
+      .json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
   } catch (err) {
     console.error("[api/multiline-start]", err);
     return res.status(500).json({ error: err.message || "Could not start multi-line dialling" });

@@ -112,6 +112,15 @@ ngrok URL used for the Voice webhook above. Without it, starting a multi-line
 dial fails with a clear error rather than silently placing calls Twilio can't
 call back.
 
+Each line rings for `MULTILINE_RING_SECONDS` (25s, in `server/twilioCore.js`)
+before Twilio gives up on it — well short of Twilio's own 60s default, so an
+unanswered line doesn't sit ringing for a full minute. The tab shows a live
+"gives up in Ns" countdown while it waits. If Twilio's status callback for a
+line never makes it back here at all (most likely a `PUBLIC_URL` that isn't
+actually reachable), the frontend also gives up on its own a few seconds
+after that window — so a broken callback shows up as a clear "gave up
+waiting" error instead of the dial just hanging with hold music forever.
+
 There's no answering-machine detection and no participant muting — every
 leg that connects is immediately audible, so two lines answering within the
 same instant can briefly cross-talk before the loser is dropped (usually well

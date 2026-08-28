@@ -173,6 +173,12 @@ export function buildConferenceTwiml({ conferenceName, isRep }) {
 // TwiML); `statusCallback` is hit on every status transition
 // (ringing/in-progress/completed/…) so the batch's progress — and
 // which leg wins — can be tracked server-side.
+// How long a lead's line is allowed to ring before Twilio gives up on
+// it and reports "no-answer" — well short of Twilio's own 60s
+// default. A power dialler moves on fast; nobody's waiting a full
+// minute to find out a line went unanswered.
+export const MULTILINE_RING_SECONDS = 25;
+
 export async function placeConferenceLeg({ to, from, url, statusCallback }, env = process.env) {
   const client = restClient(env);
   const call = await client.calls.create({
@@ -182,6 +188,7 @@ export async function placeConferenceLeg({ to, from, url, statusCallback }, env 
     statusCallback,
     statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
     statusCallbackMethod: "POST",
+    timeout: MULTILINE_RING_SECONDS,
   });
   return { sid: call.sid, status: call.status };
 }

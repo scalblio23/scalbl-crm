@@ -1771,7 +1771,7 @@ export default function SimpleCRM() {
   // itself (session.lines) so it can't change mid-session. See
   // startMultilineCall/dialNextInQueue below for how this plugs into
   // the same session/queue engine Powerdialler uses.
-  const [multiLines, setMultiLines] = useState(2);
+  const [multiLines, setMultiLines] = useState(4);
   const [multilineBatch, setMultilineBatch] = useState(null); // { id, candidates: [{leadId,name,phone,status}] } | null
   const multilineBatchIdRef = useRef(null); // current batch id, for cancelling on an early hang-up
   const multilineWinnerRef = useRef(null); // resolved winning lead, read once the rep's own leg disconnects
@@ -2396,7 +2396,15 @@ export default function SimpleCRM() {
     api.post("/api/multiline-cancel", { batchId }).catch(() => {});
   };
 
-  const startMultilinePolling = (batchId) => {
+  // `giveUpAt` is a client-side backstop, independent of Twilio's own
+  // per-leg ring timeout and its status-callback webhooks actually
+  // reaching this server — if either of those silently fails to
+  // report back (a bad PUBLIC_URL, a dropped webhook, …), the batch
+  // would otherwise sit in "dialling" forever with no visible sign
+  // anything had gone wrong. A little past when every line should've
+  // been given up on Twilio's side (see MULTILINE_RING_SECONDS
+  // server-side), give up here too rather than ring indefinitely.
+  const startMultilinePolling = (batchId, giveUpAt) => {
     stopMultilinePolling();
     multilinePollRef.current = setInterval(async () => {
       let data;
@@ -2429,12 +2437,17 @@ export default function SimpleCRM() {
         if (data.winner.fromNumber) setActiveCallerId(data.winner.fromNumber);
         setCallStatus("in-progress");
         setMultilineBatch(null);
-      } else if (data.status === "no-answer") {
+      } else if (data.status === "no-answer" || Date.now() >= giveUpAt) {
         stopMultilinePolling();
-        setCallError("No answer on any line.");
+        setCallError(
+          data.status === "no-answer"
+            ? "No answer on any line."
+            : "No answer on any line (gave up waiting — Twilio didn't report back in time)."
+        );
         // Ends the rep's own conference leg — same 'disconnect' path
         // as hanging up any other call, just with no winner to log.
         hangUp();
+        if (batchId) cancelMultilineBatch(batchId); // best-effort — drop any leg still stuck ringing
       }
     }, 1200);
   };
@@ -2462,7 +2475,14 @@ export default function SimpleCRM() {
       const started = await api.post("/api/multiline-start", { leadIds: leadsToTry.map((l) => l.id) });
       batchId = started.batchId;
       multilineBatchIdRef.current = batchId;
-      setMultilineBatch({ id: batchId, candidates: started.candidates.map((c) => ({ ...c, status: "placed" })) });
+      const ringSeconds = started.ringSeconds || 25;
+      const startedAt = Date.now();
+      setMultilineBatch({
+        id: batchId,
+        candidates: started.candidates.map((c) => ({ ...c, status: "placed" })),
+        startedAt,
+        ringSeconds,
+      });
 
       const { call, callerId } = await joinConference(started.conferenceName);
       activeCallRef.current = call;
@@ -2503,7 +2523,11 @@ export default function SimpleCRM() {
       call.on("cancel", () => onCallEnded());
       call.on("error", (err) => onCallEnded(err));
 
-      startMultilinePolling(batchId);
+      // A few seconds of slack on top of Twilio's own per-leg ring
+      // timeout, so a normal "genuinely nobody answered" resolution
+      // (which arrives via the status callback around ringSeconds)
+      // isn't raced by this backstop firing first.
+      startMultilinePolling(batchId, startedAt + ringSeconds * 1000 + 8000);
     } catch (err) {
       setCallError(err.message || "Could not start multi-line dialling.");
       setCalling(false);
@@ -4412,12 +4436,28 @@ export default function SimpleCRM() {
                         Dialling {multilineBatch.candidates.length} lines at once — first to answer gets connected
                       </div>
                     </div>
-                    <button
-                      onClick={endCall}
-                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
-                    >
-                      <PhoneOff size={15} /> Cancel
-                    </button>
+                    <div className="flex items-center gap-3">
+                      {(() => {
+                        const elapsed = Math.max(
+                          0,
+                          Math.floor((Date.now() - multilineBatch.startedAt) / 1000)
+                        );
+                        const remaining = Math.max(0, multilineBatch.ringSeconds - elapsed);
+                        return (
+                          <span className="text-xs text-blue-700/70 font-medium tabular-nums shrink-0">
+                            {remaining > 0
+                              ? `Ringing… gives up in ${remaining}s`
+                              : "Wrapping up — waiting on the last line…"}
+                          </span>
+                        );
+                      })()}
+                      <button
+                        onClick={endCall}
+                        className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
+                      >
+                        <PhoneOff size={15} /> Cancel
+                      </button>
+                    </div>
                   </div>
                   <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {multilineBatch.candidates.map((c) => (

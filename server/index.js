@@ -16,6 +16,7 @@ import {
   placeConferenceLeg,
   endOrCancelCall,
   publicBaseUrl,
+  MULTILINE_RING_SECONDS,
 } from "./twilioCore.js";
 import {
   isDbConfigured,
@@ -516,7 +517,7 @@ app.post(
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
 
-    res.status(201).json({ batchId: batch.id, conferenceName, candidates });
+    res.status(201).json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
   })
 );
 
