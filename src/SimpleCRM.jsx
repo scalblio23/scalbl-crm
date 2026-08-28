@@ -1715,6 +1715,16 @@ export default function SimpleCRM() {
   const [callStatus, setCallStatus] = useState("idle"); // idle | connecting | in-progress
   const [callError, setCallError] = useState("");
   const [activeCallerId, setActiveCallerId] = useState(""); // which of the rotated Twilio numbers is placing the current call
+  // The number actually being dialled for the live call — usually
+  // just activeLead.phone, but "Call again with a different number"
+  // (below) overrides it, so the hotseat always shows what's really
+  // ringing rather than the contact's stored number.
+  const [activeCallPhone, setActiveCallPhone] = useState("");
+  // The most recent call placed outside a Power Dialler session (no
+  // wrap-up screen forces a stop for those) — kept just long enough to
+  // offer "Call again"/"Call again with a different number" on it too,
+  // cleared the moment another call starts or the rep dismisses it.
+  const [lastAdHocCall, setLastAdHocCall] = useState(null); // { lead, durationMs } | null
   const activeCallRef = useRef(null);
   const callStartRef = useRef(null); // when the current call was placed, for duration
   const callEndedRef = useRef(false); // guards against double-processing one call's end
@@ -2061,20 +2071,28 @@ export default function SimpleCRM() {
 
   // Called whenever a call ends (hung up, disconnected, or failed).
   // Mid-session, this opens the wrap-up screen. A one-off call from
-  // the table has no wrap-up to force, so it's logged directly.
+  // the table has no wrap-up to force, so it's logged directly — but
+  // still remembered (lastAdHocCall) so "Call again"/"Call again with
+  // a different number" can offer an immediate redial on it too.
   const handleCallEnded = (lead, durationMs) => {
     if (!lead) return;
     if (!sessionRef.current) {
       logCallDirect(lead, durationMs);
+      setLastAdHocCall({ lead, durationMs });
       return;
     }
+    // A redial via "Call again" carries the wrap-up screen's in-
+    // progress stage/notes forward (see callLeadAgain) rather than
+    // losing what was already typed — everything else about this
+    // call's outcome still starts fresh.
+    const draft = lead.__wrapUpDraft;
     // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
     setWrapUp({
       lead,
-      customStage: lead.fields?.stage || "",
-      notes: lead.notes || "",
+      customStage: draft ? draft.customStage : lead.fields?.stage || "",
+      notes: draft ? draft.notes : lead.notes || "",
       durationMs,
       secondsLeft: WRAP_UP_SECONDS,
     });
@@ -2180,6 +2198,8 @@ export default function SimpleCRM() {
     setCalling(true);
     setCallStatus("connecting");
     setActiveCallerId("");
+    setActiveCallPhone(lead.phone);
+    setLastAdHocCall(null); // starting any call retires the previous one's redial card
     callEndedRef.current = false;
     try {
       const { call, callerId } = await placeCall(lead.phone);
@@ -2237,6 +2257,31 @@ export default function SimpleCRM() {
     // startCall) does the actual state reset, logging, and wrap-up, so
     // it only ever happens once no matter how the call ends.
     hangUp();
+  };
+
+  // Double-dialling — offered on the wrap-up screen (mid-session) and
+  // on the "call ended" card for a one-off call alike. Dismisses
+  // whichever post-call screen triggered it and immediately redials
+  // the same lead, same number, without advancing a session's queue
+  // or logging any outcome yet — that only happens once the *next*
+  // call's wrap-up actually finishes (or this one's logged directly,
+  // for an ad hoc redial).
+  const callLeadAgain = (lead, draft) => {
+    setWrapUp(null);
+    setLastAdHocCall(null);
+    startCall(draft ? { ...lead, __wrapUpDraft: draft } : lead);
+  };
+
+  // Same, but for when the number on file turned out to be wrong/
+  // disconnected — prompts for the number to actually dial instead.
+  // The contact's stored phone number is left untouched; the
+  // alternate number is only used for this one redial (and whatever
+  // gets logged from it).
+  const callLeadAgainWithDifferentNumber = (lead, draft) => {
+    const input = window.prompt(`Call ${lead.name} at a different number:`, lead.phone || "");
+    const newNumber = input?.trim();
+    if (!newNumber) return;
+    callLeadAgain({ ...lead, phone: newNumber }, draft);
   };
 
   if (authLoading) {
@@ -3476,7 +3521,28 @@ export default function SimpleCRM() {
                     </div>
                   </div>
 
-                  <div className="mt-4 flex justify-end">
+                  <div className="mt-4 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() =>
+                          callLeadAgain(wrapUp.lead, { customStage: wrapUp.customStage, notes: wrapUp.notes })
+                        }
+                        className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                      >
+                        <PhoneCall size={14} /> Call again
+                      </button>
+                      <button
+                        onClick={() =>
+                          callLeadAgainWithDifferentNumber(wrapUp.lead, {
+                            customStage: wrapUp.customStage,
+                            notes: wrapUp.notes,
+                          })
+                        }
+                        className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                      >
+                        <PhoneCall size={14} /> Call again with different number
+                      </button>
+                    </div>
                     <button
                       onClick={finishWrapUp}
                       className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-semibold"
@@ -3527,7 +3593,12 @@ export default function SimpleCRM() {
                     <div>
                       <div className="text-xl font-bold">{activeLead.name}</div>
                       <div className="text-sm text-gray-600 mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
-                        <span>{activeLead.phone}</span>
+                        <span>
+                          {activeCallPhone || activeLead.phone}
+                          {activeCallPhone && activeCallPhone !== activeLead.phone && (
+                            <span className="ml-1.5 text-xs text-amber-600 font-medium">(different number)</span>
+                          )}
+                        </span>
                         <span>{activeLead.email}</span>
                         <span>{activeLead.client}</span>
                       </div>
@@ -3570,6 +3641,44 @@ export default function SimpleCRM() {
                         </div>
                       );
                     })()}
+                  </div>
+                </div>
+              ) : lastAdHocCall ? (
+                // A one-off call (outside a session) has no forced wrap-up,
+                // but still gets offered a quick redial before this card is
+                // replaced by the next call or dismissed.
+                <div className="bg-gray-50 border border-gray-200 rounded-2xl px-6 py-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+                        Call ended
+                      </div>
+                      <div className="text-xl font-bold mt-0.5">{lastAdHocCall.lead.name}</div>
+                      <div className="text-sm text-gray-500 mt-1">
+                        {lastAdHocCall.lead.phone} · {formatCallDuration(lastAdHocCall.durationMs)}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setLastAdHocCall(null)}
+                      title="Dismiss"
+                      className="text-gray-300 hover:text-gray-600 shrink-0"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <div className="mt-4 flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={() => callLeadAgain(lastAdHocCall.lead)}
+                      className="flex items-center gap-1.5 border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                    >
+                      <PhoneCall size={14} /> Call again
+                    </button>
+                    <button
+                      onClick={() => callLeadAgainWithDifferentNumber(lastAdHocCall.lead)}
+                      className="flex items-center gap-1.5 border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 text-sm px-3.5 py-2 rounded-lg font-medium"
+                    >
+                      <PhoneCall size={14} /> Call again with different number
+                    </button>
                   </div>
                 </div>
               ) : (
