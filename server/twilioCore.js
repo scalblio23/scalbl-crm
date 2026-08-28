@@ -166,6 +166,30 @@ export function buildConferenceTwiml({ conferenceName, isRep }) {
   return twiml.toString();
 }
 
+// How long a lead's line is allowed to ring before Twilio gives up on
+// it and reports "no-answer" — well short of Twilio's own 60s
+// default. A power dialler moves on fast; nobody's waiting a full
+// minute to find out a line went unanswered.
+export const MULTILINE_RING_SECONDS = 25;
+
+// Twilio requires E.164 (e.g. +61412334556) to actually route a
+// call — a locally-formatted number like "0412 334 556" (exactly what
+// typing your own number into "Add contact" naturally produces) gets
+// rejected outright, so the call never rings at all. The single-line
+// dialler normalizes this client-side before dialing (see
+// src/lib/twilioDevice.js's toE164) since it's a browser WebRTC
+// connection; multi-line's lead legs are placed here, straight from
+// the database, so the same normalization has to happen server-side
+// instead. Same Australia-first logic as that copy — keep them in
+// sync if either changes.
+function toE164(rawPhone) {
+  const cleaned = String(rawPhone || "").replace(/[^\d+]/g, "");
+  if (cleaned.startsWith("+")) return cleaned;
+  if (cleaned.startsWith("0")) return `+61${cleaned.slice(1)}`;
+  if (cleaned.startsWith("61")) return `+${cleaned}`;
+  return cleaned;
+}
+
 // Places one leg of a multi-line batch via the REST API (as opposed
 // to the rep's own leg, which the browser places itself as a WebRTC
 // Device connection — see src/lib/twilioDevice.js). `url` is what
@@ -173,16 +197,10 @@ export function buildConferenceTwiml({ conferenceName, isRep }) {
 // TwiML); `statusCallback` is hit on every status transition
 // (ringing/in-progress/completed/…) so the batch's progress — and
 // which leg wins — can be tracked server-side.
-// How long a lead's line is allowed to ring before Twilio gives up on
-// it and reports "no-answer" — well short of Twilio's own 60s
-// default. A power dialler moves on fast; nobody's waiting a full
-// minute to find out a line went unanswered.
-export const MULTILINE_RING_SECONDS = 25;
-
 export async function placeConferenceLeg({ to, from, url, statusCallback }, env = process.env) {
   const client = restClient(env);
   const call = await client.calls.create({
-    to,
+    to: toE164(to),
     from,
     url,
     statusCallback,

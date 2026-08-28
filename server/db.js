@@ -272,6 +272,9 @@ export async function ensureSchema() {
     // Added after the table first shipped — which caller ID each leg
     // was dialled from, shown per-line on the Multi Line tab.
     await query(`ALTER TABLE multiline_batch_calls ADD COLUMN IF NOT EXISTS from_number TEXT`);
+    // Why a leg never made it out (Twilio rejected the call.create()
+    // itself) — see setMultilineBatchCallFailed.
+    await query(`ALTER TABLE multiline_batch_calls ADD COLUMN IF NOT EXISTS error_message TEXT`);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1262,6 +1265,19 @@ export async function updateMultilineBatchCallStatusByRowId(rowId, status) {
   await query("UPDATE multiline_batch_calls SET status = $2 WHERE id = $1", [rowId, status]);
 }
 
+// Records why a leg never actually made it out — Twilio rejecting the
+// call.create() request itself (bad number format, an unverified
+// number on a trial account, geo permissions, …), as opposed to a
+// normal ring-then-no-answer. Surfaced on the Multi Line tab so "did
+// the call even go through" has a real answer instead of just a
+// stuck "Dialling…" or a bare "Failed".
+export async function setMultilineBatchCallFailed(rowId, errorMessage) {
+  await query("UPDATE multiline_batch_calls SET status = 'failed', error_message = $2 WHERE id = $1", [
+    rowId,
+    String(errorMessage || "").slice(0, 500),
+  ]);
+}
+
 // The whole feature's concurrency-safety hinges on this one atomic
 // UPDATE: whichever of a batch's calls reaches "answered" first is
 // the only one that can ever successfully set winner_call_sid (the
@@ -1315,6 +1331,7 @@ export async function getMultilineBatchWithCalls(id) {
       phone: c.phone,
       fromNumber: c.from_number,
       status: c.status,
+      errorMessage: c.error_message,
     })),
   };
 }

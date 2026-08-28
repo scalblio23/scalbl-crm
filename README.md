@@ -121,6 +121,17 @@ actually reachable), the frontend also gives up on its own a few seconds
 after that window — so a broken callback shows up as a clear "gave up
 waiting" error instead of the dial just hanging with hold music forever.
 
+**If a line never rings at all** — a lead's leg is placed via the REST API
+straight from their stored phone number, normalized to E.164 the same way
+the single-line dialler does (so a locally-formatted number like
+`0412 334 556` still routes correctly). If Twilio rejects the call outright
+(bad number, geo permissions, or — very commonly when testing against a
+brand-new Twilio account — a **trial account only allowing calls to
+numbers verified in the Twilio Console**), that line's card in the "Dialling
+N lines" panel turns red with Twilio's own error message right there,
+instead of just sitting on "Dialling…" with no explanation. Same message is
+also in the Vercel Functions logs (or the local server's console) either way.
+
 There's no answering-machine detection and no participant muting — every
 leg that connects is immediately audible, so two lines answering within the
 same instant can briefly cross-talk before the loser is dropped (usually well

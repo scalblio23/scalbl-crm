@@ -4,7 +4,7 @@ import {
   createMultilineBatch,
   addMultilineBatchCall,
   setMultilineBatchCallSid,
-  updateMultilineBatchCallStatusByRowId,
+  setMultilineBatchCallFailed,
   mapWithConcurrency,
 } from "../server/db.js";
 import {
@@ -83,7 +83,7 @@ export default async function handler(req, res) {
         await setMultilineBatchCallSid(row.id, call.sid);
       } catch (err) {
         console.error("[api/multiline-start] leg failed", contact.id, err.message);
-        await updateMultilineBatchCallStatusByRowId(row.id, "failed");
+        await setMultilineBatchCallFailed(row.id, err.message);
       }
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });

@@ -67,6 +67,7 @@ import {
   createMultilineBatch,
   addMultilineBatchCall,
   setMultilineBatchCallSid,
+  setMultilineBatchCallFailed,
   updateMultilineBatchCallStatusByRowId,
   claimMultilineWinner,
   getOtherPendingMultilineBatchCalls,
@@ -512,7 +513,7 @@ app.post(
         await setMultilineBatchCallSid(row.id, call.sid);
       } catch (err) {
         console.error("[multiline-start] leg failed", contact.id, err.message);
-        await updateMultilineBatchCallStatusByRowId(row.id, "failed");
+        await setMultilineBatchCallFailed(row.id, err.message);
       }
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
