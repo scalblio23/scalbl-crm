@@ -44,8 +44,11 @@ import {
   RefreshCw,
   Send,
   Layers,
+  Play,
+  Mic,
+  Square,
 } from "lucide-react";
-import { placeCall, hangUp, joinConference } from "./lib/twilioDevice";
+import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
 
 // ---------- Sample data ----------
@@ -1784,6 +1787,117 @@ export default function SimpleCRM() {
   useEffect(() => {
     dialQueueRef.current = dialQueue;
   }, [dialQueue]);
+
+  // Soundboard — short pre-recorded clips a rep can fire off mid-call
+  // (see src/lib/soundboardProcessor.js), e.g. a quick canned response
+  // to a phone's call-screening prompt ("please state your name and
+  // reason for calling"). Shared across the whole team, loaded lazily
+  // the first time either dialling tab is opened.
+  const [soundboardClips, setSoundboardClips] = useState([]);
+  const [soundboardLoaded, setSoundboardLoaded] = useState(false);
+  const [playingClipId, setPlayingClipId] = useState(null);
+  const [showSoundboardRecorder, setShowSoundboardRecorder] = useState(false);
+  const [recordingLabel, setRecordingLabel] = useState("");
+  const [recorderStatus, setRecorderStatus] = useState("idle"); // idle | recording | recorded | saving
+  const [recordedClip, setRecordedClip] = useState(null); // { blob, url } | null
+  const [recorderError, setRecorderError] = useState("");
+  const mediaRecorderRef = useRef(null);
+  const recordedChunksRef = useRef([]);
+
+  useEffect(() => {
+    if (soundboardLoaded) return;
+    if (page !== "powerdialler" && page !== "multiline") return;
+    setSoundboardLoaded(true);
+    api
+      .get("/api/soundboard-clips")
+      .then(setSoundboardClips)
+      .catch((err) => setDbError(err.message || "Could not load the soundboard."));
+  }, [page, soundboardLoaded]);
+
+  const handlePlaySoundboardClip = async (clip) => {
+    if (playingClipId) return; // one at a time
+    setPlayingClipId(clip.id);
+    try {
+      await playSoundboardClip(clip.audioData);
+    } catch (err) {
+      setDbError(err.message || "Could not play that clip — is there a live call to play it into?");
+    } finally {
+      setPlayingClipId(null);
+    }
+  };
+
+  const deleteSoundboardClipRow = async (id) => {
+    if (!window.confirm("Delete this clip?")) return;
+    setSoundboardClips((cs) => cs.filter((c) => c.id !== id));
+    try {
+      await api.delete(`/api/soundboard-clips?id=${id}`);
+    } catch (err) {
+      setDbError(err.message || "Could not delete the clip.");
+    }
+  };
+
+  const closeSoundboardRecorder = () => {
+    mediaRecorderRef.current?.stream?.getTracks().forEach((t) => t.stop());
+    mediaRecorderRef.current = null;
+    setShowSoundboardRecorder(false);
+    setRecorderStatus("idle");
+    setRecordedClip(null);
+    setRecordingLabel("");
+    setRecorderError("");
+  };
+
+  const startRecordingClip = async () => {
+    setRecorderError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordedChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        setRecordedClip({ blob, url: URL.createObjectURL(blob) });
+        setRecorderStatus("recorded");
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRecorderStatus("recording");
+    } catch (err) {
+      setRecorderError(err.message || "Could not access the microphone.");
+    }
+  };
+
+  const stopRecordingClip = () => mediaRecorderRef.current?.stop();
+
+  const reRecordClip = () => {
+    setRecordedClip(null);
+    setRecorderStatus("idle");
+  };
+
+  const saveRecordedClip = async () => {
+    if (!recordedClip || !recordingLabel.trim()) return;
+    setRecorderStatus("saving");
+    try {
+      const audioData = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result); // a data: URL, mime type baked in
+        reader.onerror = () => reject(new Error("Could not read the recording."));
+        reader.readAsDataURL(recordedClip.blob);
+      });
+      const created = await api.post("/api/soundboard-clips", {
+        label: recordingLabel.trim(),
+        audioData,
+        mimeType: recordedClip.blob.type || "audio/webm",
+      });
+      setSoundboardClips((cs) => [...cs, created]);
+      closeSoundboardRecorder();
+    } catch (err) {
+      setRecorderError(err.message || "Could not save the clip.");
+      setRecorderStatus("recorded");
+    }
+  };
 
   // Shared by every system message logged into a lead's conversation
   // thread (call summaries, stage/outcome updates, …) — creates a new
@@ -3941,6 +4055,54 @@ export default function SimpleCRM() {
                       );
                     })()}
                   </div>
+
+                  {/* Soundboard — quick-play clips that go through the
+                      call itself, e.g. a canned response to a phone's
+                      call-screening prompt. */}
+                  <div className="mt-4 pt-4 border-t border-green-100">
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                        Soundboard — plays through the call
+                      </div>
+                      <button
+                        onClick={() => setShowSoundboardRecorder(true)}
+                        className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700 shrink-0"
+                      >
+                        <Mic size={12} /> Record clip
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {soundboardClips.map((clip) => (
+                        <div key={clip.id} className="group relative">
+                          <button
+                            onClick={() => handlePlaySoundboardClip(clip)}
+                            disabled={!!playingClipId}
+                            title="Play into the call"
+                            className="flex items-center gap-1.5 bg-white border border-green-200 text-gray-700 hover:bg-green-50 text-xs pl-2.5 pr-6 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {playingClipId === clip.id ? (
+                              <Loader2 size={12} className="animate-spin shrink-0" />
+                            ) : (
+                              <Play size={12} className="shrink-0" />
+                            )}
+                            {clip.label}
+                          </button>
+                          <button
+                            onClick={() => deleteSoundboardClipRow(clip.id)}
+                            title="Delete this clip"
+                            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100"
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
+                      ))}
+                      {soundboardClips.length === 0 && (
+                        <span className="text-xs text-gray-400">
+                          No clips yet — record a quick reply for things like a phone's call-screening prompt.
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               ) : lastAdHocCall ? (
                 // A one-off call (outside a session) has no forced wrap-up,
@@ -4711,6 +4873,54 @@ export default function SimpleCRM() {
                         </div>
                       );
                     })()}
+                  </div>
+
+                  {/* Soundboard — quick-play clips that go through the
+                      call itself, e.g. a canned response to a phone's
+                      call-screening prompt. */}
+                  <div className="mt-4 pt-4 border-t border-green-100">
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                        Soundboard — plays through the call
+                      </div>
+                      <button
+                        onClick={() => setShowSoundboardRecorder(true)}
+                        className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-700 shrink-0"
+                      >
+                        <Mic size={12} /> Record clip
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {soundboardClips.map((clip) => (
+                        <div key={clip.id} className="group relative">
+                          <button
+                            onClick={() => handlePlaySoundboardClip(clip)}
+                            disabled={!!playingClipId}
+                            title="Play into the call"
+                            className="flex items-center gap-1.5 bg-white border border-green-200 text-gray-700 hover:bg-green-50 text-xs pl-2.5 pr-6 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {playingClipId === clip.id ? (
+                              <Loader2 size={12} className="animate-spin shrink-0" />
+                            ) : (
+                              <Play size={12} className="shrink-0" />
+                            )}
+                            {clip.label}
+                          </button>
+                          <button
+                            onClick={() => deleteSoundboardClipRow(clip.id)}
+                            title="Delete this clip"
+                            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100"
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
+                      ))}
+                      {soundboardClips.length === 0 && (
+                        <span className="text-xs text-gray-400">
+                          No clips yet — record a quick reply for things like a phone's call-screening prompt.
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               ) : lastAdHocCall ? (
@@ -5974,6 +6184,107 @@ export default function SimpleCRM() {
           </div>
         )}
       </main>
+
+      {/* Soundboard — record a new quick-play clip */}
+      {showSoundboardRecorder && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={closeSoundboardRecorder}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Record a soundboard clip</h2>
+              <button onClick={closeSoundboardRecorder} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 py-5">
+              <p className="text-sm text-gray-500 mb-4">
+                Keep it short — a quick reply you might need mid-call, like answering a phone's call-screening
+                prompt ("please say your name and reason for calling").
+              </p>
+
+              {recorderError && (
+                <div className="mb-3 flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  <div className="flex-1">{recorderError}</div>
+                </div>
+              )}
+
+              <div className="flex flex-col items-center gap-3 py-4">
+                {recorderStatus === "idle" && (
+                  <button
+                    onClick={startRecordingClip}
+                    className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-5 py-2.5 rounded-full font-semibold"
+                  >
+                    <Mic size={16} /> Start recording
+                  </button>
+                )}
+                {recorderStatus === "recording" && (
+                  <>
+                    <div className="flex items-center gap-2 text-red-600 text-sm font-medium">
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-600" />
+                      </span>
+                      Recording…
+                    </div>
+                    <button
+                      onClick={stopRecordingClip}
+                      className="flex items-center gap-2 bg-gray-900 text-white px-5 py-2.5 rounded-full font-semibold"
+                    >
+                      <Square size={14} fill="currentColor" /> Stop
+                    </button>
+                  </>
+                )}
+                {(recorderStatus === "recorded" || recorderStatus === "saving") && recordedClip && (
+                  <div className="w-full space-y-3">
+                    <audio src={recordedClip.url} controls className="w-full" />
+                    <div className="flex items-center justify-center gap-3">
+                      <button
+                        onClick={reRecordClip}
+                        disabled={recorderStatus === "saving"}
+                        className="text-sm text-gray-500 hover:text-gray-800 disabled:opacity-40"
+                      >
+                        Re-record
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {recordedClip && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    saveRecordedClip();
+                  }}
+                  className="flex items-end gap-2 mt-2"
+                >
+                  <div className="flex-1">
+                    <label className="text-xs font-medium block mb-1.5 text-gray-500">Label</label>
+                    <input
+                      autoFocus
+                      value={recordingLabel}
+                      onChange={(e) => setRecordingLabel(e.target.value)}
+                      placeholder="e.g. Screening response"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={recorderStatus === "saving" || !recordingLabel.trim()}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {recorderStatus === "saving" && <Loader2 size={14} className="animate-spin" />}
+                    Save
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add to Powerlist modal — from Contacts bulk-select */}
       {showAddToPowerlist && (

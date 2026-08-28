@@ -72,6 +72,9 @@ import {
   claimMultilineWinner,
   getOtherPendingMultilineBatchCalls,
   getMultilineBatchWithCalls,
+  getSoundboardClips,
+  createSoundboardClip,
+  deleteSoundboardClip,
   getUsers,
   getUserById,
   inviteUser,
@@ -157,6 +160,7 @@ app.use(
     "/api/multiline-start",
     "/api/multiline-batch",
     "/api/multiline-cancel",
+    "/api/soundboard-clips",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -580,6 +584,38 @@ app.post(
     if (!batchId) return res.status(400).json({ error: "Missing batchId" });
     const pending = await getOtherPendingMultilineBatchCalls(batchId, null);
     await Promise.all(pending.filter((c) => c.call_sid).map((c) => endOrCancelCall(c.call_sid)));
+    res.status(204).end();
+  })
+);
+
+// ---------- Soundboard (quick-play clips for a live call) ----------
+// Mirrors api/soundboard-clips.js.
+const SOUNDBOARD_MAX_CLIP_BYTES = 2 * 1024 * 1024;
+app.get(
+  "/api/soundboard-clips",
+  dbRoute(async (req, res) => res.json(await getSoundboardClips()))
+);
+app.post(
+  "/api/soundboard-clips",
+  dbRoute(async (req, res) => {
+    const label = String(req.body?.label || "").trim();
+    const audioData = String(req.body?.audioData || "");
+    const mimeType = String(req.body?.mimeType || "").trim();
+    if (!label) return res.status(400).json({ error: "Give the clip a label" });
+    if (!audioData || !mimeType) return res.status(400).json({ error: "Missing audio data" });
+    if (audioData.length > SOUNDBOARD_MAX_CLIP_BYTES * 1.4) {
+      return res.status(400).json({ error: "That clip is too long — keep it short." });
+    }
+    const created = await createSoundboardClip({ label, audioData, mimeType, createdBy: String(req.user.id) });
+    res.status(201).json(created);
+  })
+);
+app.delete(
+  "/api/soundboard-clips",
+  dbRoute(async (req, res) => {
+    const id = req.query.id;
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    await deleteSoundboardClip(id);
     res.status(204).end();
   })
 );

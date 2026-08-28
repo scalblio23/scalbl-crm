@@ -275,6 +275,23 @@ export async function ensureSchema() {
     // Why a leg never made it out (Twilio rejected the call.create()
     // itself) — see setMultilineBatchCallFailed.
     await query(`ALTER TABLE multiline_batch_calls ADD COLUMN IF NOT EXISTS error_message TEXT`);
+    // ---------- Soundboard (quick-play clips for a live call) ----------
+    // Short pre-recorded clips a rep can fire off mid-call — e.g. a
+    // canned response to a phone's call-screening prompt ("please
+    // state your name and reason for calling") — see
+    // src/lib/soundboardProcessor.js for how it actually gets mixed
+    // into the live call's outgoing audio. audio_data is base64 —
+    // clips are short (capped client-side), so this stays small.
+    await query(`
+      CREATE TABLE IF NOT EXISTS soundboard_clips (
+        id SERIAL PRIMARY KEY,
+        label TEXT NOT NULL,
+        audio_data TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        created_by TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1334,4 +1351,39 @@ export async function getMultilineBatchWithCalls(id) {
       errorMessage: c.error_message,
     })),
   };
+}
+
+// ---------- Soundboard clips ----------
+// Shared across the whole team (not per-rep) — recorded once,
+// available to anyone on a live call.
+
+function soundboardClipFromRow(r) {
+  return {
+    id: r.id,
+    label: r.label,
+    audioData: r.audio_data,
+    mimeType: r.mime_type,
+    createdByName: r.created_by_name,
+    createdAt: r.created_at,
+  };
+}
+
+export async function getSoundboardClips() {
+  const rows = await query(
+    "SELECT sc.*, u.name AS created_by_name FROM soundboard_clips sc " +
+      "LEFT JOIN users u ON u.id::text = sc.created_by ORDER BY sc.created_at ASC"
+  );
+  return rows.map(soundboardClipFromRow);
+}
+
+export async function createSoundboardClip({ label, audioData, mimeType, createdBy }) {
+  const rows = await query(
+    "INSERT INTO soundboard_clips (label, audio_data, mime_type, created_by) VALUES ($1,$2,$3,$4) RETURNING *",
+    [label, audioData, mimeType, createdBy || null]
+  );
+  return soundboardClipFromRow(rows[0]);
+}
+
+export async function deleteSoundboardClip(id) {
+  await query("DELETE FROM soundboard_clips WHERE id = $1", [id]);
 }

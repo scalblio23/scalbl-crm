@@ -140,6 +140,19 @@ regulated practice in a lot of places (the US TCPA/TSR's abandoned-call rules
 in particular) — that's on whoever's operating this CRM to stay within, not
 something the app enforces.
 
+### Soundboard
+
+Both dialling tabs' live-call view has a small **soundboard** — short clips a
+rep records once (mic, in-browser) and can fire off mid-call, e.g. a quick
+canned reply to a phone's call-screening prompt ("please say your name and
+reason for calling"). Unlike just playing a sound file on your own speakers,
+a clip actually gets mixed into the call's outgoing audio — the person on the
+other end hears it — via the Twilio Voice SDK's `AudioProcessor` API
+(`src/lib/soundboardProcessor.js`), which taps into the mic stream every call
+already sends and mixes a clip's audio into that same stream on demand. Clips
+are shared across the whole team (stored as base64 in `soundboard_clips`),
+not per-rep.
+
 ## SMS (Twilio)
 
 Uses the same Twilio account and credentials as calling — no separate setup.

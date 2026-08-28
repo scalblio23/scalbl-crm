@@ -5,6 +5,7 @@
 // the backend is a short-lived Access Token — no Twilio secrets ever
 // reach the browser.
 import { Device } from "@twilio/voice-sdk";
+import { getSoundboardProcessor } from "./soundboardProcessor";
 
 // Empty string = same-origin, i.e. /api/token — correct for the
 // deployed site, where the /api functions live alongside the
@@ -57,7 +58,19 @@ async function getDevice(identity) {
       .then(({ token, callerIds }) => {
         callerIdPool = Array.isArray(callerIds) ? callerIds : [];
         device = new Device(token, { logLevel: "warn" });
-        return device.register().then(() => device);
+        return device.register().then(async () => {
+          // Adds the soundboard's mixing pipeline to every call this
+          // device places from here on — see soundboardProcessor.js.
+          // Best-effort: a browser that can't add an audio processor
+          // (very old, or some odd permission wrinkle) should still be
+          // able to make calls, just without the soundboard.
+          try {
+            await device.audio.addProcessor(getSoundboardProcessor(), false);
+          } catch (err) {
+            console.warn("[twilioDevice] Soundboard unavailable:", err);
+          }
+          return device;
+        });
       })
       .catch((err) => {
         deviceReady = null; // allow retrying on the next call attempt
@@ -115,4 +128,13 @@ export async function joinConference(conferenceName, identity = "rep") {
 // Ends whatever call is currently in progress on this device, if any.
 export function hangUp() {
   device?.disconnectAll();
+}
+
+// Plays a soundboard clip into whatever call is currently active, so
+// the other party hears it too — not just the rep's own speakers. See
+// soundboardProcessor.js. Rejects if there's no live call to play
+// into (the processor only has an active mixing destination while a
+// call's mic stream is up).
+export function playSoundboardClip(audioUrl) {
+  return getSoundboardProcessor().playClip(audioUrl);
 }
