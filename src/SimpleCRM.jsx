@@ -1,4 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceArea,
+} from "recharts";
 import {
   MessageSquare,
   Users,
@@ -1938,6 +1948,67 @@ export default function SimpleCRM() {
   const reportsByUser = summarizeCallsBy(reportsCallLog, (e) => e.userName || "Unknown");
   const reportsByClient = summarizeCallsBy(reportsCallLog, (e) => e.client);
   const reportsByTag = summarizeCallsBy(reportsCallLog, (e) => e.tag || "Untagged");
+
+  // "Activity Stream" — dial attempts bucketed by time of day (local
+  // clock time), collapsed across every day in the selected range.
+  // The point isn't the trend over the date range, it's the shape of
+  // a working day: a rep who's clocked in but has gone quiet shows up
+  // as a flat-to-zero stretch between two active buckets, which is
+  // exactly what the gap-detection below flags.
+  const ACTIVITY_BUCKET_MINUTES = 30;
+  const reportsActivity = useMemo(() => {
+    const bucketsPerHour = 60 / ACTIVITY_BUCKET_MINUTES;
+    const totalBuckets = 24 * bucketsPerHour;
+    const counts = new Array(totalBuckets).fill(0);
+    for (const e of reportsCallLog) {
+      if (!e.calledAt) continue;
+      const d = new Date(e.calledAt);
+      if (Number.isNaN(d.getTime())) continue;
+      const idx = d.getHours() * bucketsPerHour + Math.floor(d.getMinutes() / ACTIVITY_BUCKET_MINUTES);
+      counts[idx] += 1;
+    }
+
+    const bucketLabel = (idx) => {
+      const h = Math.floor(idx / bucketsPerHour);
+      const m = (idx % bucketsPerHour) * ACTIVITY_BUCKET_MINUTES;
+      const h12 = h % 12 || 12;
+      return `${h12}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`;
+    };
+
+    const activeIdx = counts.map((c, i) => (c > 0 ? i : -1)).filter((i) => i >= 0);
+    if (activeIdx.length === 0) return { buckets: [], gaps: [] };
+
+    // Frame the chart on the working window actually seen in the data
+    // (padded by one bucket either side) instead of a full, mostly-empty
+    // 24 hours.
+    const first = Math.max(0, activeIdx[0] - 1);
+    const last = Math.min(totalBuckets - 1, activeIdx[activeIdx.length - 1] + 1);
+    const buckets = [];
+    for (let i = first; i <= last; i++) {
+      buckets.push({ time: bucketLabel(i), calls: counts[i] });
+    }
+
+    // Flag any stretch of 60+ minutes with zero dial attempts that sits
+    // *between* two active buckets — quiet time in the middle of a
+    // working stretch, not just before the first call or after the last.
+    const gaps = [];
+    let runStart = null;
+    for (let i = activeIdx[0]; i <= activeIdx[activeIdx.length - 1]; i++) {
+      if (counts[i] === 0) {
+        if (runStart === null) runStart = i;
+      } else if (runStart !== null) {
+        if (i - runStart >= bucketsPerHour) {
+          gaps.push({
+            start: bucketLabel(runStart),
+            end: bucketLabel(i - 1),
+            minutes: (i - runStart) * ACTIVITY_BUCKET_MINUTES,
+          });
+        }
+        runStart = null;
+      }
+    }
+    return { buckets, gaps };
+  }, [reportsCallLog]);
   // The actual list behind the Bookings tile — every call in range
   // whose outcome was Booked, most recent first.
   const reportsBookedList = reportsCallLog
@@ -4174,6 +4245,97 @@ export default function SimpleCRM() {
                         </tbody>
                       </table>
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Activity Stream — dial attempts across the time of day,
+                  so a quiet stretch between two active buckets reads as
+                  a rep having stepped away while still logged in. */}
+              {!reportsIsClientView && (
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between flex-wrap gap-1">
+                    <div>
+                      <div className="font-semibold text-sm">Activity stream</div>
+                      <div className="text-xs text-gray-400 mt-0.5">
+                        Dial attempts by time of day &middot; {ACTIVITY_BUCKET_MINUTES}-min buckets, all days in range combined
+                      </div>
+                    </div>
+                    {reportsActivity.gaps.length > 0 && (
+                      <div className="text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-full px-2.5 py-1">
+                        {reportsActivity.gaps.length} downtime gap{reportsActivity.gaps.length === 1 ? "" : "s"} detected
+                      </div>
+                    )}
+                  </div>
+                  <div className="px-5 py-4">
+                    {reportsActivity.buckets.length === 0 ? (
+                      <div className="text-sm text-gray-400 text-center py-14">No calls in this range</div>
+                    ) : (
+                      <>
+                        <ResponsiveContainer width="100%" height={260}>
+                          <AreaChart data={reportsActivity.buckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                            <defs>
+                              <linearGradient id="activityStreamFill" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.35} />
+                                <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.02} />
+                              </linearGradient>
+                            </defs>
+                            {reportsActivity.gaps.map((gap) => (
+                              <ReferenceArea
+                                key={`${gap.start}-${gap.end}`}
+                                x1={gap.start}
+                                x2={gap.end}
+                                fill="#ef4444"
+                                fillOpacity={0.12}
+                                strokeOpacity={0}
+                              />
+                            ))}
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                            <XAxis
+                              dataKey="time"
+                              tick={{ fontSize: 11, fill: "#9ca3af" }}
+                              tickLine={false}
+                              axisLine={{ stroke: "#e5e7eb" }}
+                              interval="preserveStartEnd"
+                              minTickGap={28}
+                            />
+                            <YAxis
+                              allowDecimals={false}
+                              tick={{ fontSize: 11, fill: "#9ca3af" }}
+                              tickLine={false}
+                              axisLine={false}
+                              width={28}
+                            />
+                            <Tooltip
+                              formatter={(value) => [`${value} call${value === 1 ? "" : "s"}`, "Dial attempts"]}
+                              labelFormatter={(label) => label}
+                              contentStyle={{ borderRadius: 10, border: "1px solid #e5e7eb", fontSize: 12 }}
+                            />
+                            <Area
+                              type="monotone"
+                              dataKey="calls"
+                              stroke="#3b82f6"
+                              strokeWidth={2}
+                              fill="url(#activityStreamFill)"
+                              isAnimationActive={false}
+                            />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                        {reportsActivity.gaps.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {reportsActivity.gaps.map((gap) => (
+                              <span
+                                key={`${gap.start}-${gap.end}-label`}
+                                className="text-xs px-2.5 py-1 rounded-full border border-red-200 bg-red-50 text-red-700"
+                              >
+                                Quiet {gap.start}–{gap.end} ({Math.floor(gap.minutes / 60) > 0 ? `${Math.floor(gap.minutes / 60)}h ` : ""}
+                                {gap.minutes % 60 > 0 ? `${gap.minutes % 60}m` : ""})
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 </div>
               )}
