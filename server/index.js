@@ -96,6 +96,21 @@ import {
   forbidClientRole,
   ROLES,
 } from "./auth.js";
+import { missingGoogleEnv } from "./googleCalendar.js";
+import {
+  handleGoogleConnect,
+  handleGoogleCallback,
+  handleGoogleDisconnect,
+  handleGetGoogleCalendars,
+  handlePatchGoogleCalendar,
+  handleGetBookingSettings,
+  handlePatchBookingSettings,
+  handleGetBookings,
+  handleCancelBooking,
+  handlePublicBookingInfo,
+  handlePublicAvailability,
+  handlePublicBook,
+} from "./bookingApi.js";
 
 dotenv.config();
 
@@ -132,6 +147,14 @@ const PUBLIC_PATHS = new Set([
   // /api/sms-inbound above.
   "/api/voice-multiline-leg",
   "/api/multiline-status",
+  // Booking — google-callback is Google's own redirect landing back
+  // into the app (identity comes from a signed `state`, not a session
+  // cookie); the public-* routes are the contact-facing booking page,
+  // which never has a CRM session at all.
+  "/api/google-callback",
+  "/api/public-booking-info",
+  "/api/public-availability",
+  "/api/public-book",
 ]);
 
 app.use(async (req, res, next) => {
@@ -161,6 +184,11 @@ app.use(
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
+    "/api/google-connect",
+    "/api/google-disconnect",
+    "/api/google-calendars",
+    "/api/booking-settings",
+    "/api/bookings",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -1070,6 +1098,108 @@ app.post(
   )
 );
 
+// ---------- Booking (Google Calendar) ----------
+// Thin adapters over server/bookingApi.js — same shared logic the
+// Vercel functions under /api use, see that file for the actual work.
+
+app.get(
+  "/api/google-connect",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handleGoogleConnect(req.user);
+    res.status(status).json(body);
+  })
+);
+
+// Public — Google's own redirect back into the app; see PUBLIC_PATHS above.
+app.get(
+  "/api/google-callback",
+  dbRoute(async (req, res) => {
+    const { redirect } = await handleGoogleCallback(req.query || {});
+    res.redirect(302, redirect);
+  })
+);
+
+app.post(
+  "/api/google-disconnect",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handleGoogleDisconnect(req.user);
+    if (status === 204) return res.status(204).end();
+    res.status(status).json(body);
+  })
+);
+
+app.get(
+  "/api/google-calendars",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handleGetGoogleCalendars(req.user);
+    res.status(status).json(body);
+  })
+);
+app.patch(
+  "/api/google-calendars",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handlePatchGoogleCalendar(req.user, req.body || {});
+    res.status(status).json(body);
+  })
+);
+
+app.get(
+  "/api/booking-settings",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handleGetBookingSettings(req.user);
+    res.status(status).json(body);
+  })
+);
+app.patch(
+  "/api/booking-settings",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handlePatchBookingSettings(req.user, req.body || {});
+    res.status(status).json(body);
+  })
+);
+
+app.get(
+  "/api/bookings",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handleGetBookings(req.user);
+    res.status(status).json(body);
+  })
+);
+app.patch(
+  "/api/bookings",
+  dbRoute(async (req, res) => {
+    const { id, status: newStatus } = req.body || {};
+    if (!id || newStatus !== "cancelled") {
+      return res.status(400).json({ error: "Missing id, or unsupported status." });
+    }
+    const { status, body } = await handleCancelBooking(req.user, id);
+    res.status(status).json(body);
+  })
+);
+
+// Public — the contact-facing booking page (/book/:slug), no session.
+app.get(
+  "/api/public-booking-info",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handlePublicBookingInfo(String(req.query.slug || ""));
+    res.status(status).json(body);
+  })
+);
+app.get(
+  "/api/public-availability",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handlePublicAvailability(String(req.query.slug || ""));
+    res.status(status).json(body);
+  })
+);
+app.post(
+  "/api/public-book",
+  dbRoute(async (req, res) => {
+    const { status, body } = await handlePublicBook(req.body || {});
+    res.status(status).json(body);
+  })
+);
+
 app.listen(PORT, () => {
   const missing = missingTwilioEnv();
   console.log(`Local backend listening on http://localhost:${PORT}`);
@@ -1080,5 +1210,9 @@ app.listen(PORT, () => {
   }
   if (!isDbConfigured()) {
     console.warn(`⚠ POSTGRES_URL not set yet — database routes will fail until you add it to .env`);
+  }
+  const missingGoogle = missingGoogleEnv();
+  if (missingGoogle.length) {
+    console.warn(`⚠ Google env vars not set yet, the Booking tab will fail until you add them to .env: ${missingGoogle.join(", ")}`);
   }
 });

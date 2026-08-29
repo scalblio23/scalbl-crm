@@ -27,6 +27,7 @@ const FULL_ACCESS_TABS = [
   "multiline",
   "bulk-sms",
   "log",
+  "booking",
   "clients",
   "reports",
   "settings",
@@ -263,4 +264,22 @@ export async function requireAuth(req, res) {
 
   res.status(401).json({ error: "Not authenticated" });
   return null;
+}
+
+// ---------- Signed, short-lived state tokens ----------
+// Used for the Google OAuth `state` param (see server/googleCalendar.js
+// and server/bookingApi.js): carries which CRM user started the
+// connect flow through Google's redirect, signed with the same secret
+// as session cookies so it can't be forged or replayed past its
+// expiry.
+export function signState(payload, expiresIn = "15m") {
+  return jwt.sign(payload, secret(), { expiresIn });
+}
+
+export function verifyState(token) {
+  try {
+    return jwt.verify(token, secret());
+  } catch {
+    return null;
+  }
 }
