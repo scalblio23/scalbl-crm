@@ -19,10 +19,10 @@ export function missingTwilioEnv(env = process.env) {
   return missing;
 }
 
-// The pool of numbers outbound calls rotate through as their caller
-// ID. Comma-separate several ("+618700001,+618700002,+618700003,
-// +618700004") to rotate across them, spreading call volume so no
-// single number gets flagged by carriers — or leave just one for a
+// The pool of numbers outbound calls and SMS rotate through as their
+// caller ID. Comma-separate several ("+618700001,+618700002,+618700003,
+// +618700004") to rotate across them, spreading volume so no single
+// number gets flagged by carriers — or leave just one for a
 // single-number setup. Reads TWILIO_CALLER_IDS (plural) if set,
 // otherwise TWILIO_CALLER_ID (singular) — but either name is split
 // the same way, since "the list ended up on the singularly-named var"
@@ -100,17 +100,22 @@ function restClient(env = process.env) {
 
 // Sends an outbound SMS. Uses TWILIO_MESSAGING_SERVICE_SID if set
 // (recommended by Twilio — better deliverability, required for some
-// inbound routing setups); otherwise falls back to sending straight
-// from the first number in the caller ID pool. SMS doesn't rotate —
-// only outbound calls do, per the caller-ID-flagging concern that
-// rotation exists for.
+// inbound routing setups); otherwise falls back to sending from the
+// caller ID pool. Unlike outbound calls — which rotate sequentially,
+// tracked client-side per browser tab (see src/lib/twilioDevice.js) —
+// each SMS send is its own stateless serverless invocation with no
+// "next in sequence" to pick up, so this rotates by picking a random
+// number from the pool per send instead. Same goal either way:
+// spread volume so no single number gets carrier-flagged (the same
+// concern a spam-filtered "Delivered" message is a symptom of).
 export async function sendSms({ to, body }, env = process.env) {
   const client = restClient(env);
   const params = { to, body };
   if (env.TWILIO_MESSAGING_SERVICE_SID) {
     params.messagingServiceSid = env.TWILIO_MESSAGING_SERVICE_SID;
   } else {
-    params.from = getCallerIdPool(env)[0];
+    const pool = getCallerIdPool(env);
+    params.from = pool[Math.floor(Math.random() * pool.length)];
   }
   const message = await client.messages.create(params);
   return { sid: message.sid, status: message.status };
