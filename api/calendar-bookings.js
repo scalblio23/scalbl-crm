@@ -35,7 +35,7 @@ export default async function handler(req, res) {
         if (calendar?.googleConnected) {
           try {
             const accessToken = await getValidAccessToken(calendar);
-            await deleteGoogleEvent({ accessToken, eventId: booking.googleEventId });
+            await deleteGoogleEvent({ accessToken, calendarId: calendar.googleCalendarId, eventId: booking.googleEventId });
           } catch (err) {
             // Don't block cancelling the booking in our own system over
             // a Google-side hiccup — the CRM's record is authoritative.

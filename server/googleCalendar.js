@@ -142,16 +142,36 @@ export async function getValidAccessToken(calendar, env = process.env) {
   return accessToken;
 }
 
+// Every calendar (not just "primary") the connected account can see —
+// powers the "Which calendar?" picker in Calendar settings once
+// Google's connected. calendar.events (the only scope this app
+// requests) covers CalendarList.list per Google's own scope-to-method
+// mapping, so no extra/broader scope is needed just to enumerate
+// calendars. Sorted primary-first, then alphabetically, since that's
+// the calendar someone's most likely to want.
+export async function listGoogleCalendars({ accessToken }) {
+  const body = await googleFetch(`${GOOGLE_CALENDAR_API}/users/me/calendarList`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const items = body.items || [];
+  return items
+    .map((c) => ({ id: c.id, summary: c.summary || c.id, primary: Boolean(c.primary) }))
+    .sort((a, b) => (a.primary === b.primary ? a.summary.localeCompare(b.summary) : a.primary ? -1 : 1));
+}
+
 // Free/busy blocks on the connected calendar between two ISO
 // timestamps — used to keep the booking widget from ever offering a
 // slot the owner is already busy for on their real Google Calendar.
-export async function getFreeBusy({ accessToken, timeMinISO, timeMaxISO }) {
+// `calendarId` is whichever calendar was picked in Calendar settings
+// (defaults to "primary" — see server/db.js's google_calendar_id
+// column default).
+export async function getFreeBusy({ accessToken, calendarId = "primary", timeMinISO, timeMaxISO }) {
   const body = await googleFetch(`${GOOGLE_CALENDAR_API}/freeBusy`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ timeMin: timeMinISO, timeMax: timeMaxISO, items: [{ id: "primary" }] }),
+    body: JSON.stringify({ timeMin: timeMinISO, timeMax: timeMaxISO, items: [{ id: calendarId }] }),
   });
-  return body.calendars?.primary?.busy || [];
+  return body.calendars?.[calendarId]?.busy || [];
 }
 
 // Creates the event on the booker's behalf as an attendee.
@@ -161,6 +181,7 @@ export async function getFreeBusy({ accessToken, timeMinISO, timeMaxISO }) {
 // ones landing seconds apart.
 export async function createGoogleEvent({
   accessToken,
+  calendarId = "primary",
   summary,
   description,
   startISO,
@@ -168,24 +189,27 @@ export async function createGoogleEvent({
   timezone,
   attendeeEmail,
 }) {
-  const body = await googleFetch(`${GOOGLE_CALENDAR_API}/calendars/primary/events?sendUpdates=none`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      summary,
-      description,
-      start: { dateTime: startISO, timeZone: timezone },
-      end: { dateTime: endISO, timeZone: timezone },
-      attendees: attendeeEmail ? [{ email: attendeeEmail }] : [],
-    }),
-  });
+  const body = await googleFetch(
+    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=none`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        summary,
+        description,
+        start: { dateTime: startISO, timeZone: timezone },
+        end: { dateTime: endISO, timeZone: timezone },
+        attendees: attendeeEmail ? [{ email: attendeeEmail }] : [],
+      }),
+    }
+  );
   return body.id;
 }
 
-export async function deleteGoogleEvent({ accessToken, eventId }) {
+export async function deleteGoogleEvent({ accessToken, calendarId = "primary", eventId }) {
   if (!eventId) return;
   const res = await fetch(
-    `${GOOGLE_CALENDAR_API}/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
+    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
     { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
   );
   // 410 Gone = already deleted on the Google side — not an error here.

@@ -590,6 +590,26 @@ export default function SimpleCRM() {
       .catch(() => setCalendarBookings([]));
   }, [openCalendarId]);
 
+  // Which Google calendar (on the connected account) to sync to —
+  // fetched once a calendar's Google connection is live, so the
+  // Integrate section can offer a picker instead of always using
+  // "primary".
+  const [googleCalendarOptions, setGoogleCalendarOptions] = useState([]);
+  const [googleCalendarsLoading, setGoogleCalendarsLoading] = useState(false);
+  useEffect(() => {
+    if (!openCalendarId || !openCalendar?.googleConnected) {
+      setGoogleCalendarOptions([]);
+      return;
+    }
+    setGoogleCalendarsLoading(true);
+    api
+      .get(`/api/calendar-google-calendars?calendarId=${openCalendarId}`)
+      .then((list) => setGoogleCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary }))))
+      .catch(() => setGoogleCalendarOptions([]))
+      .finally(() => setGoogleCalendarsLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCalendarId, openCalendar?.googleConnected]);
+
   // Availability and booking-rules edits are drafted locally and saved
   // with an explicit button (like the rest of Settings) rather than
   // patching the server on every click — editing a weekly hours grid
@@ -623,6 +643,15 @@ export default function SimpleCRM() {
       ...draft,
       [day]: draft[day]?.length ? [] : [{ start: "09:00", end: "17:00" }],
     }));
+  // Copies one day's time ranges onto every other day — the common
+  // case of "9-5 every weekday" shouldn't need setting each day by hand.
+  const applyDayToAllDays = (day) =>
+    setAvailabilityDraft((draft) => {
+      const source = (draft[day] || []).map((r) => ({ ...r }));
+      const next = {};
+      for (const { key } of WEEKDAYS) next[key] = source.map((r) => ({ ...r }));
+      return next;
+    });
 
   const handleAddCalendar = async (e) => {
     e.preventDefault();
@@ -6156,18 +6185,40 @@ export default function SimpleCRM() {
                           events on it block off time here automatically.
                         </p>
                         {openCalendar.googleConnected ? (
-                          <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
-                            <div>
-                              <p className="text-sm font-medium">Connected</p>
-                              <p className="text-xs text-gray-500">{openCalendar.googleEmail}</p>
+                          <>
+                            <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
+                              <div>
+                                <p className="text-sm font-medium">Connected</p>
+                                <p className="text-xs text-gray-500">{openCalendar.googleEmail}</p>
+                              </div>
+                              <button
+                                onClick={() => disconnectGoogleCalendar(openCalendar.id)}
+                                className="text-sm text-red-600 hover:text-red-700 font-medium"
+                              >
+                                Disconnect
+                              </button>
                             </div>
-                            <button
-                              onClick={() => disconnectGoogleCalendar(openCalendar.id)}
-                              className="text-sm text-red-600 hover:text-red-700 font-medium"
-                            >
-                              Disconnect
-                            </button>
-                          </div>
+                            <div>
+                              <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                                Which calendar should bookings use?
+                              </label>
+                              <Dropdown
+                                value={openCalendar.googleCalendarId}
+                                onChange={(googleCalendarId) => patchCalendar(openCalendar.id, { googleCalendarId })}
+                                options={
+                                  googleCalendarOptions.length
+                                    ? googleCalendarOptions
+                                    : [{ value: openCalendar.googleCalendarId, label: openCalendar.googleCalendarId }]
+                                }
+                                disabled={googleCalendarsLoading}
+                                searchable
+                              />
+                              <p className="text-xs text-gray-400 mt-1.5">
+                                Events are created here, and existing events on it block off time in the booking
+                                widget.
+                              </p>
+                            </div>
+                          </>
                         ) : (
                           <button
                             onClick={() => connectGoogleCalendar(openCalendar.id)}
@@ -6214,12 +6265,21 @@ export default function SimpleCRM() {
                                   {label}
                                 </label>
                                 {ranges.length > 0 && (
-                                  <button
-                                    onClick={() => addDayRange(key)}
-                                    className="text-xs text-gray-500 hover:text-gray-800 font-medium"
-                                  >
-                                    + Add range
-                                  </button>
+                                  <div className="flex items-center gap-3">
+                                    <button
+                                      onClick={() => applyDayToAllDays(key)}
+                                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 font-medium"
+                                      title="Copy this day's hours to every other day"
+                                    >
+                                      <Copy size={12} /> Apply to all
+                                    </button>
+                                    <button
+                                      onClick={() => addDayRange(key)}
+                                      className="text-xs text-gray-500 hover:text-gray-800 font-medium"
+                                    >
+                                      + Add range
+                                    </button>
+                                  </div>
                                 )}
                               </div>
                               {ranges.map((range, i) => (

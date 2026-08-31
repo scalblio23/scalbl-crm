@@ -92,6 +92,7 @@ import calendarsHandler from "../api/calendars.js";
 import calendarGoogleConnectHandler from "../api/calendar-google-connect.js";
 import calendarGoogleCallbackHandler from "../api/calendar-google-callback.js";
 import calendarGoogleDisconnectHandler from "../api/calendar-google-disconnect.js";
+import calendarGoogleCalendarsHandler from "../api/calendar-google-calendars.js";
 import calendarBookingsHandler from "../api/calendar-bookings.js";
 import calendarPublicHandler from "../api/calendar-public.js";
 import calendarSlotsHandler from "../api/calendar-slots.js";
@@ -188,6 +189,7 @@ app.use(
     "/api/calendars",
     "/api/calendar-google-connect",
     "/api/calendar-google-disconnect",
+    "/api/calendar-google-calendars",
     "/api/calendar-bookings",
   ],
   (req, res, next) => {
@@ -1105,6 +1107,7 @@ app.all("/api/calendars", calendarsHandler);
 app.all("/api/calendar-google-connect", calendarGoogleConnectHandler);
 app.all("/api/calendar-google-callback", calendarGoogleCallbackHandler);
 app.all("/api/calendar-google-disconnect", calendarGoogleDisconnectHandler);
+app.all("/api/calendar-google-calendars", calendarGoogleCalendarsHandler);
 app.all("/api/calendar-bookings", calendarBookingsHandler);
 app.all("/api/calendar-public", calendarPublicHandler);
 app.all("/api/calendar-slots", calendarSlotsHandler);

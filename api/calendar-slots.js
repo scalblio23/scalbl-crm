@@ -22,7 +22,12 @@ export default async function handler(req, res) {
     if (calendar.googleConnected) {
       try {
         const accessToken = await getValidAccessToken(calendar);
-        googleBusy = await getFreeBusy({ accessToken, timeMinISO: fromISO, timeMaxISO: toISO });
+        googleBusy = await getFreeBusy({
+          accessToken,
+          calendarId: calendar.googleCalendarId,
+          timeMinISO: fromISO,
+          timeMaxISO: toISO,
+        });
       } catch (err) {
         // Surface nothing extra to the visitor — an availability check
         // failing open (no Google busy applied) is safer for a booking

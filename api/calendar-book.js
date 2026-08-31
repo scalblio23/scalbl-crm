@@ -70,7 +70,12 @@ export default async function handler(req, res) {
     if (calendar.googleConnected) {
       try {
         const accessToken = await getValidAccessToken(calendar);
-        googleBusy = await getFreeBusy({ accessToken, timeMinISO: dayStartISO, timeMaxISO: dayEndISO });
+        googleBusy = await getFreeBusy({
+          accessToken,
+          calendarId: calendar.googleCalendarId,
+          timeMinISO: dayStartISO,
+          timeMaxISO: dayEndISO,
+        });
       } catch (err) {
         console.error("[api/calendar-book] freebusy lookup failed", err);
       }
@@ -107,6 +112,7 @@ export default async function handler(req, res) {
         const accessToken = await getValidAccessToken(calendar);
         const eventId = await createGoogleEvent({
           accessToken,
+          calendarId: calendar.googleCalendarId,
           summary: `${calendar.name} with ${name}`,
           description: notes || "",
           startISO: startUTC,

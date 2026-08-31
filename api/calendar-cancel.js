@@ -23,7 +23,7 @@ export default async function handler(req, res) {
       if (calendar?.googleConnected) {
         try {
           const accessToken = await getValidAccessToken(calendar);
-          await deleteGoogleEvent({ accessToken, eventId: booking.googleEventId });
+          await deleteGoogleEvent({ accessToken, calendarId: calendar.googleCalendarId, eventId: booking.googleEventId });
         } catch (err) {
           console.error("[api/calendar-cancel] failed to delete Google event", err);
         }

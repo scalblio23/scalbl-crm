@@ -326,6 +326,11 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // Which calendar on the connected Google account events get
+    // created on/checked for conflicts against — added after the
+    // table first shipped (was hardcoded to "primary"), so existing
+    // rows default to the same behavior they already had.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS google_calendar_id TEXT NOT NULL DEFAULT 'primary'`);
     // One row per booked slot on a calendar. booker_timezone is the
     // timezone the visitor had selected in the widget at booking time
     // (purely for display in the confirmation email/SMS — start_time/
@@ -1472,6 +1477,7 @@ function calendarFromRow(r, { includeSecrets = false } = {}) {
     availability: r.availability || {},
     googleConnected: r.google_connected,
     googleEmail: r.google_email,
+    googleCalendarId: r.google_calendar_id || "primary",
     active: r.active,
     createdAt: r.created_at,
   };
@@ -1552,7 +1558,8 @@ export async function updateCalendar(id, patch) {
        -- of this patch". $9 says which case this is.
        max_bookings_per_day = CASE WHEN $9 THEN $10 ELSE max_bookings_per_day END,
        availability = COALESCE($11::jsonb, availability),
-       active = COALESCE($12, active)
+       active = COALESCE($12, active),
+       google_calendar_id = COALESCE($13, google_calendar_id)
      WHERE id = $1
      RETURNING *`,
     [
@@ -1568,6 +1575,7 @@ export async function updateCalendar(id, patch) {
       patch.maxBookingsPerDay ?? null,
       patch.availability ? JSON.stringify(patch.availability) : null,
       patch.active ?? null,
+      patch.googleCalendarId ?? null,
     ]
   );
   return rows[0] ? calendarFromRow(rows[0]) : null;
@@ -1613,7 +1621,8 @@ export async function clearCalendarGoogleTokens(id) {
        google_email = NULL,
        google_access_token = NULL,
        google_refresh_token = NULL,
-       google_token_expiry = NULL
+       google_token_expiry = NULL,
+       google_calendar_id = 'primary'
      WHERE id = $1
      RETURNING *`,
     [id]
