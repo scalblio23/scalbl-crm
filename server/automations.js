@@ -21,6 +21,7 @@ import {
   getActiveAutomationsByTrigger,
   getAutomationById,
   createAutomationRun,
+  claimAutomationRunById,
   claimDueAutomationRuns,
   updateAutomationRunProgress,
 } from "./db.js";
@@ -147,11 +148,21 @@ export async function runAutomationsForTrigger(triggerType, context) {
     if (!triggerMatches(triggerType, automation.triggerConfig, context)) continue;
     try {
       const run = await createAutomationRun({ automationId: automation.id, context, runAt: new Date() });
+      // Claim it before advancing — without this, the row sits at
+      // status 'pending' for the whole duration of the advance below
+      // (which can include real email/SMS sends), and the cron
+      // poller's claimDueAutomationRuns() firing in that window would
+      // match the same row and process it a second time. The atomic
+      // 'pending' -> 'processing' guard means whichever of the two
+      // gets here first wins; the loser (0 rows affected) does
+      // nothing instead of double-sending.
+      const claimed = await claimAutomationRunById(run.id);
+      if (!claimed) continue; // lost the race — the poller already has it
       // Advance immediately (fire-and-forget) so an automation with no
       // wait steps still fires right away instead of waiting for the
       // next poll — processDueAutomationRuns() is the fallback/
       // catch-all, not the only path.
-      advanceAutomationRun(run).catch((err) => console.error(`[automations] "${automation.name}" failed`, err));
+      advanceAutomationRun(claimed).catch((err) => console.error(`[automations] "${automation.name}" failed`, err));
     } catch (err) {
       console.error(`[automations] failed to start run for "${automation.name}"`, err);
     }

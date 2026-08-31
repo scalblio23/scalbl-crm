@@ -1,6 +1,7 @@
 import { ensureSchema, getContacts, getContactById, createContact, updateContact, deleteContacts } from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 import { runAutomationsForTrigger } from "../server/automations.js";
+import { waitUntil } from "@vercel/functions";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -27,8 +28,10 @@ export default async function handler(req, res) {
       // confirmation sends — a slow/failed automation should never
       // hold up or fail the contact actually being created.
       if (contact.tag) {
-        runAutomationsForTrigger("contact_tag_added", { tag: contact.tag, contact }).catch((err) =>
-          console.error("[api/contacts] automation trigger failed", err)
+        waitUntil(
+          runAutomationsForTrigger("contact_tag_added", { tag: contact.tag, contact }).catch((err) =>
+            console.error("[api/contacts] automation trigger failed", err)
+          )
         );
       }
       return res.status(201).json(contact);
@@ -49,8 +52,10 @@ export default async function handler(req, res) {
       // "Tag added" = the tag actually changed to something new, not
       // every save that happens to leave it unchanged.
       if (patch.tag && patch.tag !== existing?.tag) {
-        runAutomationsForTrigger("contact_tag_added", { tag: patch.tag, contact }).catch((err) =>
-          console.error("[api/contacts] automation trigger failed", err)
+        waitUntil(
+          runAutomationsForTrigger("contact_tag_added", { tag: patch.tag, contact }).catch((err) =>
+            console.error("[api/contacts] automation trigger failed", err)
+          )
         );
       }
       return res.status(200).json(contact);

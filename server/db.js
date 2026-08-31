@@ -1881,6 +1881,22 @@ export async function claimDueAutomationRuns(limit = 20) {
   return rows.map(automationRunFromRow);
 }
 
+// Claims exactly one run by id, the same 'pending' -> 'processing'
+// flip as claimDueAutomationRuns but for a run whose id is already
+// known (used right after creating one, to advance it immediately
+// instead of waiting for the next poll). The WHERE status = 'pending'
+// guard is what actually matters here: it's what makes this safe to
+// race against claimDueAutomationRuns — whichever of the two gets
+// here first wins, and the loser's UPDATE affects zero rows instead
+// of both processing the same run's steps twice.
+export async function claimAutomationRunById(id) {
+  const rows = await query(
+    "UPDATE automation_runs SET status = 'processing' WHERE id = $1 AND status = 'pending' RETURNING *",
+    [id]
+  );
+  return rows[0] ? automationRunFromRow(rows[0]) : null;
+}
+
 // Advances a claimed run: either reschedules it (more steps left,
 // status goes back to 'pending' so a later poll picks it up) or
 // closes it out ('done'/'failed').

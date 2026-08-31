@@ -17,6 +17,7 @@ import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAva
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "../server/email.js";
 import { sendSms, missingTwilioEnv, publicBaseUrl } from "../server/twilioCore.js";
 import { runAutomationsForTrigger } from "../server/automations.js";
+import { waitUntil } from "@vercel/functions";
 
 function formatInZone(iso, timeZone) {
   return new Intl.DateTimeFormat("en-US", {
@@ -145,51 +146,63 @@ export default async function handler(req, res) {
         organizerEmail: owner?.email,
         attendeeEmail: email,
       });
-      sendCalendarEmail({
-        to: email,
-        subject: `Confirmed: ${calendar.name} — ${bookerWhen}`,
-        html: `
-          <p>Hi ${name},</p>
-          <p>Your <strong>${calendar.name}</strong> is confirmed for:</p>
-          <p style="font-size:16px"><strong>${bookerWhen}</strong></p>
-          ${notes ? `<p>Notes: ${notes}</p>` : ""}
-          <p><a href="${cancelUrl}">Cancel this booking</a></p>
-        `,
-        ics,
-      }).catch((err) => console.error("[api/calendar-book] confirmation email failed", err));
+      waitUntil(
+        sendCalendarEmail({
+          to: email,
+          subject: `Confirmed: ${calendar.name} — ${bookerWhen}`,
+          html: `
+            <p>Hi ${name},</p>
+            <p>Your <strong>${calendar.name}</strong> is confirmed for:</p>
+            <p style="font-size:16px"><strong>${bookerWhen}</strong></p>
+            ${notes ? `<p>Notes: ${notes}</p>` : ""}
+            <p><a href="${cancelUrl}">Cancel this booking</a></p>
+          `,
+          ics,
+        }).catch((err) => console.error("[api/calendar-book] confirmation email failed", err))
+      );
     }
     if (owner?.email && !missingEmailEnv().length) {
-      sendCalendarEmail({
-        to: owner.email,
-        subject: `New booking: ${calendar.name} with ${name}`,
-        html: `
-          <p>${name} just booked <strong>${calendar.name}</strong> for:</p>
-          <p style="font-size:16px"><strong>${ownerWhen}</strong></p>
-          <p>Contact: ${email || "—"} ${phone || ""}</p>
-          ${notes ? `<p>Notes: ${notes}</p>` : ""}
-        `,
-      }).catch((err) => console.error("[api/calendar-book] owner notification email failed", err));
+      waitUntil(
+        sendCalendarEmail({
+          to: owner.email,
+          subject: `New booking: ${calendar.name} with ${name}`,
+          html: `
+            <p>${name} just booked <strong>${calendar.name}</strong> for:</p>
+            <p style="font-size:16px"><strong>${ownerWhen}</strong></p>
+            <p>Contact: ${email || "—"} ${phone || ""}</p>
+            ${notes ? `<p>Notes: ${notes}</p>` : ""}
+          `,
+        }).catch((err) => console.error("[api/calendar-book] owner notification email failed", err))
+      );
     }
     // SMS never blocks/fails the booking — a bad number or unconfigured
     // Twilio shouldn't turn a successful booking into a 500.
     if (phone && !missingTwilioEnv().length) {
-      sendSms({
-        to: phone,
-        body: `Hi ${name}, your ${calendar.name} is confirmed for ${bookerWhen}. Reply to reschedule.`,
-      }).catch((err) => console.error("[api/calendar-book] confirmation SMS failed", err));
+      waitUntil(
+        sendSms({
+          to: phone,
+          body: `Hi ${name}, your ${calendar.name} is confirmed for ${bookerWhen}. Reply to reschedule.`,
+        }).catch((err) => console.error("[api/calendar-book] confirmation SMS failed", err))
+      );
     }
 
     // Separate from the confirmation email/SMS above — a "Booking
     // Created" automation is an extra, user-configured action chain,
-    // not a replacement for the built-in confirmation.
-    runAutomationsForTrigger("booking_created", {
-      calendarId: calendar.id,
-      calendarName: calendar.name,
-      contact: { name, email, phone },
-      whenText: bookerWhen,
-      timezone: timezone || calendar.timezone,
-      appointmentStartUTC: startUTC,
-    }).catch((err) => console.error("[api/calendar-book] automation trigger failed", err));
+    // not a replacement for the built-in confirmation. waitUntil()
+    // matters more here than for the sends above — an automation can
+    // run several steps (each its own network call) before the first
+    // "wait", and this app's serverless functions aren't guaranteed to
+    // keep running unawaited work after the response below is sent.
+    waitUntil(
+      runAutomationsForTrigger("booking_created", {
+        calendarId: calendar.id,
+        calendarName: calendar.name,
+        contact: { name, email, phone },
+        whenText: bookerWhen,
+        timezone: timezone || calendar.timezone,
+        appointmentStartUTC: startUTC,
+      }).catch((err) => console.error("[api/calendar-book] automation trigger failed", err))
+    );
 
     return res.status(201).json({ booking, whenText: bookerWhen });
   } catch (err) {
