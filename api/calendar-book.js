@@ -16,8 +16,7 @@ import { getValidAccessToken, getFreeBusy, createGoogleEvent } from "../server/g
 import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAvailability.js";
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "../server/email.js";
 import { sendSms, missingTwilioEnv, publicBaseUrl } from "../server/twilioCore.js";
-import { runAutomationsForTrigger } from "../server/automations.js";
-import { waitUntil } from "@vercel/functions";
+import { runAutomationsForTrigger, hasMatchingAutomation } from "../server/automations.js";
 
 function formatInZone(iso, timeZone) {
   return new Intl.DateTimeFormat("en-US", {
@@ -136,7 +135,34 @@ export default async function handler(req, res) {
     const ownerWhen = formatInZone(startUTC, calendar.timezone);
     const cancelUrl = `${publicBaseUrl() || ""}/api/calendar-cancel?token=${booking.cancelToken}`;
 
-    if (email && !missingEmailEnv().length) {
+    // Once a calendar has its own "Booking Created" automation, that
+    // automation's own actions ARE the booker-facing confirmation —
+    // sending this generic built-in one too meant every booking with
+    // a custom automation produced two different confirmation
+    // messages, with no way to tell from the booker's side which one
+    // was actually configured. The owner notification email below is
+    // unaffected — that's an internal notice, not a duplicate.
+    const hasCustomBookingAutomation = await hasMatchingAutomation("booking_created", {
+      calendarId: calendar.id,
+    }).catch(() => false);
+
+    // All genuinely awaited (via Promise.all, so they run concurrently
+    // rather than adding up) rather than fire-and-forget behind
+    // waitUntil() — waitUntil() only actually extends the function's
+    // lifetime when Vercel's runtime has wired up its special request
+    // context for that invocation, which isn't guaranteed on every
+    // plan/runtime configuration; when it hasn't, it's a silent no-op
+    // (see its own source: `getContext().waitUntil?.()`), and
+    // unawaited work is liable to get cut off the moment the response
+    // below is sent and the container freezes. A single quick call
+    // (like the plain confirmation SMS) often gets away with it purely
+    // by luck of timing; a multi-step automation chain (DB writes plus
+    // a real send) is exactly the kind of work most likely to lose
+    // that race. Awaiting adds real latency to this response, but a
+    // confirmation that's supposed to send and silently doesn't is
+    // worse than a booking call that takes another few hundred ms.
+    const confirmationSends = [];
+    if (email && !hasCustomBookingAutomation && !missingEmailEnv().length) {
       const ics = buildIcs({
         uid: `booking-${booking.id}@scalbl-crm`,
         summary: `${calendar.name} with ${owner?.name || "the team"}`,
@@ -146,7 +172,7 @@ export default async function handler(req, res) {
         organizerEmail: owner?.email,
         attendeeEmail: email,
       });
-      waitUntil(
+      confirmationSends.push(
         sendCalendarEmail({
           to: email,
           subject: `Confirmed: ${calendar.name} — ${bookerWhen}`,
@@ -162,7 +188,7 @@ export default async function handler(req, res) {
       );
     }
     if (owner?.email && !missingEmailEnv().length) {
-      waitUntil(
+      confirmationSends.push(
         sendCalendarEmail({
           to: owner.email,
           subject: `New booking: ${calendar.name} with ${name}`,
@@ -176,24 +202,21 @@ export default async function handler(req, res) {
       );
     }
     // SMS never blocks/fails the booking — a bad number or unconfigured
-    // Twilio shouldn't turn a successful booking into a 500.
-    if (phone && !missingTwilioEnv().length) {
-      waitUntil(
+    // Twilio shouldn't turn a successful booking into a 500 (each
+    // push above already swallows its own error the same way).
+    if (phone && !hasCustomBookingAutomation && !missingTwilioEnv().length) {
+      confirmationSends.push(
         sendSms({
           to: phone,
           body: `Hi ${name}, your ${calendar.name} is confirmed for ${bookerWhen}. Reply to reschedule.`,
         }).catch((err) => console.error("[api/calendar-book] confirmation SMS failed", err))
       );
     }
-
-    // Separate from the confirmation email/SMS above — a "Booking
-    // Created" automation is an extra, user-configured action chain,
-    // not a replacement for the built-in confirmation. waitUntil()
-    // matters more here than for the sends above — an automation can
-    // run several steps (each its own network call) before the first
-    // "wait", and this app's serverless functions aren't guaranteed to
-    // keep running unawaited work after the response below is sent.
-    waitUntil(
+    // Separate from the confirmation sends above — a "Booking Created"
+    // automation is an extra, user-configured action chain, not a
+    // replacement for them (unless hasCustomBookingAutomation already
+    // suppressed the built-in ones above).
+    confirmationSends.push(
       runAutomationsForTrigger("booking_created", {
         calendarId: calendar.id,
         calendarName: calendar.name,
@@ -203,6 +226,7 @@ export default async function handler(req, res) {
         appointmentStartUTC: startUTC,
       }).catch((err) => console.error("[api/calendar-book] automation trigger failed", err))
     );
+    await Promise.all(confirmationSends);
 
     return res.status(201).json({ booking, whenText: bookerWhen });
   } catch (err) {

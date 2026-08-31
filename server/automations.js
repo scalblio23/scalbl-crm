@@ -169,6 +169,23 @@ export async function runAutomationsForTrigger(triggerType, context) {
   }
 }
 
+// Whether an active automation exists for this trigger that would
+// match this context — used by api/calendar-book.js to skip its own
+// built-in confirmation email/SMS once a calendar has a custom
+// "Booking Created" automation covering it, so a booker gets one
+// confirmation (the one actually configured) instead of both the
+// generic built-in one and a separate custom one.
+export async function hasMatchingAutomation(triggerType, context) {
+  let automations;
+  try {
+    automations = await getActiveAutomationsByTrigger(triggerType);
+  } catch (err) {
+    console.error("[automations] failed to check for a matching automation", err);
+    return false;
+  }
+  return automations.some((a) => triggerMatches(triggerType, a.triggerConfig, context));
+}
+
 // Called on a schedule (Vercel Cron in production, a setInterval in
 // local dev — see api/automations-process-runs.js and
 // server/index.js) to move forward whatever's due. Returns how many

@@ -1,7 +1,6 @@
 import { ensureSchema, getContacts, getContactById, createContact, updateContact, deleteContacts } from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 import { runAutomationsForTrigger } from "../server/automations.js";
-import { waitUntil } from "@vercel/functions";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -24,14 +23,17 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: "You can only add leads under your own tag." });
       }
       const contact = await createContact(body);
-      // Fire-and-forget, same as the Calendars feature's own
-      // confirmation sends — a slow/failed automation should never
-      // hold up or fail the contact actually being created.
+      // Genuinely awaited, not fire-and-forget — waitUntil() only
+      // actually extends the function's lifetime when Vercel's
+      // runtime has wired up its special request context, which
+      // isn't guaranteed on every plan/runtime; when it hasn't, it's
+      // a silent no-op, and this response gets returned (freezing the
+      // container) well before an automation chain (DB writes + a
+      // real send) would finish. See api/calendar-book.js for the
+      // same fix with more detail.
       if (contact.tag) {
-        waitUntil(
-          runAutomationsForTrigger("contact_tag_added", { tag: contact.tag, contact }).catch((err) =>
-            console.error("[api/contacts] automation trigger failed", err)
-          )
+        await runAutomationsForTrigger("contact_tag_added", { tag: contact.tag, contact }).catch((err) =>
+          console.error("[api/contacts] automation trigger failed", err)
         );
       }
       return res.status(201).json(contact);
@@ -52,10 +54,8 @@ export default async function handler(req, res) {
       // "Tag added" = the tag actually changed to something new, not
       // every save that happens to leave it unchanged.
       if (patch.tag && patch.tag !== existing?.tag) {
-        waitUntil(
-          runAutomationsForTrigger("contact_tag_added", { tag: patch.tag, contact }).catch((err) =>
-            console.error("[api/contacts] automation trigger failed", err)
-          )
+        await runAutomationsForTrigger("contact_tag_added", { tag: patch.tag, contact }).catch((err) =>
+          console.error("[api/contacts] automation trigger failed", err)
         );
       }
       return res.status(200).json(contact);
