@@ -292,6 +292,72 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // ---------- Calendars (Google-connected booking calendars) ----------
+    // One row per bookable calendar (a rep/team can have more than
+    // one, e.g. "Sales call" vs "Onboarding call"). `availability` is
+    // a per-weekday map of time ranges in the calendar's own
+    // `timezone`, e.g. {"mon":[{"start":"09:00","end":"17:00"}]} — see
+    // server/calendarAvailability.js for how it's turned into actual
+    // bookable slots. The google_* columns hold the OAuth tokens for
+    // whichever Google account was connected via "Integrate with
+    // Google" (see server/googleCalendar.js) — stored in the clear,
+    // same as api_keys.raw_key above; there's no separate secrets
+    // store in this app.
+    await query(`
+      CREATE TABLE IF NOT EXISTS calendars (
+        id SERIAL PRIMARY KEY,
+        owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        name TEXT NOT NULL,
+        slug TEXT UNIQUE NOT NULL,
+        description TEXT,
+        timezone TEXT NOT NULL DEFAULT 'UTC',
+        event_length_minutes INTEGER NOT NULL DEFAULT 30,
+        buffer_minutes INTEGER NOT NULL DEFAULT 0,
+        min_notice_hours INTEGER NOT NULL DEFAULT 4,
+        booking_window_days INTEGER NOT NULL DEFAULT 30,
+        max_bookings_per_day INTEGER,
+        availability JSONB NOT NULL DEFAULT '{}',
+        google_connected BOOLEAN NOT NULL DEFAULT false,
+        google_email TEXT,
+        google_access_token TEXT,
+        google_refresh_token TEXT,
+        google_token_expiry TIMESTAMPTZ,
+        active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // One row per booked slot on a calendar. booker_timezone is the
+    // timezone the visitor had selected in the widget at booking time
+    // (purely for display in the confirmation email/SMS — start_time/
+    // end_time are always stored in UTC). cancel_token is a bearer
+    // token embedded in the confirmation email's cancel link, so a
+    // booker can cancel without an account. The partial unique index
+    // below is what actually prevents double-booking under a race —
+    // the availability check alone is a best-effort filter, not a
+    // guarantee, once two people can hit "book" on the same slot at
+    // the same moment.
+    await query(`
+      CREATE TABLE IF NOT EXISTS calendar_bookings (
+        id SERIAL PRIMARY KEY,
+        calendar_id INTEGER REFERENCES calendars(id) ON DELETE CASCADE,
+        contact_name TEXT NOT NULL,
+        contact_email TEXT,
+        contact_phone TEXT,
+        notes TEXT,
+        start_time TIMESTAMPTZ NOT NULL,
+        end_time TIMESTAMPTZ NOT NULL,
+        booker_timezone TEXT,
+        status TEXT NOT NULL DEFAULT 'confirmed',
+        google_event_id TEXT,
+        cancel_token TEXT UNIQUE,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    await query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS calendar_bookings_no_double_book
+      ON calendar_bookings (calendar_id, start_time)
+      WHERE status = 'confirmed'
+    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1386,4 +1452,266 @@ export async function createSoundboardClip({ label, audioData, mimeType, created
 
 export async function deleteSoundboardClip(id) {
   await query("DELETE FROM soundboard_clips WHERE id = $1", [id]);
+}
+
+// ---------- Calendars ----------
+
+function calendarFromRow(r, { includeSecrets = false } = {}) {
+  const base = {
+    id: r.id,
+    ownerUserId: r.owner_user_id,
+    name: r.name,
+    slug: r.slug,
+    description: r.description || "",
+    timezone: r.timezone,
+    eventLengthMinutes: r.event_length_minutes,
+    bufferMinutes: r.buffer_minutes,
+    minNoticeHours: r.min_notice_hours,
+    bookingWindowDays: r.booking_window_days,
+    maxBookingsPerDay: r.max_bookings_per_day,
+    availability: r.availability || {},
+    googleConnected: r.google_connected,
+    googleEmail: r.google_email,
+    active: r.active,
+    createdAt: r.created_at,
+  };
+  // Access/refresh tokens never leave the server — only
+  // server/googleCalendar.js reads them directly off the DB row.
+  if (includeSecrets) {
+    base.googleAccessToken = r.google_access_token;
+    base.googleRefreshToken = r.google_refresh_token;
+    base.googleTokenExpiry = r.google_token_expiry;
+  }
+  return base;
+}
+
+function slugifyCalendarName(name) {
+  const base = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${base || "calendar"}-${crypto.randomBytes(3).toString("hex")}`;
+}
+
+const DEFAULT_AVAILABILITY = {
+  mon: [{ start: "09:00", end: "17:00" }],
+  tue: [{ start: "09:00", end: "17:00" }],
+  wed: [{ start: "09:00", end: "17:00" }],
+  thu: [{ start: "09:00", end: "17:00" }],
+  fri: [{ start: "09:00", end: "17:00" }],
+  sat: [],
+  sun: [],
+};
+
+export async function getCalendars() {
+  const rows = await query("SELECT * FROM calendars ORDER BY created_at ASC");
+  return rows.map((r) => calendarFromRow(r));
+}
+
+export async function getCalendarById(id, opts) {
+  const rows = await query("SELECT * FROM calendars WHERE id = $1", [id]);
+  return rows[0] ? calendarFromRow(rows[0], opts) : null;
+}
+
+// Used by the public booking endpoints — looked up by slug rather
+// than id, and only ever needs the row itself (callers decide what
+// to expose to the visitor).
+export async function getCalendarBySlug(slug, opts) {
+  const rows = await query("SELECT * FROM calendars WHERE slug = $1", [slug]);
+  return rows[0] ? calendarFromRow(rows[0], opts) : null;
+}
+
+export async function createCalendar({ name, ownerUserId }) {
+  const slug = slugifyCalendarName(name);
+  const rows = await query(
+    `INSERT INTO calendars (owner_user_id, name, slug, availability)
+     VALUES ($1,$2,$3,$4) RETURNING *`,
+    [ownerUserId || null, name, slug, JSON.stringify(DEFAULT_AVAILABILITY)]
+  );
+  return calendarFromRow(rows[0]);
+}
+
+// Settings patch from the Calendar settings panel — every field is
+// optional so the frontend can save one section (Timezone, Booking
+// rules, Availability, …) at a time without resending the rest.
+export async function updateCalendar(id, patch) {
+  const rows = await query(
+    `UPDATE calendars SET
+       name = COALESCE($2, name),
+       description = COALESCE($3, description),
+       timezone = COALESCE($4, timezone),
+       event_length_minutes = COALESCE($5, event_length_minutes),
+       buffer_minutes = COALESCE($6, buffer_minutes),
+       min_notice_hours = COALESCE($7, min_notice_hours),
+       booking_window_days = COALESCE($8, booking_window_days),
+       -- max_bookings_per_day is nullable *by design* (null = no
+       -- limit), so it can't use the COALESCE(new, existing) trick
+       -- every other field above uses — that would make "explicitly
+       -- clear the limit" indistinguishable from "field wasn't part
+       -- of this patch". $9 says which case this is.
+       max_bookings_per_day = CASE WHEN $9 THEN $10 ELSE max_bookings_per_day END,
+       availability = COALESCE($11::jsonb, availability),
+       active = COALESCE($12, active)
+     WHERE id = $1
+     RETURNING *`,
+    [
+      id,
+      patch.name ?? null,
+      patch.description ?? null,
+      patch.timezone ?? null,
+      patch.eventLengthMinutes ?? null,
+      patch.bufferMinutes ?? null,
+      patch.minNoticeHours ?? null,
+      patch.bookingWindowDays ?? null,
+      Object.prototype.hasOwnProperty.call(patch, "maxBookingsPerDay"),
+      patch.maxBookingsPerDay ?? null,
+      patch.availability ? JSON.stringify(patch.availability) : null,
+      patch.active ?? null,
+    ]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+export async function deleteCalendar(id) {
+  await query("DELETE FROM calendars WHERE id = $1", [id]);
+}
+
+// Called once the OAuth callback exchanges a code for tokens. Google
+// only returns a refresh_token on the very first consent (or when
+// prompt=consent forces re-consent) — reconnecting without a new
+// refresh_token keeps the old one rather than wiping it out.
+export async function setCalendarGoogleTokens(id, { googleEmail, accessToken, refreshToken, expiry }) {
+  const rows = await query(
+    `UPDATE calendars SET
+       google_connected = true,
+       google_email = $2,
+       google_access_token = $3,
+       google_refresh_token = COALESCE($4, google_refresh_token),
+       google_token_expiry = $5
+     WHERE id = $1
+     RETURNING *`,
+    [id, googleEmail, accessToken, refreshToken || null, expiry]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+// Used by server/googleCalendar.js after a token refresh — updates
+// just the access token/expiry without touching google_email/refresh.
+export async function updateCalendarGoogleAccessToken(id, { accessToken, expiry }) {
+  await query("UPDATE calendars SET google_access_token = $2, google_token_expiry = $3 WHERE id = $1", [
+    id,
+    accessToken,
+    expiry,
+  ]);
+}
+
+export async function clearCalendarGoogleTokens(id) {
+  const rows = await query(
+    `UPDATE calendars SET
+       google_connected = false,
+       google_email = NULL,
+       google_access_token = NULL,
+       google_refresh_token = NULL,
+       google_token_expiry = NULL
+     WHERE id = $1
+     RETURNING *`,
+    [id]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+// ---------- Calendar bookings ----------
+
+function calendarBookingFromRow(r) {
+  return {
+    id: r.id,
+    calendarId: r.calendar_id,
+    contactName: r.contact_name,
+    contactEmail: r.contact_email,
+    contactPhone: r.contact_phone,
+    notes: r.notes,
+    startTime: r.start_time,
+    endTime: r.end_time,
+    bookerTimezone: r.booker_timezone,
+    status: r.status,
+    googleEventId: r.google_event_id,
+    cancelToken: r.cancel_token,
+    createdAt: r.created_at,
+  };
+}
+
+export async function getCalendarBookings(calendarId) {
+  const rows = await query(
+    "SELECT * FROM calendar_bookings WHERE calendar_id = $1 ORDER BY start_time DESC",
+    [calendarId]
+  );
+  return rows.map(calendarBookingFromRow);
+}
+
+// Confirmed bookings overlapping [fromISO, toISO) — treated as busy
+// time when computing available slots, on top of whatever Google's
+// freebusy API reports (keeps a calendar's own bookings authoritative
+// even the moment before Google's copy of the event exists).
+export async function getConfirmedBookingsInRange(calendarId, fromISO, toISO) {
+  const rows = await query(
+    `SELECT * FROM calendar_bookings
+     WHERE calendar_id = $1 AND status = 'confirmed' AND start_time < $3 AND end_time > $2
+     ORDER BY start_time ASC`,
+    [calendarId, fromISO, toISO]
+  );
+  return rows.map(calendarBookingFromRow);
+}
+
+export async function countConfirmedBookingsOnDay(calendarId, dayStartISO, dayEndISO) {
+  const [{ count }] = await query(
+    `SELECT count(*)::int AS count FROM calendar_bookings
+     WHERE calendar_id = $1 AND status = 'confirmed' AND start_time >= $2 AND start_time < $3`,
+    [calendarId, dayStartISO, dayEndISO]
+  );
+  return count;
+}
+
+export async function createCalendarBooking(b) {
+  const cancelToken = crypto.randomBytes(16).toString("hex");
+  const rows = await query(
+    `INSERT INTO calendar_bookings
+       (calendar_id, contact_name, contact_email, contact_phone, notes, start_time, end_time, booker_timezone, cancel_token)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     RETURNING *`,
+    [
+      b.calendarId,
+      b.contactName,
+      b.contactEmail || null,
+      b.contactPhone || null,
+      b.notes || null,
+      b.startTime,
+      b.endTime,
+      b.bookerTimezone || null,
+      cancelToken,
+    ]
+  );
+  return calendarBookingFromRow(rows[0]);
+}
+
+export async function setCalendarBookingGoogleEventId(id, googleEventId) {
+  await query("UPDATE calendar_bookings SET google_event_id = $2 WHERE id = $1", [id, googleEventId]);
+}
+
+export async function getCalendarBookingByCancelToken(token) {
+  const rows = await query("SELECT * FROM calendar_bookings WHERE cancel_token = $1", [token]);
+  return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+export async function getCalendarBookingById(id) {
+  const rows = await query("SELECT * FROM calendar_bookings WHERE id = $1", [id]);
+  return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+export async function cancelCalendarBooking(id) {
+  const rows = await query(
+    "UPDATE calendar_bookings SET status = 'cancelled' WHERE id = $1 RETURNING *",
+    [id]
+  );
+  return rows[0] ? calendarBookingFromRow(rows[0]) : null;
 }

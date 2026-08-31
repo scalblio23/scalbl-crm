@@ -47,9 +47,25 @@ import {
   Play,
   Mic,
   Square,
+  Calendar,
+  Clock,
+  Link2,
+  Globe,
+  MapPin,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
+import Dropdown from "./components/Dropdown";
+import {
+  timezoneOptions,
+  detectBrowserTimezone,
+  timeOfDayOptions,
+  EVENT_LENGTH_OPTIONS,
+  BUFFER_OPTIONS,
+  MIN_NOTICE_OPTIONS,
+  BOOKING_WINDOW_OPTIONS,
+  WEEKDAYS,
+} from "./lib/calendarOptions";
 
 // ---------- Sample data ----------
 const initialContacts = [
@@ -325,7 +341,19 @@ const navItems = [
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "clients", label: "Clients", icon: Briefcase },
+  { key: "calendars", label: "Calendars", icon: Calendar },
   { key: "settings", label: "Settings", icon: Settings },
+];
+
+// Calendar settings' left mini-nav — Integrate → Timezone → Availability
+// → Booking rules → Share & embed, per the sidebar tab → Add Calendar →
+// Calendar settings → options flow.
+const CALENDAR_SETTINGS_SECTIONS = [
+  { key: "integrate", label: "Integrate", icon: Globe },
+  { key: "timezone", label: "Timezone", icon: Clock },
+  { key: "availability", label: "Availability", icon: Calendar },
+  { key: "rules", label: "Booking rules", icon: ListChecks },
+  { key: "share", label: "Share & embed", icon: Link2 },
 ];
 
 export default function SimpleCRM() {
@@ -496,6 +524,169 @@ export default function SimpleCRM() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser]);
+
+  // ---------- Calendars ----------
+  // Loaded lazily the first time the tab is opened rather than as
+  // part of /api/bootstrap — a brand-new team has zero calendars, and
+  // there's no reason to make every page load wait on a fetch for a
+  // tab most sessions never visit.
+  const [calendars, setCalendars] = useState([]);
+  const [calendarsLoaded, setCalendarsLoaded] = useState(false);
+  const [calendarsLoading, setCalendarsLoading] = useState(false);
+  const [openCalendarId, setOpenCalendarId] = useState(null);
+  const [calendarSettingsTab, setCalendarSettingsTab] = useState("integrate");
+  const [showAddCalendarModal, setShowAddCalendarModal] = useState(false);
+  const [newCalendarName, setNewCalendarName] = useState("");
+  const [addingCalendar, setAddingCalendar] = useState(false);
+  const [calendarBookings, setCalendarBookings] = useState([]);
+  const [savingCalendar, setSavingCalendar] = useState(false);
+
+  const loadCalendars = async () => {
+    setCalendarsLoading(true);
+    try {
+      const data = await api.get("/api/calendars");
+      setCalendars(data);
+    } catch {
+      // Left as whatever was already loaded — the Calendars tab shows
+      // its own inline error state rather than a global banner.
+    } finally {
+      setCalendarsLoading(false);
+      setCalendarsLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    if (page === "calendars" && !calendarsLoaded && !calendarsLoading) loadCalendars();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  // Picks up ?calendar=<id>&google=connected|error after the "Integrate
+  // with Google" OAuth round trip lands back on the CRM (see
+  // api/calendar-google-callback.js) — reopens that calendar's
+  // Integrate section and refreshes its state so the newly-connected
+  // account shows up immediately.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const google = params.get("google");
+    const calendarParam = params.get("calendar");
+    if (!google) return;
+    setPage("calendars");
+    setCalendarSettingsTab("integrate");
+    if (calendarParam) setOpenCalendarId(Number(calendarParam));
+    loadCalendars();
+    window.history.replaceState({}, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const openCalendar = calendars.find((c) => c.id === openCalendarId) || null;
+  const timezoneDropdownOptions = useMemo(() => timezoneOptions(), []);
+  const timeOfDayDropdownOptions = useMemo(() => timeOfDayOptions(), []);
+
+  useEffect(() => {
+    if (!openCalendarId) return;
+    api
+      .get(`/api/calendar-bookings?calendarId=${openCalendarId}`)
+      .then(setCalendarBookings)
+      .catch(() => setCalendarBookings([]));
+  }, [openCalendarId]);
+
+  // Availability and booking-rules edits are drafted locally and saved
+  // with an explicit button (like the rest of Settings) rather than
+  // patching the server on every click — editing a weekly hours grid
+  // one field at a time would otherwise fire a save per keystroke.
+  const [availabilityDraft, setAvailabilityDraft] = useState(null);
+  const [rulesDraft, setRulesDraft] = useState(null);
+  useEffect(() => {
+    if (!openCalendar) return;
+    setAvailabilityDraft(openCalendar.availability);
+    setRulesDraft({
+      eventLengthMinutes: String(openCalendar.eventLengthMinutes),
+      bufferMinutes: String(openCalendar.bufferMinutes),
+      minNoticeHours: String(openCalendar.minNoticeHours),
+      bookingWindowDays: String(openCalendar.bookingWindowDays),
+      maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCalendar?.id]);
+
+  const setDayRange = (day, index, key, value) =>
+    setAvailabilityDraft((draft) => ({
+      ...draft,
+      [day]: draft[day].map((r, i) => (i === index ? { ...r, [key]: value } : r)),
+    }));
+  const addDayRange = (day) =>
+    setAvailabilityDraft((draft) => ({ ...draft, [day]: [...(draft[day] || []), { start: "09:00", end: "17:00" }] }));
+  const removeDayRange = (day, index) =>
+    setAvailabilityDraft((draft) => ({ ...draft, [day]: draft[day].filter((_, i) => i !== index) }));
+  const toggleDayEnabled = (day) =>
+    setAvailabilityDraft((draft) => ({
+      ...draft,
+      [day]: draft[day]?.length ? [] : [{ start: "09:00", end: "17:00" }],
+    }));
+
+  const handleAddCalendar = async (e) => {
+    e.preventDefault();
+    if (!newCalendarName.trim()) return;
+    setAddingCalendar(true);
+    try {
+      const calendar = await api.post("/api/calendars", { name: newCalendarName.trim() });
+      setCalendars((cs) => [...cs, calendar]);
+      setNewCalendarName("");
+      setShowAddCalendarModal(false);
+      setOpenCalendarId(calendar.id);
+      setCalendarSettingsTab("integrate");
+    } catch (err) {
+      alert(err.message || "Could not create the calendar");
+    } finally {
+      setAddingCalendar(false);
+    }
+  };
+
+  const patchCalendar = async (id, patch) => {
+    setSavingCalendar(true);
+    try {
+      const updated = await api.patch(`/api/calendars?id=${id}`, patch);
+      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      alert(err.message || "Could not save that change");
+    } finally {
+      setSavingCalendar(false);
+    }
+  };
+
+  const deleteCalendar = async (id) => {
+    if (!window.confirm("Delete this calendar? Its booking link will stop working.")) return;
+    try {
+      await api.delete(`/api/calendars?id=${id}`);
+      setCalendars((cs) => cs.filter((c) => c.id !== id));
+      if (openCalendarId === id) setOpenCalendarId(null);
+    } catch (err) {
+      alert(err.message || "Could not delete the calendar");
+    }
+  };
+
+  const connectGoogleCalendar = (id) => {
+    window.location.href = `/api/calendar-google-connect?calendarId=${id}`;
+  };
+
+  const disconnectGoogleCalendar = async (id) => {
+    try {
+      const updated = await api.post("/api/calendar-google-disconnect", { calendarId: id });
+      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      alert(err.message || "Could not disconnect Google");
+    }
+  };
+
+  const cancelCalendarBooking = async (id) => {
+    if (!window.confirm("Cancel this booking?")) return;
+    try {
+      await api.delete(`/api/calendar-bookings?id=${id}`);
+      setCalendarBookings((bs) => bs.map((b) => (b.id === id ? { ...b, status: "cancelled" } : b)));
+    } catch (err) {
+      alert(err.message || "Could not cancel the booking");
+    }
+  };
 
   // Add-contact modal
   const emptyContactForm = {
@@ -5843,6 +6034,388 @@ export default function SimpleCRM() {
           </div>
         )}
 
+        {/* Calendars */}
+        {page === "calendars" && (
+          <div className="flex-1 overflow-y-auto">
+            {!openCalendar ? (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <h1 className="text-xl font-bold">Calendars</h1>
+                  <button
+                    onClick={() => setShowAddCalendarModal(true)}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Plus size={15} /> Add Calendar
+                  </button>
+                </div>
+                <div className="p-8">
+                  {calendarsLoading ? (
+                    <div className="flex justify-center py-16">
+                      <Loader2 className="animate-spin text-gray-400" size={20} />
+                    </div>
+                  ) : calendars.length === 0 ? (
+                    <div className="text-center py-16 text-sm text-gray-400">
+                      <Calendar size={28} className="mx-auto mb-3 text-gray-300" />
+                      No calendars yet. Add one to start taking bookings.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {calendars.map((cal) => (
+                        <div key={cal.id} className="border border-gray-200 rounded-xl p-5 bg-white">
+                          <div className="flex items-start justify-between mb-2">
+                            <h3 className="font-semibold text-sm">{cal.name}</h3>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border ${
+                                cal.active
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-gray-100 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {cal.active ? "Active" : "Paused"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-400 mb-1.5 flex items-center gap-1">
+                            <Clock size={12} /> {cal.eventLengthMinutes} min · {cal.timezone}
+                          </p>
+                          <p className="text-xs mb-4">
+                            {cal.googleConnected ? (
+                              <span className="text-emerald-600 flex items-center gap-1">
+                                <CheckCircle2 size={12} /> Google connected
+                              </span>
+                            ) : (
+                              <span className="text-gray-400">Google not connected</span>
+                            )}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setOpenCalendarId(cal.id);
+                                setCalendarSettingsTab("integrate");
+                              }}
+                              className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-3 py-2 rounded-lg font-medium"
+                            >
+                              Open
+                            </button>
+                            <button
+                              onClick={() => deleteCalendar(cal.id)}
+                              className="text-gray-400 hover:text-red-600 p-2"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <button
+                      onClick={() => setOpenCalendarId(null)}
+                      className="text-xs text-gray-400 hover:text-gray-700 mb-1"
+                    >
+                      ← Back to Calendars
+                    </button>
+                    <h1 className="text-xl font-bold">{openCalendar.name}</h1>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-500">
+                    <input
+                      type="checkbox"
+                      checked={openCalendar.active}
+                      onChange={(e) => patchCalendar(openCalendar.id, { active: e.target.checked })}
+                    />
+                    Active
+                  </label>
+                </div>
+                <div className="flex">
+                  <div className="w-48 shrink-0 border-r border-gray-100 py-6 px-3 space-y-1">
+                    {CALENDAR_SETTINGS_SECTIONS.map(({ key, label, icon: Icon }) => (
+                      <button
+                        key={key}
+                        onClick={() => setCalendarSettingsTab(key)}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg text-left ${
+                          calendarSettingsTab === key
+                            ? "bg-gray-100 font-semibold text-gray-900"
+                            : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+                        }`}
+                      >
+                        <Icon size={15} /> {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex-1 p-8">
+                    {calendarSettingsTab === "integrate" && (
+                      <div className="max-w-lg space-y-4">
+                        <h2 className="text-base font-bold">Integrate with Google</h2>
+                        <p className="text-sm text-gray-500">
+                          Connect a Google account so booked calls are added straight to that calendar, and existing
+                          events on it block off time here automatically.
+                        </p>
+                        {openCalendar.googleConnected ? (
+                          <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
+                            <div>
+                              <p className="text-sm font-medium">Connected</p>
+                              <p className="text-xs text-gray-500">{openCalendar.googleEmail}</p>
+                            </div>
+                            <button
+                              onClick={() => disconnectGoogleCalendar(openCalendar.id)}
+                              className="text-sm text-red-600 hover:text-red-700 font-medium"
+                            >
+                              Disconnect
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => connectGoogleCalendar(openCalendar.id)}
+                            className="flex items-center gap-2 border border-gray-200 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                          >
+                            <Globe size={15} /> Connect with Google
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "timezone" && (
+                      <div className="max-w-sm space-y-3">
+                        <h2 className="text-base font-bold">Timezone</h2>
+                        <p className="text-sm text-gray-500">Availability hours below are set in this timezone.</p>
+                        <Dropdown
+                          value={openCalendar.timezone}
+                          onChange={(tz) => patchCalendar(openCalendar.id, { timezone: tz })}
+                          options={timezoneDropdownOptions}
+                          searchable
+                        />
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "availability" && availabilityDraft && (
+                      <div className="max-w-2xl space-y-5">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Availability</h2>
+                          <button
+                            onClick={() => patchCalendar(openCalendar.id, { availability: availabilityDraft })}
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save availability
+                          </button>
+                        </div>
+                        {WEEKDAYS.map(({ key, label }) => {
+                          const ranges = availabilityDraft[key] || [];
+                          return (
+                            <div key={key} className="border border-gray-100 rounded-lg p-4">
+                              <div className="flex items-center justify-between mb-3">
+                                <label className="flex items-center gap-2 text-sm font-medium">
+                                  <input type="checkbox" checked={ranges.length > 0} onChange={() => toggleDayEnabled(key)} />
+                                  {label}
+                                </label>
+                                {ranges.length > 0 && (
+                                  <button
+                                    onClick={() => addDayRange(key)}
+                                    className="text-xs text-gray-500 hover:text-gray-800 font-medium"
+                                  >
+                                    + Add range
+                                  </button>
+                                )}
+                              </div>
+                              {ranges.map((range, i) => (
+                                <div key={i} className="flex items-center gap-2 mb-2">
+                                  <Dropdown
+                                    value={range.start}
+                                    onChange={(v) => setDayRange(key, i, "start", v)}
+                                    options={timeOfDayDropdownOptions}
+                                    className="w-36"
+                                  />
+                                  <span className="text-gray-400 text-sm">to</span>
+                                  <Dropdown
+                                    value={range.end}
+                                    onChange={(v) => setDayRange(key, i, "end", v)}
+                                    options={timeOfDayDropdownOptions}
+                                    className="w-36"
+                                  />
+                                  <button onClick={() => removeDayRange(key, i)} className="text-gray-400 hover:text-red-600 p-1">
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              ))}
+                              {ranges.length === 0 && <p className="text-xs text-gray-400">Unavailable</p>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "rules" && rulesDraft && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Booking rules</h2>
+                          <button
+                            onClick={() =>
+                              patchCalendar(openCalendar.id, {
+                                eventLengthMinutes: Number(rulesDraft.eventLengthMinutes),
+                                bufferMinutes: Number(rulesDraft.bufferMinutes),
+                                minNoticeHours: Number(rulesDraft.minNoticeHours),
+                                bookingWindowDays: Number(rulesDraft.bookingWindowDays),
+                                maxBookingsPerDay: rulesDraft.maxBookingsPerDay === "" ? null : Number(rulesDraft.maxBookingsPerDay),
+                              })
+                            }
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Call length</label>
+                          <Dropdown
+                            value={rulesDraft.eventLengthMinutes}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, eventLengthMinutes: v }))}
+                            options={EVENT_LENGTH_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Buffer between calls</label>
+                          <Dropdown
+                            value={rulesDraft.bufferMinutes}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, bufferMinutes: v }))}
+                            options={BUFFER_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Minimum notice</label>
+                          <Dropdown
+                            value={rulesDraft.minNoticeHours}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, minNoticeHours: v }))}
+                            options={MIN_NOTICE_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Booking window</label>
+                          <Dropdown
+                            value={rulesDraft.bookingWindowDays}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, bookingWindowDays: v }))}
+                            options={BOOKING_WINDOW_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                            Max bookings per day (optional)
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={rulesDraft.maxBookingsPerDay}
+                            onChange={(e) => setRulesDraft((d) => ({ ...d, maxBookingsPerDay: e.target.value }))}
+                            placeholder="No limit"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "share" && (
+                      <div className="max-w-xl space-y-6">
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Share</h2>
+                          <p className="text-sm text-gray-500 mb-3">
+                            Anyone with this link can book an open slot on this calendar.
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <input
+                              readOnly
+                              value={`${window.location.origin}/book/${openCalendar.slug}`}
+                              onFocus={(e) => e.target.select()}
+                              className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50"
+                            />
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(`${window.location.origin}/book/${openCalendar.slug}`)
+                              }
+                              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                            >
+                              <Copy size={14} /> Copy
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Embed</h2>
+                          <p className="text-sm text-gray-500 mb-3">
+                            Paste this into any website to embed the booking widget directly.
+                          </p>
+                          <div className="flex items-start gap-2">
+                            <textarea
+                              readOnly
+                              rows={3}
+                              value={`<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`}
+                              onFocus={(e) => e.target.select()}
+                              className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50 font-mono"
+                            />
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(
+                                  `<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`
+                                )
+                              }
+                              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                            >
+                              <Copy size={14} /> Copy
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Bookings</h2>
+                          {calendarBookings.length === 0 ? (
+                            <p className="text-sm text-gray-400">No bookings yet.</p>
+                          ) : (
+                            <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                              {calendarBookings.map((b) => (
+                                <div key={b.id} className="flex items-center justify-between px-4 py-3">
+                                  <div>
+                                    <p className="text-sm font-medium">
+                                      {b.contactName}{" "}
+                                      {b.status === "cancelled" && (
+                                        <span className="text-xs text-red-500 font-normal">(cancelled)</span>
+                                      )}
+                                    </p>
+                                    <p className="text-xs text-gray-500 flex items-center gap-1">
+                                      <MapPin size={11} /> {b.contactEmail || b.contactPhone || "—"}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-gray-500">
+                                      {new Date(b.startTime).toLocaleString("en-US", {
+                                        dateStyle: "medium",
+                                        timeStyle: "short",
+                                        timeZone: openCalendar.timezone,
+                                      })}
+                                    </span>
+                                    {b.status !== "cancelled" && (
+                                      <button
+                                        onClick={() => cancelCalendarBooking(b.id)}
+                                        className="text-xs text-red-500 hover:text-red-700 font-medium"
+                                      >
+                                        Cancel
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Settings */}
         {page === "settings" && (
           <div className="flex-1 overflow-y-auto">
@@ -6282,6 +6855,53 @@ export default function SimpleCRM() {
                 </form>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Calendar modal */}
+      {showAddCalendarModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddCalendarModal(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add Calendar</h2>
+              <button onClick={() => setShowAddCalendarModal(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddCalendar} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Calendar name</label>
+                <input
+                  autoFocus
+                  required
+                  value={newCalendarName}
+                  onChange={(e) => setNewCalendarName(e.target.value)}
+                  placeholder="e.g. Sales call"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddCalendarModal(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingCalendar}
+                  className="flex items-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {addingCalendar && <Loader2 size={14} className="animate-spin" />}
+                  Create calendar
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

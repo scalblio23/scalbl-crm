@@ -81,6 +81,22 @@ import {
   updateUser,
   deleteUserById,
 } from "./db.js";
+// Calendars — unlike every route above, these are mounted straight
+// from their /api/*.js handlers rather than reimplemented inline.
+// Each handler is a plain (req, res) function with no Vercel-specific
+// behavior (query/body/status/json all work identically under
+// Express), and the feature's actual logic (Google OAuth, freebusy,
+// SendGrid, Twilio SMS) is substantial enough that keeping one copy
+// of it is worth the small deviation from this file's usual pattern.
+import calendarsHandler from "../api/calendars.js";
+import calendarGoogleConnectHandler from "../api/calendar-google-connect.js";
+import calendarGoogleCallbackHandler from "../api/calendar-google-callback.js";
+import calendarGoogleDisconnectHandler from "../api/calendar-google-disconnect.js";
+import calendarBookingsHandler from "../api/calendar-bookings.js";
+import calendarPublicHandler from "../api/calendar-public.js";
+import calendarSlotsHandler from "../api/calendar-slots.js";
+import calendarBookHandler from "../api/calendar-book.js";
+import calendarCancelHandler from "../api/calendar-cancel.js";
 import {
   getSessionUser,
   requireAuth,
@@ -132,6 +148,14 @@ const PUBLIC_PATHS = new Set([
   // /api/sms-inbound above.
   "/api/voice-multiline-leg",
   "/api/multiline-status",
+  // Calendars — the public booking-widget side (see api/calendar-*.js
+  // for how each authenticates itself instead: signed OAuth state,
+  // a calendar's own slug, or a booking's cancel token).
+  "/api/calendar-google-callback",
+  "/api/calendar-public",
+  "/api/calendar-slots",
+  "/api/calendar-book",
+  "/api/calendar-cancel",
 ]);
 
 app.use(async (req, res, next) => {
@@ -161,6 +185,10 @@ app.use(
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
+    "/api/calendars",
+    "/api/calendar-google-connect",
+    "/api/calendar-google-disconnect",
+    "/api/calendar-bookings",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -1069,6 +1097,19 @@ app.post(
     )
   )
 );
+
+// ---------- Calendars ----------
+// See the import comment above — these are the actual /api/*.js
+// handlers, mounted directly rather than reimplemented here.
+app.all("/api/calendars", calendarsHandler);
+app.all("/api/calendar-google-connect", calendarGoogleConnectHandler);
+app.all("/api/calendar-google-callback", calendarGoogleCallbackHandler);
+app.all("/api/calendar-google-disconnect", calendarGoogleDisconnectHandler);
+app.all("/api/calendar-bookings", calendarBookingsHandler);
+app.all("/api/calendar-public", calendarPublicHandler);
+app.all("/api/calendar-slots", calendarSlotsHandler);
+app.all("/api/calendar-book", calendarBookHandler);
+app.all("/api/calendar-cancel", calendarCancelHandler);
 
 app.listen(PORT, () => {
   const missing = missingTwilioEnv();
