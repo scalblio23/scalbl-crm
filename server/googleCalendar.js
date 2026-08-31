@@ -29,6 +29,24 @@ export function googleRedirectUri(baseUrl) {
   return `${baseUrl}/api/calendar-google-callback`;
 }
 
+// The base URL used to build the OAuth redirect_uri — Google rejects
+// the whole flow with "Error 400: redirect_uri_mismatch" unless this
+// exactly matches an Authorized redirect URI registered in Google
+// Cloud Console. Deliberately NOT server/twilioCore.js's
+// publicBaseUrl() here: that prefers VERCEL_URL, which on Vercel is
+// the deployment's own unique hash URL (e.g.
+// "my-app-git-branch-hash.vercel.app"), not the custom/production
+// domain a deployment is aliased to — even for a deployment currently
+// serving production traffic. Using the incoming request's own Host
+// header instead always matches whatever domain the browser is
+// actually on, which is exactly what needs to match Google Cloud
+// Console's registered URI. PUBLIC_URL (e.g. an ngrok tunnel in local
+// dev) still overrides when set, same convention as publicBaseUrl().
+export function requestBaseUrl(req, env = process.env) {
+  if (env.PUBLIC_URL) return env.PUBLIC_URL.replace(/\/+$/, "");
+  return `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}`;
+}
+
 // Builds the "Connect with Google" URL — clicking it is the entire
 // integration flow from the user's side, same as any other "Sign in
 // with Google" button. `state` carries which calendar/user this

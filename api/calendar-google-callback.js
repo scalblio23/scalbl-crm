@@ -7,11 +7,10 @@
 // Google Cloud Console.
 import jwt from "jsonwebtoken";
 import { ensureSchema, getCalendarById, setCalendarGoogleTokens } from "../server/db.js";
-import { publicBaseUrl } from "../server/twilioCore.js";
-import { exchangeCodeForTokens, fetchGoogleEmail } from "../server/googleCalendar.js";
+import { exchangeCodeForTokens, fetchGoogleEmail, requestBaseUrl } from "../server/googleCalendar.js";
 
 export default async function handler(req, res) {
-  const baseUrl = publicBaseUrl() || `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}`;
+  const baseUrl = requestBaseUrl(req);
 
   function redirectToCrm(query) {
     res.writeHead(302, { Location: `${baseUrl}/?${new URLSearchParams(query).toString()}` });

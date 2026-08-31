@@ -8,8 +8,7 @@
 import jwt from "jsonwebtoken";
 import { ensureSchema, getCalendarById } from "../server/db.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
-import { publicBaseUrl } from "../server/twilioCore.js";
-import { buildGoogleAuthUrl, missingGoogleEnv } from "../server/googleCalendar.js";
+import { buildGoogleAuthUrl, missingGoogleEnv, requestBaseUrl } from "../server/googleCalendar.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -26,7 +25,7 @@ export default async function handler(req, res) {
     const calendar = await getCalendarById(calendarId);
     if (!calendar) return res.status(404).json({ error: "Calendar not found" });
 
-    const baseUrl = publicBaseUrl() || `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}`;
+    const baseUrl = requestBaseUrl(req);
     const state = jwt.sign({ calendarId: String(calendarId) }, process.env.SESSION_SECRET, { expiresIn: "10m" });
     const url = buildGoogleAuthUrl({ baseUrl, state });
     res.writeHead(302, { Location: url });
