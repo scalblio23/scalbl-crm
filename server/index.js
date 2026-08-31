@@ -80,6 +80,7 @@ import {
   inviteUser,
   updateUser,
   deleteUserById,
+  reapStuckAutomationRuns,
 } from "./db.js";
 // Calendars — unlike every route above, these are mounted straight
 // from their /api/*.js handlers rather than reimplemented inline.
@@ -1143,6 +1144,8 @@ app.listen(PORT, () => {
 // this poller only runs in this long-lived local process.
 if (isDbConfigured()) {
   setInterval(() => {
-    processDueAutomationRuns().catch((err) => console.error("[automations] local poller failed", err));
+    reapStuckAutomationRuns()
+      .then(() => processDueAutomationRuns())
+      .catch((err) => console.error("[automations] local poller failed", err));
   }, 15000);
 }

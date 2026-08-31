@@ -106,29 +106,44 @@ async function runStep(step, automation, context) {
 // aborting the rest of the chain — one bad send shouldn't block a
 // later step in the same automation.
 export async function advanceAutomationRun(run) {
-  const automation = await getAutomationById(run.automationId);
-  if (!automation || !automation.active) {
-    await updateAutomationRunProgress(run.id, { status: "done" });
-    return;
-  }
-  const actions = automation.actions || [];
-  let index = run.nextStepIndex;
-  while (index < actions.length) {
-    const step = actions[index];
-    if (step.type === "wait") {
-      const runAt = computeWaitRunAt(step, run.context);
-      await updateAutomationRunProgress(run.id, { nextStepIndex: index + 1, runAt, status: "pending" });
+  // Wrapped end-to-end: a run is claimed ('processing') before this is
+  // called, and 'processing' is never re-claimed by anything else (see
+  // claimDueAutomationRuns/claimAutomationRunById) — so any exception
+  // that escapes this function uncaught leaves that row stuck at
+  // 'processing' forever, indistinguishable in Recent Activity from
+  // one that's genuinely still working. Every exit path below
+  // explicitly sets a terminal or resumable status instead.
+  try {
+    const automation = await getAutomationById(run.automationId);
+    if (!automation || !automation.active) {
+      await updateAutomationRunProgress(run.id, { status: "done" });
       return;
     }
-    try {
-      await runStep(step, automation, run.context);
-    } catch (err) {
-      console.error(`[automations] "${automation.name}" step ${index} failed`, err);
-      await updateAutomationRunProgress(run.id, { lastError: String(err.message || err).slice(0, 500) });
+    const actions = automation.actions || [];
+    let index = run.nextStepIndex;
+    while (index < actions.length) {
+      const step = actions[index];
+      if (step.type === "wait") {
+        const runAt = computeWaitRunAt(step, run.context);
+        await updateAutomationRunProgress(run.id, { nextStepIndex: index + 1, runAt, status: "pending" });
+        return;
+      }
+      try {
+        await runStep(step, automation, run.context);
+      } catch (err) {
+        console.error(`[automations] "${automation.name}" step ${index} failed`, err);
+        await updateAutomationRunProgress(run.id, { lastError: String(err.message || err).slice(0, 500) });
+      }
+      index += 1;
     }
-    index += 1;
+    await updateAutomationRunProgress(run.id, { nextStepIndex: index, status: "done" });
+  } catch (err) {
+    console.error(`[automations] run ${run.id} failed to advance`, err);
+    await updateAutomationRunProgress(run.id, {
+      status: "failed",
+      lastError: String(err.message || err).slice(0, 500),
+    }).catch(() => {});
   }
-  await updateAutomationRunProgress(run.id, { nextStepIndex: index, status: "done" });
 }
 
 // `triggerType`: "contact_tag_added" | "booking_created".
@@ -158,11 +173,17 @@ export async function runAutomationsForTrigger(triggerType, context) {
       // nothing instead of double-sending.
       const claimed = await claimAutomationRunById(run.id);
       if (!claimed) continue; // lost the race — the poller already has it
-      // Advance immediately (fire-and-forget) so an automation with no
-      // wait steps still fires right away instead of waiting for the
-      // next poll — processDueAutomationRuns() is the fallback/
-      // catch-all, not the only path.
-      advanceAutomationRun(claimed).catch((err) => console.error(`[automations] "${automation.name}" failed`, err));
+      // Actually awaited — this used to be fire-and-forget ("advance
+      // immediately so an automation with no wait steps still fires
+      // right away"), but that meant this whole function returned the
+      // instant the row was claimed, before advanceAutomationRun had
+      // done any of the real work (the SMS/email send). Callers now
+      // reliably await runAutomationsForTrigger() itself (see
+      // api/calendar-book.js / api/contacts.js), so the "fire right
+      // away" behavior this was going for still holds — it's just
+      // synchronous instead of detached, which is what makes it
+      // actually reliable under waitUntil()'s caveats there.
+      await advanceAutomationRun(claimed).catch((err) => console.error(`[automations] "${automation.name}" failed`, err));
     } catch (err) {
       console.error(`[automations] failed to start run for "${automation.name}"`, err);
     }

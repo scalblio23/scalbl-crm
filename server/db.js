@@ -406,6 +406,14 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // Bumped every time a run is claimed or advanced — lets a stuck
+    // 'processing' row (advanceAutomationRun crashed in a way that
+    // somehow still escaped its own catch-all) be told apart from one
+    // genuinely mid-flight, by how long ago it last moved rather than
+    // by created_at (which for a run that already went through one or
+    // more "wait" cycles reflects the original trigger time, not the
+    // current step). See reapStuckAutomationRuns below.
+    await query(`ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1867,7 +1875,7 @@ export async function createAutomationRun({ automationId, context, runAt }) {
 // just claiming a batch instead of a single winner.
 export async function claimDueAutomationRuns(limit = 20) {
   const rows = await query(
-    `UPDATE automation_runs SET status = 'processing'
+    `UPDATE automation_runs SET status = 'processing', updated_at = now()
      WHERE id IN (
        SELECT id FROM automation_runs
        WHERE status = 'pending' AND run_at <= now()
@@ -1879,6 +1887,23 @@ export async function claimDueAutomationRuns(limit = 20) {
     [limit]
   );
   return rows.map(automationRunFromRow);
+}
+
+// Marks any run that's been sitting at 'processing' for too long as
+// 'failed' instead — 'processing' is meant to be a momentary state
+// (claimed right before advanceAutomationRun runs, normally resolved
+// within seconds), and nothing ever re-claims a 'processing' row, so
+// one that gets stuck there (advanceAutomationRun crashing in a way
+// that somehow still escaped its own catch-all) would otherwise stay
+// stuck forever with no way to tell it apart from one genuinely still
+// working. Called alongside processDueAutomationRuns on the same
+// schedule.
+export async function reapStuckAutomationRuns(olderThanMinutes = 5) {
+  await query(
+    `UPDATE automation_runs SET status = 'failed', last_error = 'Timed out stuck in processing'
+     WHERE status = 'processing' AND updated_at < now() - make_interval(mins => $1)`,
+    [olderThanMinutes]
+  );
 }
 
 // Claims exactly one run by id, the same 'pending' -> 'processing'
@@ -1905,7 +1930,7 @@ export async function getAutomationRunsByAutomationId(automationId, limit = 20) 
 
 export async function claimAutomationRunById(id) {
   const rows = await query(
-    "UPDATE automation_runs SET status = 'processing' WHERE id = $1 AND status = 'pending' RETURNING *",
+    "UPDATE automation_runs SET status = 'processing', updated_at = now() WHERE id = $1 AND status = 'pending' RETURNING *",
     [id]
   );
   return rows[0] ? automationRunFromRow(rows[0]) : null;
@@ -1920,7 +1945,8 @@ export async function updateAutomationRunProgress(id, { nextStepIndex, runAt, st
        next_step_index = COALESCE($2, next_step_index),
        run_at = COALESCE($3, run_at),
        status = COALESCE($4, status),
-       last_error = COALESCE($5, last_error)
+       last_error = COALESCE($5, last_error),
+       updated_at = now()
      WHERE id = $1`,
     [
       id,

@@ -11,7 +11,7 @@
 // the project; checking for that here is what actually locks this
 // down. Without CRON_SECRET set, this runs unauthenticated — fine for
 // local dev, but set it in Vercel before relying on this in production.
-import { ensureSchema } from "../server/db.js";
+import { ensureSchema, reapStuckAutomationRuns } from "../server/db.js";
 import { processDueAutomationRuns } from "../server/automations.js";
 
 export default async function handler(req, res) {
@@ -23,6 +23,10 @@ export default async function handler(req, res) {
   }
   try {
     await ensureSchema();
+    // Runs before claiming new work so a run stuck from a previous,
+    // now-fixed bug (or any future one) doesn't sit invisible forever —
+    // see reapStuckAutomationRuns' own comment in server/db.js.
+    await reapStuckAutomationRuns();
     const processed = await processDueAutomationRuns();
     return res.status(200).json({ processed });
   } catch (err) {
