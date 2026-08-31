@@ -596,7 +596,9 @@ export default function SimpleCRM() {
   // "primary".
   const [googleCalendarOptions, setGoogleCalendarOptions] = useState([]);
   const [googleCalendarsLoading, setGoogleCalendarsLoading] = useState(false);
+  const [googleCalendarsError, setGoogleCalendarsError] = useState("");
   useEffect(() => {
+    setGoogleCalendarsError("");
     if (!openCalendarId || !openCalendar?.googleConnected) {
       setGoogleCalendarOptions([]);
       return;
@@ -605,7 +607,10 @@ export default function SimpleCRM() {
     api
       .get(`/api/calendar-google-calendars?calendarId=${openCalendarId}`)
       .then((list) => setGoogleCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary }))))
-      .catch(() => setGoogleCalendarOptions([]))
+      .catch((err) => {
+        setGoogleCalendarOptions([]);
+        setGoogleCalendarsError(err.message || "Could not load your Google calendars.");
+      })
       .finally(() => setGoogleCalendarsLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCalendarId, openCalendar?.googleConnected]);
@@ -6213,10 +6218,17 @@ export default function SimpleCRM() {
                                 disabled={googleCalendarsLoading}
                                 searchable
                               />
-                              <p className="text-xs text-gray-400 mt-1.5">
-                                Events are created here, and existing events on it block off time in the booking
-                                widget.
-                              </p>
+                              {googleCalendarsError ? (
+                                <p className="text-xs text-red-600 mt-1.5">
+                                  {googleCalendarsError} If this was connected before other calendars were shared
+                                  with it, disconnect and reconnect Google to refresh access.
+                                </p>
+                              ) : (
+                                <p className="text-xs text-gray-400 mt-1.5">
+                                  Events are created here, and existing events on it block off time in the booking
+                                  widget.
+                                </p>
+                              )}
                             </div>
                           </>
                         ) : (

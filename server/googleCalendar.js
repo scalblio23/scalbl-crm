@@ -14,10 +14,18 @@ const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo";
 const GOOGLE_CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 
 // Requested once, at connect time: write access to events (so a
-// booking can create/delete an event) plus just enough profile scope
-// to show which Google account is connected.
+// booking can create/delete an event), read access to the calendar
+// list (so Calendar settings can offer a "which calendar?" picker
+// instead of always using "primary" — calendar.events alone does not
+// reliably cover CalendarList.list), plus just enough profile scope
+// to show which Google account is connected. A calendar connected
+// before calendar.readonly was added here only has the older, smaller
+// scope grant on file — it needs to be reconnected (disconnect +
+// "Connect with Google" again) to pick up the wider one; there's no
+// way to add a scope to an already-issued token after the fact.
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.readonly",
   "https://www.googleapis.com/auth/userinfo.email",
 ].join(" ");
 
