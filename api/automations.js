@@ -9,6 +9,7 @@ import {
   createAutomation,
   updateAutomation,
   deleteAutomation,
+  getAutomationRunsByAutomationId,
 } from "../server/db.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
 
@@ -18,6 +19,10 @@ export default async function handler(req, res) {
   if (forbidClientRole(user, res)) return;
   try {
     await ensureSchema();
+
+    if (req.method === "GET" && req.query.runsFor) {
+      return res.status(200).json(await getAutomationRunsByAutomationId(req.query.runsFor));
+    }
 
     if (req.method === "GET") {
       return res.status(200).json(await getAutomations());

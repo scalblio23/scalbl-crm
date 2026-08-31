@@ -1889,6 +1889,20 @@ export async function claimDueAutomationRuns(limit = 20) {
 // race against claimDueAutomationRuns — whichever of the two gets
 // here first wins, and the loser's UPDATE affects zero rows instead
 // of both processing the same run's steps twice.
+// For the builder's "Recent activity" panel — the only real way to
+// answer "did this actually fire" without direct DB access: zero rows
+// means the trigger never matched at all (wrong filter, not saved, or
+// not active); a 'done' row that didn't seem to do anything points at
+// delivery (SendGrid/Twilio) rather than the trigger; a 'pending' row
+// with a future run_at is just mid-wait, not stuck.
+export async function getAutomationRunsByAutomationId(automationId, limit = 20) {
+  const rows = await query(
+    "SELECT * FROM automation_runs WHERE automation_id = $1 ORDER BY created_at DESC LIMIT $2",
+    [automationId, limit]
+  );
+  return rows.map(automationRunFromRow);
+}
+
 export async function claimAutomationRunById(id) {
   const rows = await query(
     "UPDATE automation_runs SET status = 'processing' WHERE id = $1 AND status = 'pending' RETURNING *",

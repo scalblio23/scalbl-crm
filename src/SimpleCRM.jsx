@@ -785,14 +785,45 @@ export default function SimpleCRM() {
   // Drafted locally and saved with an explicit button, same pattern
   // as Calendar settings' Availability/Booking rules sections.
   const [automationDraft, setAutomationDraft] = useState(null);
+  const [savedAutomationSnapshot, setSavedAutomationSnapshot] = useState(null);
   useEffect(() => {
     if (!openAutomation) return;
-    setAutomationDraft({
+    const draft = {
       triggerType: openAutomation.triggerType,
       triggerConfig: openAutomation.triggerConfig || {},
       actions: openAutomation.actions || [],
-    });
+    };
+    setAutomationDraft(draft);
+    // A snapshot of what's actually persisted, so the builder can tell
+    // the difference between "nothing changed yet" and "you edited
+    // this and haven't hit Save" — the single most common reason an
+    // automation silently "doesn't fire" is that its trigger was
+    // configured in the UI but never actually saved.
+    setSavedAutomationSnapshot(JSON.stringify(draft));
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAutomationId]);
+  const automationHasUnsavedChanges =
+    automationDraft && savedAutomationSnapshot !== null && JSON.stringify(automationDraft) !== savedAutomationSnapshot;
+
+  // Recent activity for the opened automation — the actual answer to
+  // "did this fire": zero rows means the trigger never matched at all
+  // (check the filter, Active, and whether it was saved); a 'done' row
+  // means it ran — so a missing message from there is a delivery
+  // problem (SendGrid/Twilio), not an automation problem.
+  const [automationRuns, setAutomationRuns] = useState([]);
+  const [automationRunsLoading, setAutomationRunsLoading] = useState(false);
+  const loadAutomationRuns = async (id) => {
+    setAutomationRunsLoading(true);
+    try {
+      setAutomationRuns(await api.get(`/api/automations?runsFor=${id}`));
+    } catch {
+      setAutomationRuns([]);
+    } finally {
+      setAutomationRunsLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (openAutomationId) loadAutomationRuns(openAutomationId);
   }, [openAutomationId]);
 
   const handleAddAutomation = async (e) => {
@@ -838,6 +869,7 @@ export default function SimpleCRM() {
     try {
       const updated = await api.patch(`/api/automations?id=${openAutomation.id}`, automationDraft);
       setAutomations((as) => as.map((a) => (a.id === openAutomation.id ? updated : a)));
+      setSavedAutomationSnapshot(JSON.stringify(automationDraft));
     } catch (err) {
       alert(err.message || "Could not save the automation");
     } finally {
@@ -6740,7 +6772,15 @@ export default function SimpleCRM() {
                 <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
                   <div>
                     <button
-                      onClick={() => setOpenAutomationId(null)}
+                      onClick={() => {
+                        if (
+                          automationHasUnsavedChanges &&
+                          !window.confirm("You have unsaved changes — leave without saving?")
+                        ) {
+                          return;
+                        }
+                        setOpenAutomationId(null);
+                      }}
                       className="text-xs text-gray-400 hover:text-gray-700 mb-1"
                     >
                       ← Back to Automations
@@ -6759,13 +6799,28 @@ export default function SimpleCRM() {
                     <button
                       onClick={saveAutomationDraft}
                       disabled={savingAutomation}
-                      className="flex items-center gap-2 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                      className={`flex items-center gap-2 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 ${
+                        automationHasUnsavedChanges ? "bg-amber-600" : "bg-gray-900"
+                      }`}
                     >
                       {savingAutomation && <Loader2 size={14} className="animate-spin" />}
-                      Save
+                      {automationHasUnsavedChanges ? "Save changes" : "Save"}
                     </button>
                   </div>
                 </div>
+
+                {automationHasUnsavedChanges && (
+                  <div className="px-8 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-800">
+                    You have unsaved changes — nothing above will actually run until you click{" "}
+                    <strong>Save changes</strong>.
+                  </div>
+                )}
+
+                {!openAutomation.triggerType && (
+                  <div className="px-8 py-2.5 bg-red-50 border-b border-red-200 text-sm text-red-700">
+                    No trigger is set on the saved automation yet — it will never fire until one is chosen and saved.
+                  </div>
+                )}
 
                 {automationDraft && (
                   <div className="p-8 max-w-xl space-y-8">
@@ -6935,6 +6990,54 @@ export default function SimpleCRM() {
                               </button>
                             ))}
                           </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h2 className="text-base font-bold">Recent activity</h2>
+                        <button
+                          onClick={() => loadAutomationRuns(openAutomation.id)}
+                          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 font-medium"
+                        >
+                          <RefreshCw size={12} /> Refresh
+                        </button>
+                      </div>
+                      {automationRunsLoading ? (
+                        <div className="flex justify-center py-6">
+                          <Loader2 size={16} className="animate-spin text-gray-400" />
+                        </div>
+                      ) : automationRuns.length === 0 ? (
+                        <p className="text-sm text-gray-400">
+                          Never fired yet. If you expected it to have, check the trigger filter above, that the
+                          automation is <strong>Active</strong>, and that it's been saved.
+                        </p>
+                      ) : (
+                        <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                          {automationRuns.map((run) => (
+                            <div key={run.id} className="flex items-center justify-between px-4 py-3">
+                              <div>
+                                <span
+                                  className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
+                                    run.status === "done"
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : run.status === "failed"
+                                      ? "bg-red-50 text-red-700 border-red-200"
+                                      : "bg-gray-100 text-gray-500 border-gray-200"
+                                  }`}
+                                >
+                                  {run.status === "pending" ? "Waiting" : run.status === "processing" ? "Running" : run.status}
+                                </span>
+                                {run.lastError && <p className="text-xs text-red-500 mt-1">{run.lastError}</p>}
+                              </div>
+                              <span className="text-xs text-gray-400">
+                                {run.status === "pending"
+                                  ? `Next step due ${new Date(run.runAt).toLocaleString()}`
+                                  : new Date(run.runAt).toLocaleString()}
+                              </span>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>
