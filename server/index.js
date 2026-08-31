@@ -100,6 +100,7 @@ import calendarSlotsHandler from "../api/calendar-slots.js";
 import calendarBookHandler from "../api/calendar-book.js";
 import calendarCancelHandler from "../api/calendar-cancel.js";
 import automationsHandler from "../api/automations.js";
+import tagFoldersHandler from "../api/tag-folders.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
 import {
@@ -207,6 +208,11 @@ app.use(
   }
 );
 app.use("/api/contact-columns", (req, res, next) => {
+  if (req.method === "GET") return next();
+  if (forbidClientRole(req.user, res)) return;
+  next();
+});
+app.use("/api/tag-folders", (req, res, next) => {
   if (req.method === "GET") return next();
   if (forbidClientRole(req.user, res)) return;
   next();
@@ -1123,6 +1129,7 @@ app.all("/api/calendar-slots", calendarSlotsHandler);
 app.all("/api/calendar-book", calendarBookHandler);
 app.all("/api/calendar-cancel", calendarCancelHandler);
 app.all("/api/automations", automationsHandler);
+app.all("/api/tag-folders", tagFoldersHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
 app.listen(PORT, () => {

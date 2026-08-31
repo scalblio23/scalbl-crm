@@ -54,6 +54,8 @@ import {
   MapPin,
   Zap,
   Tag,
+  Folder,
+  FolderPlus,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -1071,6 +1073,128 @@ export default function SimpleCRM() {
     const idx = contactTagNames.indexOf(tag);
     if (idx === -1) return SELECT_COLORS.gray;
     return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
+  };
+
+  // ---------- Tag folders ----------
+  // A purely organizational grouping layer over the tag list above —
+  // a tag not listed in any folder's tagNames still shows up
+  // ungrouped in the sidebar, exactly as it always has. Loaded
+  // lazily, same as Calendars/Automations, the first time the
+  // Contacts tab is opened.
+  const [tagFolders, setTagFolders] = useState([]);
+  const [tagFoldersLoaded, setTagFoldersLoaded] = useState(false);
+  const loadTagFolders = async () => {
+    try {
+      setTagFolders(await api.get("/api/tag-folders"));
+    } catch {
+      // sidebar just falls back to the flat, ungrouped tag list
+    } finally {
+      setTagFoldersLoaded(true);
+    }
+  };
+  useEffect(() => {
+    if (page === "contacts" && !tagFoldersLoaded) loadTagFolders();
+  }, [page, tagFoldersLoaded]);
+
+  // Which folders are expanded in the sidebar — per-browser display
+  // preference, same as hiddenContactColumnKeys above, not something
+  // worth syncing across the team.
+  const [expandedTagFolderIds, setExpandedTagFolderIds] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("scalbl:expandedTagFolders") || "[]"));
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("scalbl:expandedTagFolders", JSON.stringify([...expandedTagFolderIds]));
+    } catch {
+      // ignore — private browsing / storage disabled
+    }
+  }, [expandedTagFolderIds]);
+  const toggleTagFolderExpanded = (id) =>
+    setExpandedTagFolderIds((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const tagNamesInFolders = new Set(tagFolders.flatMap((f) => f.tagNames));
+  const ungroupedTagNames = contactTagNames.filter((t) => !tagNamesInFolders.has(t));
+  const tagFolderCount = (folder) => folder.tagNames.reduce((sum, t) => sum + (contactTagCounts[t] || 0), 0);
+
+  const [showManageTagFoldersModal, setShowManageTagFoldersModal] = useState(false);
+  const [newTagFolderName, setNewTagFolderName] = useState("");
+  const [savingTagFolder, setSavingTagFolder] = useState(false);
+
+  const handleCreateTagFolder = async (e) => {
+    e.preventDefault();
+    if (!newTagFolderName.trim()) return;
+    setSavingTagFolder(true);
+    try {
+      const folder = await api.post("/api/tag-folders", { name: newTagFolderName.trim() });
+      setTagFolders((fs) => [...fs, folder]);
+      setNewTagFolderName("");
+    } catch (err) {
+      alert(err.message || "Could not create the folder");
+    } finally {
+      setSavingTagFolder(false);
+    }
+  };
+
+  const renameTagFolder = async (id, name) => {
+    try {
+      const updated = await api.patch(`/api/tag-folders?id=${id}`, { name });
+      setTagFolders((fs) => fs.map((f) => (f.id === id ? updated : f)));
+    } catch (err) {
+      alert(err.message || "Could not rename the folder");
+    }
+  };
+
+  // A tag can only usefully live in one folder at a time — assigning
+  // it here removes it from whichever other folder had it, so the
+  // checklists in the modal never show the same tag "in" two folders
+  // at once.
+  const toggleTagInFolder = async (folder, tag) => {
+    const isInThisFolder = folder.tagNames.includes(tag);
+    const updates = [];
+    if (isInThisFolder) {
+      updates.push({ id: folder.id, tagNames: folder.tagNames.filter((t) => t !== tag) });
+    } else {
+      updates.push({ id: folder.id, tagNames: [...folder.tagNames, tag] });
+      for (const other of tagFolders) {
+        if (other.id !== folder.id && other.tagNames.includes(tag)) {
+          updates.push({ id: other.id, tagNames: other.tagNames.filter((t) => t !== tag) });
+        }
+      }
+    }
+    try {
+      const updatedFolders = await Promise.all(
+        updates.map((u) => api.patch(`/api/tag-folders?id=${u.id}`, { tagNames: u.tagNames }))
+      );
+      setTagFolders((fs) => fs.map((f) => updatedFolders.find((u) => u.id === f.id) || f));
+    } catch (err) {
+      alert(err.message || "Could not update the folder");
+    }
+  };
+
+  const deleteTagFolderById = async (id) => {
+    if (!window.confirm("Delete this folder? Its tags stay on their contacts and just become ungrouped again.")) {
+      return;
+    }
+    try {
+      await api.delete(`/api/tag-folders?id=${id}`);
+      setTagFolders((fs) => fs.filter((f) => f.id !== id));
+      setExpandedTagFolderIds((s) => {
+        const next = new Set(s);
+        next.delete(id);
+        return next;
+      });
+    } catch (err) {
+      alert(err.message || "Could not delete the folder");
+    }
   };
 
   // Filter bar (Contacts) — any number of filters, each on any
@@ -3280,8 +3404,15 @@ export default function SimpleCRM() {
         <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
           {page === "contacts" && (
             <>
-              <div className="px-4 pt-5 pb-2">
+              <div className="px-4 pt-5 pb-2 flex items-center justify-between">
                 <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Tags</span>
+                <button
+                  onClick={() => setShowManageTagFoldersModal(true)}
+                  title="Manage tag folders"
+                  className="text-gray-300 hover:text-gray-600"
+                >
+                  <FolderPlus size={13} />
+                </button>
               </div>
               <nav className="flex-1 pb-4">
                 <button
@@ -3295,7 +3426,45 @@ export default function SimpleCRM() {
                   <span className="truncate">All contacts</span>
                   <span className="text-xs text-gray-400 shrink-0">{contacts.length}</span>
                 </button>
-                {contactTagNames.map((tag) => (
+                {tagFolders.map((folder) => {
+                  const expanded = expandedTagFolderIds.has(folder.id);
+                  return (
+                    <div key={folder.id}>
+                      <button
+                        onClick={() => toggleTagFolderExpanded(folder.id)}
+                        className="w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left text-gray-600 hover:bg-gray-100"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <ChevronDown
+                            size={12}
+                            className={`text-gray-400 shrink-0 transition-transform ${expanded ? "" : "-rotate-90"}`}
+                          />
+                          <Folder size={13} className="text-gray-400 shrink-0" />
+                          <span className="truncate">{folder.name}</span>
+                        </span>
+                        <span className="text-xs text-gray-400 shrink-0">{tagFolderCount(folder)}</span>
+                      </button>
+                      {expanded &&
+                        folder.tagNames.map((tag) => (
+                          <button
+                            key={tag}
+                            onClick={() => setTagQuickFilter("is", tag)}
+                            className={`w-full flex items-center justify-between gap-2 pl-8 pr-4 py-2 text-sm text-left transition-colors ${
+                              tagQuickFilter?.op === "is" && tagQuickFilter.value === tag
+                                ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                                : "hover:bg-gray-100"
+                            }`}
+                          >
+                            <span className={`truncate text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
+                              {tag}
+                            </span>
+                            <span className="text-xs text-gray-400 shrink-0">{contactTagCounts[tag] || 0}</span>
+                          </button>
+                        ))}
+                    </div>
+                  );
+                })}
+                {ungroupedTagNames.map((tag) => (
                   <button
                     key={tag}
                     onClick={() => setTagQuickFilter("is", tag)}
@@ -7486,6 +7655,105 @@ export default function SimpleCRM() {
                   </button>
                 </form>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manage Tag Folders modal */}
+      {showManageTagFoldersModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowManageTagFoldersModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Manage Tag Folders</h2>
+              <button
+                onClick={() => setShowManageTagFoldersModal(false)}
+                className="text-gray-400 hover:text-gray-700"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 py-5 overflow-y-auto space-y-5 flex-1">
+              <form onSubmit={handleCreateTagFolder} className="flex items-center gap-2">
+                <input
+                  value={newTagFolderName}
+                  onChange={(e) => setNewTagFolderName(e.target.value)}
+                  placeholder="New folder name…"
+                  className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <button
+                  type="submit"
+                  disabled={savingTagFolder}
+                  className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {savingTagFolder && <Loader2 size={14} className="animate-spin" />}
+                  Add
+                </button>
+              </form>
+
+              {tagFolders.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-6">
+                  No folders yet — add one above, then click the tags below that belong in it.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {tagFolders.map((folder) => (
+                    <div key={folder.id} className="border border-gray-100 rounded-lg p-4">
+                      <div className="flex items-center gap-2 mb-3">
+                        <input
+                          defaultValue={folder.name}
+                          onBlur={(e) => {
+                            const value = e.target.value.trim();
+                            if (value && value !== folder.name) renameTagFolder(folder.id, value);
+                          }}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm font-medium outline-none focus:border-gray-400"
+                        />
+                        <button
+                          onClick={() => deleteTagFolderById(folder.id)}
+                          className="text-gray-400 hover:text-red-600 p-1"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {contactTagNames.length === 0 && (
+                          <span className="text-xs text-gray-400">No tags exist yet.</span>
+                        )}
+                        {contactTagNames.map((tag) => {
+                          const checked = folder.tagNames.includes(tag);
+                          return (
+                            <button
+                              key={tag}
+                              onClick={() => toggleTagInFolder(folder, tag)}
+                              className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
+                                checked
+                                  ? "bg-gray-900 text-white border-gray-900"
+                                  : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                              }`}
+                            >
+                              {tag}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setShowManageTagFoldersModal(false)}
+                className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+              >
+                Done
+              </button>
             </div>
           </div>
         </div>

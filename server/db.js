@@ -414,6 +414,22 @@ export async function ensureSchema() {
     // more "wait" cycles reflects the original trigger time, not the
     // current step). See reapStuckAutomationRuns below.
     await query(`ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
+    // ---------- Tag folders ----------
+    // Purely organizational — a tag is still just free text on a
+    // contact (see contacts.tag), never owned by a folder at the
+    // model level. A folder is just a name + the list of tag strings
+    // it groups in the Contacts sidebar; a tag not listed in any
+    // folder's tag_names still shows up ungrouped, exactly as it
+    // always has.
+    await query(`
+      CREATE TABLE IF NOT EXISTS tag_folders (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        tag_names JSONB NOT NULL DEFAULT '[]',
+        position INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1956,4 +1972,45 @@ export async function updateAutomationRunProgress(id, { nextStepIndex, runAt, st
       lastError ?? null,
     ]
   );
+}
+
+// ---------- Tag folders ----------
+
+function tagFolderFromRow(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    tagNames: r.tag_names || [],
+    position: r.position,
+  };
+}
+
+export async function getTagFolders() {
+  const rows = await query("SELECT * FROM tag_folders ORDER BY position, id");
+  return rows.map(tagFolderFromRow);
+}
+
+export async function createTagFolder({ name }) {
+  const [{ next_position }] = await query("SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM tag_folders");
+  const rows = await query("INSERT INTO tag_folders (name, position) VALUES ($1,$2) RETURNING *", [
+    name,
+    next_position,
+  ]);
+  return tagFolderFromRow(rows[0]);
+}
+
+export async function updateTagFolder(id, { name, tagNames }) {
+  const rows = await query(
+    `UPDATE tag_folders SET
+       name = COALESCE($2, name),
+       tag_names = COALESCE($3::jsonb, tag_names)
+     WHERE id = $1
+     RETURNING *`,
+    [id, name ?? null, tagNames ? JSON.stringify(tagNames) : null]
+  );
+  return rows[0] ? tagFolderFromRow(rows[0]) : null;
+}
+
+export async function deleteTagFolder(id) {
+  await query("DELETE FROM tag_folders WHERE id = $1", [id]);
 }
