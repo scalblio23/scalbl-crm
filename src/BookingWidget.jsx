@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2 } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, ChevronDown, CalendarDays, CheckCircle2 } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import { timezoneOptions, detectBrowserTimezone } from "./lib/calendarOptions";
@@ -37,6 +37,8 @@ export default function BookingWidget({ slug }) {
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
   const [confirmation, setConfirmation] = useState(null);
+  const [showAllSlots, setShowAllSlots] = useState(false);
+  const VISIBLE_SLOT_COUNT = 6;
 
   const tzOptions = useMemo(() => timezoneOptions(), []);
   const visibleDays = useMemo(() => Array.from({ length: 7 }, (_, i) => {
@@ -59,6 +61,7 @@ export default function BookingWidget({ slug }) {
     if (!selectedDayKey || !calendarInfo) return;
     setLoadingSlots(true);
     setSelectedSlot(null);
+    setShowAllSlots(false);
     // Query a day either side of the selected local day too — a
     // visitor's local calendar day can span two of the host
     // calendar's server-side days near the timezone boundary; slots
@@ -141,6 +144,7 @@ export default function BookingWidget({ slug }) {
             <p className="text-xs text-gray-400 mt-1">{calendarInfo.eventLengthMinutes} minute call</p>
           </div>
           <div className="w-56 shrink-0">
+            <label className="text-xs font-medium block mb-1.5 text-gray-500">Choose Your Timezone</label>
             <Dropdown value={timezone} onChange={setTimezone} options={tzOptions} searchable />
           </div>
         </div>
@@ -191,16 +195,26 @@ export default function BookingWidget({ slug }) {
             ) : slots.length === 0 ? (
               <p className="text-sm text-gray-400 text-center py-10">No available times on this day.</p>
             ) : (
-              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                {slots.map((s) => (
+              <div className="max-w-sm mx-auto">
+                <div className="flex flex-col gap-2">
+                  {(showAllSlots ? slots : slots.slice(0, VISIBLE_SLOT_COUNT)).map((s) => (
+                    <button
+                      key={s.startUTC}
+                      onClick={() => setSelectedSlot(s)}
+                      className="border border-gray-200 rounded-lg py-2.5 text-sm font-medium text-gray-700 hover:border-gray-900 hover:bg-gray-50"
+                    >
+                      {timeLabel(s.startUTC, timezone)}
+                    </button>
+                  ))}
+                </div>
+                {!showAllSlots && slots.length > VISIBLE_SLOT_COUNT && (
                   <button
-                    key={s.startUTC}
-                    onClick={() => setSelectedSlot(s)}
-                    className="border border-gray-200 rounded-lg py-2 text-sm font-medium text-gray-700 hover:border-gray-900 hover:bg-gray-50"
+                    onClick={() => setShowAllSlots(true)}
+                    className="w-full flex items-center justify-center gap-1.5 mt-3 text-sm text-gray-500 hover:text-gray-800 font-medium"
                   >
-                    {timeLabel(s.startUTC, timezone)}
+                    Show more times <ChevronDown size={14} />
                   </button>
-                ))}
+                )}
               </div>
             )}
           </div>
