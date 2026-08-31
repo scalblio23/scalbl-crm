@@ -366,14 +366,6 @@ const AUTOMATION_TRIGGER_OPTIONS = [
   { value: "contact_tag_added", label: "Contact Tag Added" },
   { value: "booking_created", label: "Booking Created" },
 ];
-// "call" is intentionally not wired up to actually place a call yet —
-// there's no automated dialler in this app, only the rep-driven
-// Powerdialler — so it's shown (to match the trigger→actions shape
-// people expect) but disabled rather than silently doing nothing.
-const AUTOMATION_ACTION_TYPES = [
-  { value: "email", label: "Send Email" },
-  { value: "sms", label: "Send SMS" },
-];
 
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
