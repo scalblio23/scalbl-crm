@@ -53,8 +53,19 @@ export default async function handler(req, res) {
     // hit; the DB's partial unique index (see server/db.js) is the
     // actual last line of defense against two people booking at once.
     const dateStr = localDateStrInZone(startUTC, calendar.timezone);
-    const dayStartISO = `${dateStr}T00:00:00.000Z`;
-    const dayEndISO = `${dateStr}T23:59:59.999Z`;
+    // Padded a day either side rather than using this local day's own
+    // UTC midnight-to-midnight — that only equals the calendar's real
+    // local day for a UTC-timezone calendar. For any offset timezone,
+    // a slot near the start/end of the local day falls outside a
+    // window built that way, so a real Google Calendar conflict there
+    // would be missed by the freebusy check below (src/BookingWidget.jsx
+    // pads its own request the same way, for the same reason).
+    const prevDateStr = new Date(`${dateStr}T00:00:00Z`);
+    prevDateStr.setUTCDate(prevDateStr.getUTCDate() - 1);
+    const nextDateStr = new Date(`${dateStr}T00:00:00Z`);
+    nextDateStr.setUTCDate(nextDateStr.getUTCDate() + 1);
+    const dayStartISO = `${prevDateStr.toISOString().slice(0, 10)}T00:00:00.000Z`;
+    const dayEndISO = `${nextDateStr.toISOString().slice(0, 10)}T23:59:59.999Z`;
     let googleBusy = [];
     if (calendar.googleConnected) {
       try {

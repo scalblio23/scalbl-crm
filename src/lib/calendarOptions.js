@@ -26,13 +26,20 @@ const FALLBACK_TIMEZONES = [
 ];
 
 export function listTimezones() {
+  let zones;
   try {
-    const zones = Intl.supportedValuesOf("timeZone");
-    if (zones?.length) return zones;
+    zones = Intl.supportedValuesOf("timeZone");
   } catch {
     // fall through
   }
-  return FALLBACK_TIMEZONES;
+  if (!zones?.length) zones = FALLBACK_TIMEZONES;
+  // "UTC" is a valid Intl timeZone (and calendars default to it — see
+  // createCalendar in server/db.js) but at least some ICU builds don't
+  // include it in supportedValuesOf("timeZone") at all, which made a
+  // brand-new calendar's Timezone dropdown show no selection until
+  // someone explicitly picked a zone. Force it in rather than depend
+  // on the runtime's ICU data having it.
+  return zones.includes("UTC") ? zones : ["UTC", ...zones];
 }
 
 // Label includes the current UTC offset (e.g. "Australia/Sydney
