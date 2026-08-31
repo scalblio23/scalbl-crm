@@ -320,7 +320,12 @@ const MULTILINE_STATUS_LABELS = {
   queued: "Dialling…",
   initiated: "Dialling…",
   ringing: "Ringing…",
-  "in-progress": "Answered",
+  // Deliberately not "Connected" or "Answered" alone — answering
+  // doesn't mean the rep can hear (or be heard by) this line yet; it
+  // stays muted server-side until confirmed as the one winning line
+  // (see server/twilioCore.js), which is also the split second this
+  // card disappears in favor of the single live-call view.
+  "in-progress": "Answered — connecting…",
   completed: "Ended",
   busy: "Busy",
   failed: "Failed",
@@ -3118,7 +3123,7 @@ export default function SimpleCRM() {
         hangUp();
         if (batchId) cancelMultilineBatch(batchId); // best-effort — drop any leg still stuck ringing
       }
-    }, 1200);
+    }, 400);
   };
 
   // Dials several leads at once (see startSession/togglePause/

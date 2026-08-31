@@ -15,6 +15,7 @@ import {
   generateMultilineConferenceName,
   placeConferenceLeg,
   endOrCancelCall,
+  unmuteConferenceParticipant,
   publicBaseUrl,
   MULTILINE_RING_SECONDS,
 } from "./twilioCore.js";
@@ -597,8 +598,21 @@ app.post("/api/multiline-status", async (req, res) => {
     if (callStatus === "in-progress") {
       const won = await claimMultilineWinner({ batchId, callSid, leadId });
       if (won) {
+        // See api/multiline-status.js for the full reasoning — genuinely
+        // awaited (not fire-and-forget) on purpose.
         const others = await getOtherPendingMultilineBatchCalls(batchId, callSid);
-        Promise.all(others.filter((o) => o.call_sid).map((o) => endOrCancelCall(o.call_sid))).catch(() => {});
+        await Promise.all([
+          unmuteConferenceParticipant({ conferenceName: won.conference_name, callSid }).catch((err) =>
+            console.error("[db] /api/multiline-status failed to unmute the winner", err)
+          ),
+          ...others
+            .filter((o) => o.call_sid)
+            .map((o) =>
+              endOrCancelCall(o.call_sid).catch((err) =>
+                console.error("[db] /api/multiline-status failed to hang up a losing leg", err)
+              )
+            ),
+        ]);
       } else {
         await endOrCancelCall(callSid);
       }
