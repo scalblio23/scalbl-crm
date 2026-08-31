@@ -42,7 +42,8 @@ async function runActions(automation, context) {
     phone: context.contact?.phone || "",
     tag: context.tag || "",
     calendar: context.calendarName || "",
-    when: context.whenText || "",
+    appointment_date_time: context.whenText || "",
+    timezone: context.timezone || "",
   };
   for (const action of automation.actions || []) {
     if (action.type === "email") {

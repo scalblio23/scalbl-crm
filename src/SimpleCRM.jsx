@@ -367,6 +367,20 @@ const AUTOMATION_TRIGGER_OPTIONS = [
   { value: "booking_created", label: "Booking Created" },
 ];
 
+// Clickable in the builder's Actions section — inserts "{{key}}" at
+// the cursor in whichever subject/body field was last focused. Keys
+// must match the `data` object server/automations.js's fillTemplate()
+// fills in at send time.
+const MERGE_FIELDS = [
+  { key: "name", label: "Contact Name" },
+  { key: "email", label: "Contact Email" },
+  { key: "phone", label: "Contact Phone" },
+  { key: "tag", label: "Contact Tag" },
+  { key: "calendar", label: "Calendar Name" },
+  { key: "appointment_date_time", label: "Appointment Date + Time" },
+  { key: "timezone", label: "Timezone" },
+];
+
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
 
@@ -842,6 +856,37 @@ export default function SimpleCRM() {
     setAutomationDraft((d) => ({ ...d, actions: d.actions.map((a, i) => (i === index ? { ...a, ...patch } : a)) }));
   const removeAutomationAction = (index) =>
     setAutomationDraft((d) => ({ ...d, actions: d.actions.filter((_, i) => i !== index) }));
+
+  // Merge fields insert into whichever subject/body field was last
+  // focused, at its exact cursor position — tracked via a ref (not
+  // state, no re-render needed) rather than tied to a specific
+  // action's index, since the same DOM node stays valid across
+  // re-renders regardless of index/id churn. The merge-field buttons
+  // use onMouseDown + preventDefault (not onClick) specifically so
+  // clicking one never steals focus away from the field first —
+  // otherwise selectionStart/selectionEnd would already be lost by
+  // the time the click handler ran.
+  const lastFocusedActionFieldRef = useRef(null); // { el, index, field }
+  const [pendingCursorRestore, setPendingCursorRestore] = useState(null); // { el, pos }
+  useEffect(() => {
+    if (!pendingCursorRestore) return;
+    const { el, pos } = pendingCursorRestore;
+    el.focus();
+    el.setSelectionRange(pos, pos);
+    setPendingCursorRestore(null);
+  }, [pendingCursorRestore]);
+
+  const insertMergeField = (key) => {
+    const target = lastFocusedActionFieldRef.current;
+    if (!target) return;
+    const { el, index, field } = target;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const token = `{{${key}}}`;
+    const newValue = el.value.slice(0, start) + token + el.value.slice(end);
+    updateAutomationAction(index, { [field]: newValue });
+    setPendingCursorRestore({ el, pos: start + token.length });
+  };
 
   // Add-contact modal
   const emptyContactForm = {
@@ -6810,6 +6855,9 @@ export default function SimpleCRM() {
                                 <input
                                   value={action.subject}
                                   onChange={(e) => updateAutomationAction(i, { subject: e.target.value })}
+                                  onFocus={(e) => {
+                                    lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "subject" };
+                                  }}
                                   placeholder="Subject"
                                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 mb-2"
                                 />
@@ -6817,6 +6865,9 @@ export default function SimpleCRM() {
                               <textarea
                                 value={action.body}
                                 onChange={(e) => updateAutomationAction(i, { body: e.target.value })}
+                                onFocus={(e) => {
+                                  lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "body" };
+                                }}
                                 placeholder={
                                   action.type === "email" ? "Email body…" : "Text message…"
                                 }
@@ -6827,15 +6878,28 @@ export default function SimpleCRM() {
                           ))}
                         </div>
                       )}
-                      <p className="text-xs text-gray-400">
-                        Use <code className="bg-gray-100 px-1 rounded">{"{{name}}"}</code>,{" "}
-                        <code className="bg-gray-100 px-1 rounded">{"{{email}}"}</code>,{" "}
-                        <code className="bg-gray-100 px-1 rounded">{"{{phone}}"}</code>,{" "}
-                        <code className="bg-gray-100 px-1 rounded">{"{{tag}}"}</code>,{" "}
-                        <code className="bg-gray-100 px-1 rounded">{"{{calendar}}"}</code>, or{" "}
-                        <code className="bg-gray-100 px-1 rounded">{"{{when}}"}</code> in a subject or body to fill
-                        in details from the contact/booking that fired this automation.
-                      </p>
+                      {automationDraft.actions.length > 0 && (
+                        <div>
+                          <p className="text-xs text-gray-500 mb-2">
+                            Click into a subject or body field, then click a merge field to insert it there:
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {MERGE_FIELDS.map((f) => (
+                              <button
+                                key={f.key}
+                                type="button"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  insertMergeField(f.key);
+                                }}
+                                className="text-xs px-2.5 py-1 rounded-full border border-gray-200 text-gray-600 hover:border-gray-400 hover:bg-gray-50 font-medium"
+                              >
+                                {f.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
