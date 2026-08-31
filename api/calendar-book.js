@@ -188,6 +188,7 @@ export default async function handler(req, res) {
       contact: { name, email, phone },
       whenText: bookerWhen,
       timezone: timezone || calendar.timezone,
+      appointmentStartUTC: startUTC,
     }).catch((err) => console.error("[api/calendar-book] automation trigger failed", err));
 
     return res.status(201).json({ booking, whenText: bookerWhen });

@@ -381,6 +381,31 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // One row per in-progress (or finished) firing of an automation.
+    // Exists because "wait" steps mean an automation can't just run
+    // start-to-finish inside the request that triggered it — a
+    // serverless function doesn't live long enough to sleep for hours
+    // or days. Instead each firing is a durable row: `context` is a
+    // snapshot of the trigger's data (contact, calendar, appointment
+    // time, …) taken once at trigger time, `next_step_index` is how
+    // far through the automation's `actions` array it's gotten, and
+    // `run_at` is when it's next due to be advanced — either "now"
+    // (nothing to wait on) or the target time a "wait" step computed.
+    // See server/automations.js for how a run is actually advanced,
+    // and api/automations-process-runs.js for what moves it forward
+    // once its wait is up.
+    await query(`
+      CREATE TABLE IF NOT EXISTS automation_runs (
+        id SERIAL PRIMARY KEY,
+        automation_id INTEGER REFERENCES automations(id) ON DELETE CASCADE,
+        context JSONB NOT NULL DEFAULT '{}',
+        next_step_index INTEGER NOT NULL DEFAULT 0,
+        run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1810,4 +1835,69 @@ export async function updateAutomation(id, patch) {
 
 export async function deleteAutomation(id) {
   await query("DELETE FROM automations WHERE id = $1", [id]);
+}
+
+// ---------- Automation runs (durable queue for "wait" steps) ----------
+
+function automationRunFromRow(r) {
+  return {
+    id: r.id,
+    automationId: r.automation_id,
+    context: r.context || {},
+    nextStepIndex: r.next_step_index,
+    runAt: r.run_at,
+    status: r.status,
+    lastError: r.last_error,
+  };
+}
+
+export async function createAutomationRun({ automationId, context, runAt }) {
+  const rows = await query(
+    "INSERT INTO automation_runs (automation_id, context, run_at) VALUES ($1,$2,$3) RETURNING *",
+    [automationId, JSON.stringify(context || {}), (runAt || new Date()).toISOString()]
+  );
+  return automationRunFromRow(rows[0]);
+}
+
+// Atomically claims up to `limit` due runs by flipping them to
+// 'processing' in one statement — the FOR UPDATE SKIP LOCKED subquery
+// is what makes this safe to call concurrently (a trigger firing's
+// own immediate advance and the cron poller both call this same
+// path), same idea as claimMultilineWinner's atomic UPDATE above,
+// just claiming a batch instead of a single winner.
+export async function claimDueAutomationRuns(limit = 20) {
+  const rows = await query(
+    `UPDATE automation_runs SET status = 'processing'
+     WHERE id IN (
+       SELECT id FROM automation_runs
+       WHERE status = 'pending' AND run_at <= now()
+       ORDER BY run_at ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING *`,
+    [limit]
+  );
+  return rows.map(automationRunFromRow);
+}
+
+// Advances a claimed run: either reschedules it (more steps left,
+// status goes back to 'pending' so a later poll picks it up) or
+// closes it out ('done'/'failed').
+export async function updateAutomationRunProgress(id, { nextStepIndex, runAt, status, lastError }) {
+  await query(
+    `UPDATE automation_runs SET
+       next_step_index = COALESCE($2, next_step_index),
+       run_at = COALESCE($3, run_at),
+       status = COALESCE($4, status),
+       last_error = COALESCE($5, last_error)
+     WHERE id = $1`,
+    [
+      id,
+      nextStepIndex ?? null,
+      runAt ? new Date(runAt).toISOString() : null,
+      status ?? null,
+      lastError ?? null,
+    ]
+  );
 }

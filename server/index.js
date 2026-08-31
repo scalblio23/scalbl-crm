@@ -99,6 +99,8 @@ import calendarSlotsHandler from "../api/calendar-slots.js";
 import calendarBookHandler from "../api/calendar-book.js";
 import calendarCancelHandler from "../api/calendar-cancel.js";
 import automationsHandler from "../api/automations.js";
+import automationsProcessRunsHandler from "../api/automations-process-runs.js";
+import { processDueAutomationRuns } from "./automations.js";
 import {
   getSessionUser,
   requireAuth,
@@ -158,6 +160,10 @@ const PUBLIC_PATHS = new Set([
   "/api/calendar-slots",
   "/api/calendar-book",
   "/api/calendar-cancel",
+  // Cron-invoked, not user-invoked — authenticated by its own
+  // CRON_SECRET bearer-token check instead of a session (see
+  // api/automations-process-runs.js).
+  "/api/automations-process-runs",
 ]);
 
 app.use(async (req, res, next) => {
@@ -1116,6 +1122,7 @@ app.all("/api/calendar-slots", calendarSlotsHandler);
 app.all("/api/calendar-book", calendarBookHandler);
 app.all("/api/calendar-cancel", calendarCancelHandler);
 app.all("/api/automations", automationsHandler);
+app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
 app.listen(PORT, () => {
   const missing = missingTwilioEnv();
@@ -1129,3 +1136,13 @@ app.listen(PORT, () => {
     console.warn(`⚠ POSTGRES_URL not set yet — database routes will fail until you add it to .env`);
   }
 });
+
+// Local dev has no Vercel Cron of its own — this is what advances
+// "wait" steps here instead. The deployed site relies on vercel.json's
+// `crons` entry hitting /api/automations-process-runs on a schedule;
+// this poller only runs in this long-lived local process.
+if (isDbConfigured()) {
+  setInterval(() => {
+    processDueAutomationRuns().catch((err) => console.error("[automations] local poller failed", err));
+  }, 15000);
+}

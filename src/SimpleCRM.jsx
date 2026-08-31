@@ -58,6 +58,7 @@ import {
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
+import AddStepMenu from "./components/AddStepMenu";
 import {
   timezoneOptions,
   detectBrowserTimezone,
@@ -850,8 +851,15 @@ export default function SimpleCRM() {
     setAutomationDraft((d) => ({ ...d, triggerType, triggerConfig: {} }));
   const setAutomationTriggerConfig = (patch) =>
     setAutomationDraft((d) => ({ ...d, triggerConfig: { ...d.triggerConfig, ...patch } }));
-  const addAutomationAction = (type) =>
-    setAutomationDraft((d) => ({ ...d, actions: [...(d.actions || []), { type, subject: "", body: "" }] }));
+  // Inserts a new step at any position — before the first step,
+  // between any two, or after the last — rather than only ever being
+  // able to append to the end.
+  const insertAutomationAction = (index, newAction) =>
+    setAutomationDraft((d) => {
+      const actions = [...d.actions];
+      actions.splice(index, 0, newAction);
+      return { ...d, actions };
+    });
   const updateAutomationAction = (index, patch) =>
     setAutomationDraft((d) => ({ ...d, actions: d.actions.map((a, i) => (i === index ? { ...a, ...patch } : a)) }));
   const removeAutomationAction = (index) =>
@@ -6808,76 +6816,105 @@ export default function SimpleCRM() {
                     </div>
 
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <h2 className="text-base font-bold">Actions</h2>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => addAutomationAction("email")}
-                            className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-xs px-3 py-1.5 rounded-lg font-medium"
-                          >
-                            <Plus size={12} /> Email
-                          </button>
-                          <button
-                            onClick={() => addAutomationAction("sms")}
-                            className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-xs px-3 py-1.5 rounded-lg font-medium"
-                          >
-                            <Plus size={12} /> SMS
-                          </button>
-                          <button
-                            disabled
-                            title="Automated calling isn't available yet — use Powerdialler for calls"
-                            className="flex items-center gap-1.5 border border-gray-100 text-gray-300 text-xs px-3 py-1.5 rounded-lg font-medium cursor-not-allowed"
-                          >
-                            <Plus size={12} /> Call
-                          </button>
-                        </div>
-                      </div>
+                      <h2 className="text-base font-bold">Actions</h2>
 
-                      {automationDraft.actions.length === 0 ? (
-                        <p className="text-sm text-gray-400">No actions yet — add an email or SMS step above.</p>
-                      ) : (
-                        <div className="space-y-3">
-                          {automationDraft.actions.map((action, i) => (
-                            <div key={i} className="border border-gray-100 rounded-lg p-4">
-                              <div className="flex items-center justify-between mb-3">
-                                <span className="text-sm font-semibold flex items-center gap-1.5">
-                                  {action.type === "email" ? <Send size={13} /> : <MessageSquare size={13} />}
-                                  Step {i + 1}: {action.type === "email" ? "Send Email" : "Send SMS"}
-                                </span>
-                                <button
-                                  onClick={() => removeAutomationAction(i)}
-                                  className="text-gray-400 hover:text-red-600 p-1"
-                                >
-                                  <X size={14} />
-                                </button>
+                      <div>
+                        {automationDraft.actions.length === 0 && (
+                          <p className="text-sm text-gray-400 text-center pb-1">
+                            No steps yet — click below to add an email, SMS, or wait step.
+                          </p>
+                        )}
+                        <AddStepMenu onAdd={(a) => insertAutomationAction(0, a)} />
+                        {automationDraft.actions.map((action, i) => (
+                          <div key={i}>
+                            {action.type === "wait" ? (
+                              <div className="border border-gray-100 rounded-lg p-4 bg-gray-50">
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="text-sm font-semibold flex items-center gap-1.5">
+                                    <Clock size={13} /> Step {i + 1}: Wait
+                                  </span>
+                                  <button
+                                    onClick={() => removeAutomationAction(i)}
+                                    className="text-gray-400 hover:text-red-600 p-1"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <Dropdown
+                                    value={action.mode}
+                                    onChange={(mode) => updateAutomationAction(i, { mode })}
+                                    className="w-52"
+                                    options={[
+                                      { value: "duration", label: "Wait for" },
+                                      ...(automationDraft.triggerType === "booking_created"
+                                        ? [{ value: "before_appointment", label: "Wait until before appointment" }]
+                                        : []),
+                                    ]}
+                                  />
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={action.amount}
+                                    onChange={(e) => updateAutomationAction(i, { amount: e.target.value })}
+                                    className="w-20 border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400"
+                                  />
+                                  <Dropdown
+                                    value={action.unit}
+                                    onChange={(unit) => updateAutomationAction(i, { unit })}
+                                    className="w-32"
+                                    options={[
+                                      { value: "minutes", label: "Minutes" },
+                                      { value: "hours", label: "Hours" },
+                                      { value: "days", label: "Days" },
+                                    ]}
+                                  />
+                                  {action.mode === "before_appointment" && (
+                                    <span className="text-xs text-gray-500">before the appointment time</span>
+                                  )}
+                                </div>
                               </div>
-                              {action.type === "email" && (
-                                <input
-                                  value={action.subject}
-                                  onChange={(e) => updateAutomationAction(i, { subject: e.target.value })}
+                            ) : (
+                              <div className="border border-gray-100 rounded-lg p-4">
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="text-sm font-semibold flex items-center gap-1.5">
+                                    {action.type === "email" ? <Send size={13} /> : <MessageSquare size={13} />}
+                                    Step {i + 1}: {action.type === "email" ? "Send Email" : "Send SMS"}
+                                  </span>
+                                  <button
+                                    onClick={() => removeAutomationAction(i)}
+                                    className="text-gray-400 hover:text-red-600 p-1"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                {action.type === "email" && (
+                                  <input
+                                    value={action.subject}
+                                    onChange={(e) => updateAutomationAction(i, { subject: e.target.value })}
+                                    onFocus={(e) => {
+                                      lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "subject" };
+                                    }}
+                                    placeholder="Subject"
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 mb-2"
+                                  />
+                                )}
+                                <textarea
+                                  value={action.body}
+                                  onChange={(e) => updateAutomationAction(i, { body: e.target.value })}
                                   onFocus={(e) => {
-                                    lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "subject" };
+                                    lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "body" };
                                   }}
-                                  placeholder="Subject"
-                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 mb-2"
+                                  placeholder={action.type === "email" ? "Email body…" : "Text message…"}
+                                  rows={3}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
                                 />
-                              )}
-                              <textarea
-                                value={action.body}
-                                onChange={(e) => updateAutomationAction(i, { body: e.target.value })}
-                                onFocus={(e) => {
-                                  lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "body" };
-                                }}
-                                placeholder={
-                                  action.type === "email" ? "Email body…" : "Text message…"
-                                }
-                                rows={3}
-                                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
-                              />
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                              </div>
+                            )}
+                            <AddStepMenu onAdd={(a) => insertAutomationAction(i + 1, a)} />
+                          </div>
+                        ))}
+                      </div>
                       {automationDraft.actions.length > 0 && (
                         <div>
                           <p className="text-xs text-gray-500 mb-2">

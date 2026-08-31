@@ -47,18 +47,27 @@ export default function BookingWidget({ slug }) {
     return d;
   }), [windowStart]);
 
+  // These two requests don't actually depend on each other (the
+  // slots endpoint only needs the slug + a date range, not anything
+  // calendar-public returns) — firing them in parallel on mount
+  // instead of waiting for calendar-public to resolve first cuts a
+  // full round trip off the widget's load time, which mattered a lot
+  // more than expected once real network/cold-start latency was in
+  // the mix rather than local testing.
+  useEffect(() => {
+    setSelectedDayKey(dateKeyInZone(new Date(), timezone));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     api
       .get(`/api/calendar-public?slug=${encodeURIComponent(slug)}`)
-      .then((info) => {
-        setCalendarInfo(info);
-        setSelectedDayKey(dateKeyInZone(new Date(), detectBrowserTimezone()));
-      })
+      .then(setCalendarInfo)
       .catch((err) => setLoadError(err.message || "This booking page isn't available."));
   }, [slug]);
 
   useEffect(() => {
-    if (!selectedDayKey || !calendarInfo) return;
+    if (!selectedDayKey) return;
     setLoadingSlots(true);
     setSelectedSlot(null);
     setShowAllSlots(false);
@@ -79,7 +88,7 @@ export default function BookingWidget({ slug }) {
       })
       .catch(() => setSlots([]))
       .finally(() => setLoadingSlots(false));
-  }, [selectedDayKey, timezone, calendarInfo, slug]);
+  }, [selectedDayKey, timezone, slug]);
 
   async function submitBooking(e) {
     e.preventDefault();
