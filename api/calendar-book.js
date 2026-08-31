@@ -16,6 +16,7 @@ import { getValidAccessToken, getFreeBusy, createGoogleEvent } from "../server/g
 import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAvailability.js";
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "../server/email.js";
 import { sendSms, missingTwilioEnv, publicBaseUrl } from "../server/twilioCore.js";
+import { runAutomationsForTrigger } from "../server/automations.js";
 
 function formatInZone(iso, timeZone) {
   return new Intl.DateTimeFormat("en-US", {
@@ -177,6 +178,16 @@ export default async function handler(req, res) {
         body: `Hi ${name}, your ${calendar.name} is confirmed for ${bookerWhen}. Reply to reschedule.`,
       }).catch((err) => console.error("[api/calendar-book] confirmation SMS failed", err));
     }
+
+    // Separate from the confirmation email/SMS above — a "Booking
+    // Created" automation is an extra, user-configured action chain,
+    // not a replacement for the built-in confirmation.
+    runAutomationsForTrigger("booking_created", {
+      calendarId: calendar.id,
+      calendarName: calendar.name,
+      contact: { name, email, phone },
+      whenText: bookerWhen,
+    }).catch((err) => console.error("[api/calendar-book] automation trigger failed", err));
 
     return res.status(201).json({ booking, whenText: bookerWhen });
   } catch (err) {

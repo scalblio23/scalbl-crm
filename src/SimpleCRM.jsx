@@ -52,6 +52,8 @@ import {
   Link2,
   Globe,
   MapPin,
+  Zap,
+  Tag,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -342,6 +344,7 @@ const navItems = [
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "clients", label: "Clients", icon: Briefcase },
   { key: "calendars", label: "Calendars", icon: Calendar },
+  { key: "automations", label: "Automations", icon: Zap },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -354,6 +357,22 @@ const CALENDAR_SETTINGS_SECTIONS = [
   { key: "availability", label: "Availability", icon: Calendar },
   { key: "rules", label: "Booking rules", icon: ListChecks },
   { key: "share", label: "Share & embed", icon: Link2 },
+];
+
+// Automations — a trigger + an ordered chain of actions, same linear
+// shape as GoHighLevel's workflow builder (see server/automations.js
+// for how these are actually interpreted when a trigger fires).
+const AUTOMATION_TRIGGER_OPTIONS = [
+  { value: "contact_tag_added", label: "Contact Tag Added" },
+  { value: "booking_created", label: "Booking Created" },
+];
+// "call" is intentionally not wired up to actually place a call yet —
+// there's no automated dialler in this app, only the rep-driven
+// Powerdialler — so it's shown (to match the trigger→actions shape
+// people expect) but disabled rather than silently doing nothing.
+const AUTOMATION_ACTION_TYPES = [
+  { value: "email", label: "Send Email" },
+  { value: "sms", label: "Send SMS" },
 ];
 
 export default function SimpleCRM() {
@@ -721,6 +740,116 @@ export default function SimpleCRM() {
       alert(err.message || "Could not cancel the booking");
     }
   };
+
+  // ---------- Automations ----------
+  const [automations, setAutomations] = useState([]);
+  const [automationsLoaded, setAutomationsLoaded] = useState(false);
+  const [automationsLoading, setAutomationsLoading] = useState(false);
+  const [openAutomationId, setOpenAutomationId] = useState(null);
+  const [showAddAutomationModal, setShowAddAutomationModal] = useState(false);
+  const [newAutomationName, setNewAutomationName] = useState("");
+  const [addingAutomation, setAddingAutomation] = useState(false);
+  const [savingAutomation, setSavingAutomation] = useState(false);
+
+  const loadAutomations = async () => {
+    setAutomationsLoading(true);
+    try {
+      setAutomations(await api.get("/api/automations"));
+    } catch {
+      // list just stays whatever it was — no global banner for this
+    } finally {
+      setAutomationsLoading(false);
+      setAutomationsLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    if (page !== "automations") return;
+    if (!automationsLoaded && !automationsLoading) loadAutomations();
+    // The "Booking is in calendar" filter needs calendar names —
+    // Calendars is normally loaded lazily on its own tab, so make
+    // sure it's also loaded here.
+    if (!calendarsLoaded && !calendarsLoading) loadCalendars();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  const openAutomation = automations.find((a) => a.id === openAutomationId) || null;
+
+  // Drafted locally and saved with an explicit button, same pattern
+  // as Calendar settings' Availability/Booking rules sections.
+  const [automationDraft, setAutomationDraft] = useState(null);
+  useEffect(() => {
+    if (!openAutomation) return;
+    setAutomationDraft({
+      triggerType: openAutomation.triggerType,
+      triggerConfig: openAutomation.triggerConfig || {},
+      actions: openAutomation.actions || [],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAutomationId]);
+
+  const handleAddAutomation = async (e) => {
+    e.preventDefault();
+    if (!newAutomationName.trim()) return;
+    setAddingAutomation(true);
+    try {
+      const automation = await api.post("/api/automations", { name: newAutomationName.trim() });
+      setAutomations((as) => [...as, automation]);
+      setNewAutomationName("");
+      setShowAddAutomationModal(false);
+      setOpenAutomationId(automation.id);
+    } catch (err) {
+      alert(err.message || "Could not create the automation");
+    } finally {
+      setAddingAutomation(false);
+    }
+  };
+
+  const deleteAutomation = async (id) => {
+    if (!window.confirm("Delete this automation?")) return;
+    try {
+      await api.delete(`/api/automations?id=${id}`);
+      setAutomations((as) => as.filter((a) => a.id !== id));
+      if (openAutomationId === id) setOpenAutomationId(null);
+    } catch (err) {
+      alert(err.message || "Could not delete the automation");
+    }
+  };
+
+  const toggleAutomationActive = async (automation) => {
+    try {
+      const updated = await api.patch(`/api/automations?id=${automation.id}`, { active: !automation.active });
+      setAutomations((as) => as.map((a) => (a.id === automation.id ? updated : a)));
+    } catch (err) {
+      alert(err.message || "Could not update the automation");
+    }
+  };
+
+  const saveAutomationDraft = async () => {
+    if (!openAutomation || !automationDraft) return;
+    setSavingAutomation(true);
+    try {
+      const updated = await api.patch(`/api/automations?id=${openAutomation.id}`, automationDraft);
+      setAutomations((as) => as.map((a) => (a.id === openAutomation.id ? updated : a)));
+    } catch (err) {
+      alert(err.message || "Could not save the automation");
+    } finally {
+      setSavingAutomation(false);
+    }
+  };
+
+  // Switching trigger type clears the old filter — a tag filter makes
+  // no sense once the trigger becomes "Booking Created", and vice versa.
+  const setAutomationTriggerType = (triggerType) =>
+    setAutomationDraft((d) => ({ ...d, triggerType, triggerConfig: {} }));
+  const setAutomationTriggerConfig = (patch) =>
+    setAutomationDraft((d) => ({ ...d, triggerConfig: { ...d.triggerConfig, ...patch } }));
+  const addAutomationAction = (type) =>
+    setAutomationDraft((d) => ({ ...d, actions: [...(d.actions || []), { type, subject: "", body: "" }] }));
+  const updateAutomationAction = (index, patch) =>
+    setAutomationDraft((d) => ({ ...d, actions: d.actions.map((a, i) => (i === index ? { ...a, ...patch } : a)) }));
+  const removeAutomationAction = (index) =>
+    setAutomationDraft((d) => ({ ...d, actions: d.actions.filter((_, i) => i !== index) }));
 
   // Add-contact modal
   const emptyContactForm = {
@@ -6488,6 +6617,241 @@ export default function SimpleCRM() {
           </div>
         )}
 
+        {/* Automations */}
+        {page === "automations" && (
+          <div className="flex-1 overflow-y-auto">
+            {!openAutomation ? (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h1 className="text-xl font-bold">Automations</h1>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Fire off emails and texts automatically when something happens in the CRM.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setShowAddAutomationModal(true)}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Plus size={15} /> Add Automation
+                  </button>
+                </div>
+                <div className="p-8">
+                  {automationsLoading ? (
+                    <div className="flex justify-center py-16">
+                      <Loader2 className="animate-spin text-gray-400" size={20} />
+                    </div>
+                  ) : automations.length === 0 ? (
+                    <div className="text-center py-16 text-sm text-gray-400">
+                      <Zap size={28} className="mx-auto mb-3 text-gray-300" />
+                      No automations yet. Add one to start automating follow-ups.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {automations.map((a) => (
+                        <div key={a.id} className="border border-gray-200 rounded-xl p-5 bg-white">
+                          <div className="flex items-start justify-between mb-2">
+                            <h3 className="font-semibold text-sm">{a.name}</h3>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border ${
+                                a.active
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-gray-100 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {a.active ? "Active" : "Paused"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-400 mb-1.5 flex items-center gap-1">
+                            <Zap size={12} />
+                            {AUTOMATION_TRIGGER_OPTIONS.find((t) => t.value === a.triggerType)?.label ||
+                              "Trigger not set"}
+                          </p>
+                          <p className="text-xs text-gray-400 mb-4">
+                            {a.actions.length} action{a.actions.length === 1 ? "" : "s"}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setOpenAutomationId(a.id)}
+                              className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-3 py-2 rounded-lg font-medium"
+                            >
+                              Open
+                            </button>
+                            <button
+                              onClick={() => deleteAutomation(a.id)}
+                              className="text-gray-400 hover:text-red-600 p-2"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <button
+                      onClick={() => setOpenAutomationId(null)}
+                      className="text-xs text-gray-400 hover:text-gray-700 mb-1"
+                    >
+                      ← Back to Automations
+                    </button>
+                    <h1 className="text-xl font-bold">{openAutomation.name}</h1>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-gray-500">
+                      <input
+                        type="checkbox"
+                        checked={openAutomation.active}
+                        onChange={() => toggleAutomationActive(openAutomation)}
+                      />
+                      Active
+                    </label>
+                    <button
+                      onClick={saveAutomationDraft}
+                      disabled={savingAutomation}
+                      className="flex items-center gap-2 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                    >
+                      {savingAutomation && <Loader2 size={14} className="animate-spin" />}
+                      Save
+                    </button>
+                  </div>
+                </div>
+
+                {automationDraft && (
+                  <div className="p-8 max-w-xl space-y-8">
+                    <div className="border border-gray-100 rounded-lg p-5 space-y-4">
+                      <h2 className="text-base font-bold flex items-center gap-2">
+                        <Zap size={16} className="text-gray-400" /> Trigger
+                      </h2>
+                      <Dropdown
+                        value={automationDraft.triggerType}
+                        onChange={setAutomationTriggerType}
+                        options={AUTOMATION_TRIGGER_OPTIONS}
+                        placeholder="Choose a trigger…"
+                      />
+
+                      {automationDraft.triggerType === "contact_tag_added" && (
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500 flex items-center gap-1">
+                            <Tag size={12} /> Contact tag is =
+                          </label>
+                          <Dropdown
+                            value={automationDraft.triggerConfig.tag || ""}
+                            onChange={(v) => setAutomationTriggerConfig({ tag: v || null })}
+                            options={[
+                              { value: "", label: "Any tag" },
+                              ...contactTagNames.map((t) => ({ value: t, label: t })),
+                            ]}
+                            searchable
+                          />
+                        </div>
+                      )}
+
+                      {automationDraft.triggerType === "booking_created" && (
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500 flex items-center gap-1">
+                            <Calendar size={12} /> Booking is in calendar
+                          </label>
+                          <Dropdown
+                            value={String(automationDraft.triggerConfig.calendarId || "")}
+                            onChange={(v) => setAutomationTriggerConfig({ calendarId: v ? Number(v) : null })}
+                            options={[
+                              { value: "", label: "Any calendar" },
+                              ...calendars.map((c) => ({ value: String(c.id), label: c.name })),
+                            ]}
+                            searchable
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h2 className="text-base font-bold">Actions</h2>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => addAutomationAction("email")}
+                            className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-xs px-3 py-1.5 rounded-lg font-medium"
+                          >
+                            <Plus size={12} /> Email
+                          </button>
+                          <button
+                            onClick={() => addAutomationAction("sms")}
+                            className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-xs px-3 py-1.5 rounded-lg font-medium"
+                          >
+                            <Plus size={12} /> SMS
+                          </button>
+                          <button
+                            disabled
+                            title="Automated calling isn't available yet — use Powerdialler for calls"
+                            className="flex items-center gap-1.5 border border-gray-100 text-gray-300 text-xs px-3 py-1.5 rounded-lg font-medium cursor-not-allowed"
+                          >
+                            <Plus size={12} /> Call
+                          </button>
+                        </div>
+                      </div>
+
+                      {automationDraft.actions.length === 0 ? (
+                        <p className="text-sm text-gray-400">No actions yet — add an email or SMS step above.</p>
+                      ) : (
+                        <div className="space-y-3">
+                          {automationDraft.actions.map((action, i) => (
+                            <div key={i} className="border border-gray-100 rounded-lg p-4">
+                              <div className="flex items-center justify-between mb-3">
+                                <span className="text-sm font-semibold flex items-center gap-1.5">
+                                  {action.type === "email" ? <Send size={13} /> : <MessageSquare size={13} />}
+                                  Step {i + 1}: {action.type === "email" ? "Send Email" : "Send SMS"}
+                                </span>
+                                <button
+                                  onClick={() => removeAutomationAction(i)}
+                                  className="text-gray-400 hover:text-red-600 p-1"
+                                >
+                                  <X size={14} />
+                                </button>
+                              </div>
+                              {action.type === "email" && (
+                                <input
+                                  value={action.subject}
+                                  onChange={(e) => updateAutomationAction(i, { subject: e.target.value })}
+                                  placeholder="Subject"
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 mb-2"
+                                />
+                              )}
+                              <textarea
+                                value={action.body}
+                                onChange={(e) => updateAutomationAction(i, { body: e.target.value })}
+                                placeholder={
+                                  action.type === "email" ? "Email body…" : "Text message…"
+                                }
+                                rows={3}
+                                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <p className="text-xs text-gray-400">
+                        Use <code className="bg-gray-100 px-1 rounded">{"{{name}}"}</code>,{" "}
+                        <code className="bg-gray-100 px-1 rounded">{"{{email}}"}</code>,{" "}
+                        <code className="bg-gray-100 px-1 rounded">{"{{phone}}"}</code>,{" "}
+                        <code className="bg-gray-100 px-1 rounded">{"{{tag}}"}</code>,{" "}
+                        <code className="bg-gray-100 px-1 rounded">{"{{calendar}}"}</code>, or{" "}
+                        <code className="bg-gray-100 px-1 rounded">{"{{when}}"}</code> in a subject or body to fill
+                        in details from the contact/booking that fired this automation.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* Settings */}
         {page === "settings" && (
           <div className="flex-1 overflow-y-auto">
@@ -6927,6 +7291,53 @@ export default function SimpleCRM() {
                 </form>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Automation modal */}
+      {showAddAutomationModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddAutomationModal(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add Automation</h2>
+              <button onClick={() => setShowAddAutomationModal(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddAutomation} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Automation name</label>
+                <input
+                  autoFocus
+                  required
+                  value={newAutomationName}
+                  onChange={(e) => setNewAutomationName(e.target.value)}
+                  placeholder="e.g. New lead follow-up"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddAutomationModal(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingAutomation}
+                  className="flex items-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {addingAutomation && <Loader2 size={14} className="animate-spin" />}
+                  Create automation
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -98,6 +98,7 @@ import calendarPublicHandler from "../api/calendar-public.js";
 import calendarSlotsHandler from "../api/calendar-slots.js";
 import calendarBookHandler from "../api/calendar-book.js";
 import calendarCancelHandler from "../api/calendar-cancel.js";
+import automationsHandler from "../api/automations.js";
 import {
   getSessionUser,
   requireAuth,
@@ -191,6 +192,7 @@ app.use(
     "/api/calendar-google-disconnect",
     "/api/calendar-google-calendars",
     "/api/calendar-bookings",
+    "/api/automations",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -1113,6 +1115,7 @@ app.all("/api/calendar-public", calendarPublicHandler);
 app.all("/api/calendar-slots", calendarSlotsHandler);
 app.all("/api/calendar-book", calendarBookHandler);
 app.all("/api/calendar-cancel", calendarCancelHandler);
+app.all("/api/automations", automationsHandler);
 
 app.listen(PORT, () => {
   const missing = missingTwilioEnv();

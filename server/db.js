@@ -363,6 +363,24 @@ export async function ensureSchema() {
       ON calendar_bookings (calendar_id, start_time)
       WHERE status = 'confirmed'
     `);
+    // ---------- Automations ----------
+    // One trigger + an ordered list of actions, same linear shape as
+    // GoHighLevel's workflow builder (no branching in this first
+    // version). trigger_type is nullable — a freshly-created
+    // automation starts unconfigured until its builder is filled in
+    // and saved (see server/automations.js for how trigger_config and
+    // actions are actually interpreted).
+    await query(`
+      CREATE TABLE IF NOT EXISTS automations (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        trigger_type TEXT,
+        trigger_config JSONB NOT NULL DEFAULT '{}',
+        actions JSONB NOT NULL DEFAULT '[]',
+        active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1723,4 +1741,73 @@ export async function cancelCalendarBooking(id) {
     [id]
   );
   return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+// ---------- Automations ----------
+
+function automationFromRow(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    triggerType: r.trigger_type,
+    triggerConfig: r.trigger_config || {},
+    actions: r.actions || [],
+    active: r.active,
+    createdAt: r.created_at,
+  };
+}
+
+export async function getAutomations() {
+  const rows = await query("SELECT * FROM automations ORDER BY created_at ASC");
+  return rows.map(automationFromRow);
+}
+
+export async function getAutomationById(id) {
+  const rows = await query("SELECT * FROM automations WHERE id = $1", [id]);
+  return rows[0] ? automationFromRow(rows[0]) : null;
+}
+
+// Only ever called with a real trigger_type by server/automations.js,
+// and only for automations actually switched on — an inactive one, or
+// one whose builder was never finished (trigger_type still null),
+// should never fire.
+export async function getActiveAutomationsByTrigger(triggerType) {
+  const rows = await query(
+    "SELECT * FROM automations WHERE trigger_type = $1 AND active = true ORDER BY created_at ASC",
+    [triggerType]
+  );
+  return rows.map(automationFromRow);
+}
+
+export async function createAutomation({ name }) {
+  const rows = await query("INSERT INTO automations (name) VALUES ($1) RETURNING *", [name]);
+  return automationFromRow(rows[0]);
+}
+
+// Same "every field optional" shape as updateCalendar — the builder
+// can save the trigger and the actions list independently.
+export async function updateAutomation(id, patch) {
+  const rows = await query(
+    `UPDATE automations SET
+       name = COALESCE($2, name),
+       trigger_type = COALESCE($3, trigger_type),
+       trigger_config = COALESCE($4::jsonb, trigger_config),
+       actions = COALESCE($5::jsonb, actions),
+       active = COALESCE($6, active)
+     WHERE id = $1
+     RETURNING *`,
+    [
+      id,
+      patch.name ?? null,
+      patch.triggerType ?? null,
+      patch.triggerConfig ? JSON.stringify(patch.triggerConfig) : null,
+      patch.actions ? JSON.stringify(patch.actions) : null,
+      patch.active ?? null,
+    ]
+  );
+  return rows[0] ? automationFromRow(rows[0]) : null;
+}
+
+export async function deleteAutomation(id) {
+  await query("DELETE FROM automations WHERE id = $1", [id]);
 }
