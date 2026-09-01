@@ -47,9 +47,30 @@ import {
   Play,
   Mic,
   Square,
+  Calendar,
+  Clock,
+  Link2,
+  Globe,
+  MapPin,
+  Zap,
+  Tag,
+  Folder,
+  FolderPlus,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
+import Dropdown from "./components/Dropdown";
+import AddStepMenu from "./components/AddStepMenu";
+import {
+  timezoneOptions,
+  detectBrowserTimezone,
+  timeOfDayOptions,
+  EVENT_LENGTH_OPTIONS,
+  BUFFER_OPTIONS,
+  MIN_NOTICE_OPTIONS,
+  BOOKING_WINDOW_OPTIONS,
+  WEEKDAYS,
+} from "./lib/calendarOptions";
 
 // ---------- Sample data ----------
 const initialContacts = [
@@ -299,7 +320,12 @@ const MULTILINE_STATUS_LABELS = {
   queued: "Dialling…",
   initiated: "Dialling…",
   ringing: "Ringing…",
-  "in-progress": "Answered",
+  // Deliberately not "Connected" or "Answered" alone — answering
+  // doesn't mean the rep can hear (or be heard by) this line yet; it
+  // stays muted server-side until confirmed as the one winning line
+  // (see server/twilioCore.js), which is also the split second this
+  // card disappears in favor of the single live-call view.
+  "in-progress": "Answered — connecting…",
   completed: "Ended",
   busy: "Busy",
   failed: "Failed",
@@ -325,7 +351,42 @@ const navItems = [
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "clients", label: "Clients", icon: Briefcase },
+  { key: "calendars", label: "Calendars", icon: Calendar },
+  { key: "automations", label: "Automations", icon: Zap },
   { key: "settings", label: "Settings", icon: Settings },
+];
+
+// Calendar settings' left mini-nav — Integrate → Timezone → Availability
+// → Booking rules → Share & embed, per the sidebar tab → Add Calendar →
+// Calendar settings → options flow.
+const CALENDAR_SETTINGS_SECTIONS = [
+  { key: "integrate", label: "Integrate", icon: Globe },
+  { key: "timezone", label: "Timezone", icon: Clock },
+  { key: "availability", label: "Availability", icon: Calendar },
+  { key: "rules", label: "Booking rules", icon: ListChecks },
+  { key: "share", label: "Share & embed", icon: Link2 },
+];
+
+// Automations — a trigger + an ordered chain of actions, same linear
+// shape as GoHighLevel's workflow builder (see server/automations.js
+// for how these are actually interpreted when a trigger fires).
+const AUTOMATION_TRIGGER_OPTIONS = [
+  { value: "contact_tag_added", label: "Contact Tag Added" },
+  { value: "booking_created", label: "Booking Created" },
+];
+
+// Clickable in the builder's Actions section — inserts "{{key}}" at
+// the cursor in whichever subject/body field was last focused. Keys
+// must match the `data` object server/automations.js's fillTemplate()
+// fills in at send time.
+const MERGE_FIELDS = [
+  { key: "name", label: "Contact Name" },
+  { key: "email", label: "Contact Email" },
+  { key: "phone", label: "Contact Phone" },
+  { key: "tag", label: "Contact Tag" },
+  { key: "calendar", label: "Calendar Name" },
+  { key: "appointment_date_time", label: "Appointment Date + Time" },
+  { key: "timezone", label: "Timezone" },
 ];
 
 export default function SimpleCRM() {
@@ -497,6 +558,383 @@ export default function SimpleCRM() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser]);
 
+  // ---------- Calendars ----------
+  // Loaded lazily the first time the tab is opened rather than as
+  // part of /api/bootstrap — a brand-new team has zero calendars, and
+  // there's no reason to make every page load wait on a fetch for a
+  // tab most sessions never visit.
+  const [calendars, setCalendars] = useState([]);
+  const [calendarsLoaded, setCalendarsLoaded] = useState(false);
+  const [calendarsLoading, setCalendarsLoading] = useState(false);
+  const [openCalendarId, setOpenCalendarId] = useState(null);
+  const [calendarSettingsTab, setCalendarSettingsTab] = useState("integrate");
+  const [showAddCalendarModal, setShowAddCalendarModal] = useState(false);
+  const [newCalendarName, setNewCalendarName] = useState("");
+  const [addingCalendar, setAddingCalendar] = useState(false);
+  const [calendarBookings, setCalendarBookings] = useState([]);
+  const [savingCalendar, setSavingCalendar] = useState(false);
+
+  const loadCalendars = async () => {
+    setCalendarsLoading(true);
+    try {
+      const data = await api.get("/api/calendars");
+      setCalendars(data);
+    } catch {
+      // Left as whatever was already loaded — the Calendars tab shows
+      // its own inline error state rather than a global banner.
+    } finally {
+      setCalendarsLoading(false);
+      setCalendarsLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    if (page === "calendars" && !calendarsLoaded && !calendarsLoading) loadCalendars();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  // Picks up ?calendar=<id>&google=connected|error after the "Integrate
+  // with Google" OAuth round trip lands back on the CRM (see
+  // api/calendar-google-callback.js) — reopens that calendar's
+  // Integrate section and refreshes its state so the newly-connected
+  // account shows up immediately.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const google = params.get("google");
+    const calendarParam = params.get("calendar");
+    if (!google) return;
+    setPage("calendars");
+    setCalendarSettingsTab("integrate");
+    if (calendarParam) setOpenCalendarId(Number(calendarParam));
+    loadCalendars();
+    window.history.replaceState({}, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const openCalendar = calendars.find((c) => c.id === openCalendarId) || null;
+  const timezoneDropdownOptions = useMemo(() => timezoneOptions(), []);
+  const timeOfDayDropdownOptions = useMemo(() => timeOfDayOptions(), []);
+
+  useEffect(() => {
+    if (!openCalendarId) return;
+    api
+      .get(`/api/calendar-bookings?calendarId=${openCalendarId}`)
+      .then(setCalendarBookings)
+      .catch(() => setCalendarBookings([]));
+  }, [openCalendarId]);
+
+  // Which Google calendar (on the connected account) to sync to —
+  // fetched once a calendar's Google connection is live, so the
+  // Integrate section can offer a picker instead of always using
+  // "primary".
+  const [googleCalendarOptions, setGoogleCalendarOptions] = useState([]);
+  const [googleCalendarsLoading, setGoogleCalendarsLoading] = useState(false);
+  const [googleCalendarsError, setGoogleCalendarsError] = useState("");
+  useEffect(() => {
+    setGoogleCalendarsError("");
+    if (!openCalendarId || !openCalendar?.googleConnected) {
+      setGoogleCalendarOptions([]);
+      return;
+    }
+    setGoogleCalendarsLoading(true);
+    api
+      .get(`/api/calendar-google-calendars?calendarId=${openCalendarId}`)
+      .then((list) => setGoogleCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary }))))
+      .catch((err) => {
+        setGoogleCalendarOptions([]);
+        setGoogleCalendarsError(err.message || "Could not load your Google calendars.");
+      })
+      .finally(() => setGoogleCalendarsLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCalendarId, openCalendar?.googleConnected]);
+
+  // Availability and booking-rules edits are drafted locally and saved
+  // with an explicit button (like the rest of Settings) rather than
+  // patching the server on every click — editing a weekly hours grid
+  // one field at a time would otherwise fire a save per keystroke.
+  const [availabilityDraft, setAvailabilityDraft] = useState(null);
+  const [rulesDraft, setRulesDraft] = useState(null);
+  useEffect(() => {
+    if (!openCalendar) return;
+    setAvailabilityDraft(openCalendar.availability);
+    setRulesDraft({
+      eventLengthMinutes: String(openCalendar.eventLengthMinutes),
+      bufferMinutes: String(openCalendar.bufferMinutes),
+      minNoticeHours: String(openCalendar.minNoticeHours),
+      bookingWindowDays: String(openCalendar.bookingWindowDays),
+      maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCalendar?.id]);
+
+  const setDayRange = (day, index, key, value) =>
+    setAvailabilityDraft((draft) => ({
+      ...draft,
+      [day]: draft[day].map((r, i) => (i === index ? { ...r, [key]: value } : r)),
+    }));
+  const addDayRange = (day) =>
+    setAvailabilityDraft((draft) => ({ ...draft, [day]: [...(draft[day] || []), { start: "09:00", end: "17:00" }] }));
+  const removeDayRange = (day, index) =>
+    setAvailabilityDraft((draft) => ({ ...draft, [day]: draft[day].filter((_, i) => i !== index) }));
+  const toggleDayEnabled = (day) =>
+    setAvailabilityDraft((draft) => ({
+      ...draft,
+      [day]: draft[day]?.length ? [] : [{ start: "09:00", end: "17:00" }],
+    }));
+  // Copies one day's time ranges onto every other day — the common
+  // case of "9-5 every weekday" shouldn't need setting each day by hand.
+  const applyDayToAllDays = (day) =>
+    setAvailabilityDraft((draft) => {
+      const source = (draft[day] || []).map((r) => ({ ...r }));
+      const next = {};
+      for (const { key } of WEEKDAYS) next[key] = source.map((r) => ({ ...r }));
+      return next;
+    });
+
+  const handleAddCalendar = async (e) => {
+    e.preventDefault();
+    if (!newCalendarName.trim()) return;
+    setAddingCalendar(true);
+    try {
+      const calendar = await api.post("/api/calendars", { name: newCalendarName.trim() });
+      setCalendars((cs) => [...cs, calendar]);
+      setNewCalendarName("");
+      setShowAddCalendarModal(false);
+      setOpenCalendarId(calendar.id);
+      setCalendarSettingsTab("integrate");
+    } catch (err) {
+      alert(err.message || "Could not create the calendar");
+    } finally {
+      setAddingCalendar(false);
+    }
+  };
+
+  const patchCalendar = async (id, patch) => {
+    setSavingCalendar(true);
+    try {
+      const updated = await api.patch(`/api/calendars?id=${id}`, patch);
+      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      alert(err.message || "Could not save that change");
+    } finally {
+      setSavingCalendar(false);
+    }
+  };
+
+  const deleteCalendar = async (id) => {
+    if (!window.confirm("Delete this calendar? Its booking link will stop working.")) return;
+    try {
+      await api.delete(`/api/calendars?id=${id}`);
+      setCalendars((cs) => cs.filter((c) => c.id !== id));
+      if (openCalendarId === id) setOpenCalendarId(null);
+    } catch (err) {
+      alert(err.message || "Could not delete the calendar");
+    }
+  };
+
+  const connectGoogleCalendar = (id) => {
+    window.location.href = `/api/calendar-google-connect?calendarId=${id}`;
+  };
+
+  const disconnectGoogleCalendar = async (id) => {
+    try {
+      const updated = await api.post("/api/calendar-google-disconnect", { calendarId: id });
+      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      alert(err.message || "Could not disconnect Google");
+    }
+  };
+
+  const cancelCalendarBooking = async (id) => {
+    if (!window.confirm("Cancel this booking?")) return;
+    try {
+      await api.delete(`/api/calendar-bookings?id=${id}`);
+      setCalendarBookings((bs) => bs.map((b) => (b.id === id ? { ...b, status: "cancelled" } : b)));
+    } catch (err) {
+      alert(err.message || "Could not cancel the booking");
+    }
+  };
+
+  // ---------- Automations ----------
+  const [automations, setAutomations] = useState([]);
+  const [automationsLoaded, setAutomationsLoaded] = useState(false);
+  const [automationsLoading, setAutomationsLoading] = useState(false);
+  const [openAutomationId, setOpenAutomationId] = useState(null);
+  const [showAddAutomationModal, setShowAddAutomationModal] = useState(false);
+  const [newAutomationName, setNewAutomationName] = useState("");
+  const [addingAutomation, setAddingAutomation] = useState(false);
+  const [savingAutomation, setSavingAutomation] = useState(false);
+
+  const loadAutomations = async () => {
+    setAutomationsLoading(true);
+    try {
+      setAutomations(await api.get("/api/automations"));
+    } catch {
+      // list just stays whatever it was — no global banner for this
+    } finally {
+      setAutomationsLoading(false);
+      setAutomationsLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    if (page !== "automations") return;
+    if (!automationsLoaded && !automationsLoading) loadAutomations();
+    // The "Booking is in calendar" filter needs calendar names —
+    // Calendars is normally loaded lazily on its own tab, so make
+    // sure it's also loaded here.
+    if (!calendarsLoaded && !calendarsLoading) loadCalendars();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  const openAutomation = automations.find((a) => a.id === openAutomationId) || null;
+
+  // Drafted locally and saved with an explicit button, same pattern
+  // as Calendar settings' Availability/Booking rules sections.
+  const [automationDraft, setAutomationDraft] = useState(null);
+  const [savedAutomationSnapshot, setSavedAutomationSnapshot] = useState(null);
+  useEffect(() => {
+    if (!openAutomation) return;
+    const draft = {
+      triggerType: openAutomation.triggerType,
+      triggerConfig: openAutomation.triggerConfig || {},
+      actions: openAutomation.actions || [],
+    };
+    setAutomationDraft(draft);
+    // A snapshot of what's actually persisted, so the builder can tell
+    // the difference between "nothing changed yet" and "you edited
+    // this and haven't hit Save" — the single most common reason an
+    // automation silently "doesn't fire" is that its trigger was
+    // configured in the UI but never actually saved.
+    setSavedAutomationSnapshot(JSON.stringify(draft));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAutomationId]);
+  const automationHasUnsavedChanges =
+    automationDraft && savedAutomationSnapshot !== null && JSON.stringify(automationDraft) !== savedAutomationSnapshot;
+
+  // Recent activity for the opened automation — the actual answer to
+  // "did this fire": zero rows means the trigger never matched at all
+  // (check the filter, Active, and whether it was saved); a 'done' row
+  // means it ran — so a missing message from there is a delivery
+  // problem (SendGrid/Twilio), not an automation problem.
+  const [automationRuns, setAutomationRuns] = useState([]);
+  const [automationRunsLoading, setAutomationRunsLoading] = useState(false);
+  const loadAutomationRuns = async (id) => {
+    setAutomationRunsLoading(true);
+    try {
+      setAutomationRuns(await api.get(`/api/automations?runsFor=${id}`));
+    } catch {
+      setAutomationRuns([]);
+    } finally {
+      setAutomationRunsLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (openAutomationId) loadAutomationRuns(openAutomationId);
+  }, [openAutomationId]);
+
+  const handleAddAutomation = async (e) => {
+    e.preventDefault();
+    if (!newAutomationName.trim()) return;
+    setAddingAutomation(true);
+    try {
+      const automation = await api.post("/api/automations", { name: newAutomationName.trim() });
+      setAutomations((as) => [...as, automation]);
+      setNewAutomationName("");
+      setShowAddAutomationModal(false);
+      setOpenAutomationId(automation.id);
+    } catch (err) {
+      alert(err.message || "Could not create the automation");
+    } finally {
+      setAddingAutomation(false);
+    }
+  };
+
+  const deleteAutomation = async (id) => {
+    if (!window.confirm("Delete this automation?")) return;
+    try {
+      await api.delete(`/api/automations?id=${id}`);
+      setAutomations((as) => as.filter((a) => a.id !== id));
+      if (openAutomationId === id) setOpenAutomationId(null);
+    } catch (err) {
+      alert(err.message || "Could not delete the automation");
+    }
+  };
+
+  const toggleAutomationActive = async (automation) => {
+    try {
+      const updated = await api.patch(`/api/automations?id=${automation.id}`, { active: !automation.active });
+      setAutomations((as) => as.map((a) => (a.id === automation.id ? updated : a)));
+    } catch (err) {
+      alert(err.message || "Could not update the automation");
+    }
+  };
+
+  const saveAutomationDraft = async () => {
+    if (!openAutomation || !automationDraft) return;
+    setSavingAutomation(true);
+    try {
+      const updated = await api.patch(`/api/automations?id=${openAutomation.id}`, automationDraft);
+      setAutomations((as) => as.map((a) => (a.id === openAutomation.id ? updated : a)));
+      setSavedAutomationSnapshot(JSON.stringify(automationDraft));
+    } catch (err) {
+      alert(err.message || "Could not save the automation");
+    } finally {
+      setSavingAutomation(false);
+    }
+  };
+
+  // Switching trigger type clears the old filter — a tag filter makes
+  // no sense once the trigger becomes "Booking Created", and vice versa.
+  const setAutomationTriggerType = (triggerType) =>
+    setAutomationDraft((d) => ({ ...d, triggerType, triggerConfig: {} }));
+  const setAutomationTriggerConfig = (patch) =>
+    setAutomationDraft((d) => ({ ...d, triggerConfig: { ...d.triggerConfig, ...patch } }));
+  // Inserts a new step at any position — before the first step,
+  // between any two, or after the last — rather than only ever being
+  // able to append to the end.
+  const insertAutomationAction = (index, newAction) =>
+    setAutomationDraft((d) => {
+      const actions = [...d.actions];
+      actions.splice(index, 0, newAction);
+      return { ...d, actions };
+    });
+  const updateAutomationAction = (index, patch) =>
+    setAutomationDraft((d) => ({ ...d, actions: d.actions.map((a, i) => (i === index ? { ...a, ...patch } : a)) }));
+  const removeAutomationAction = (index) =>
+    setAutomationDraft((d) => ({ ...d, actions: d.actions.filter((_, i) => i !== index) }));
+
+  // Merge fields insert into whichever subject/body field was last
+  // focused, at its exact cursor position — tracked via a ref (not
+  // state, no re-render needed) rather than tied to a specific
+  // action's index, since the same DOM node stays valid across
+  // re-renders regardless of index/id churn. The merge-field buttons
+  // use onMouseDown + preventDefault (not onClick) specifically so
+  // clicking one never steals focus away from the field first —
+  // otherwise selectionStart/selectionEnd would already be lost by
+  // the time the click handler ran.
+  const lastFocusedActionFieldRef = useRef(null); // { el, index, field }
+  const [pendingCursorRestore, setPendingCursorRestore] = useState(null); // { el, pos }
+  useEffect(() => {
+    if (!pendingCursorRestore) return;
+    const { el, pos } = pendingCursorRestore;
+    el.focus();
+    el.setSelectionRange(pos, pos);
+    setPendingCursorRestore(null);
+  }, [pendingCursorRestore]);
+
+  const insertMergeField = (key) => {
+    const target = lastFocusedActionFieldRef.current;
+    if (!target) return;
+    const { el, index, field } = target;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const token = `{{${key}}}`;
+    const newValue = el.value.slice(0, start) + token + el.value.slice(end);
+    updateAutomationAction(index, { [field]: newValue });
+    setPendingCursorRestore({ el, pos: start + token.length });
+  };
+
   // Add-contact modal
   const emptyContactForm = {
     name: "",
@@ -640,6 +1078,128 @@ export default function SimpleCRM() {
     const idx = contactTagNames.indexOf(tag);
     if (idx === -1) return SELECT_COLORS.gray;
     return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
+  };
+
+  // ---------- Tag folders ----------
+  // A purely organizational grouping layer over the tag list above —
+  // a tag not listed in any folder's tagNames still shows up
+  // ungrouped in the sidebar, exactly as it always has. Loaded
+  // lazily, same as Calendars/Automations, the first time the
+  // Contacts tab is opened.
+  const [tagFolders, setTagFolders] = useState([]);
+  const [tagFoldersLoaded, setTagFoldersLoaded] = useState(false);
+  const loadTagFolders = async () => {
+    try {
+      setTagFolders(await api.get("/api/tag-folders"));
+    } catch {
+      // sidebar just falls back to the flat, ungrouped tag list
+    } finally {
+      setTagFoldersLoaded(true);
+    }
+  };
+  useEffect(() => {
+    if (page === "contacts" && !tagFoldersLoaded) loadTagFolders();
+  }, [page, tagFoldersLoaded]);
+
+  // Which folders are expanded in the sidebar — per-browser display
+  // preference, same as hiddenContactColumnKeys above, not something
+  // worth syncing across the team.
+  const [expandedTagFolderIds, setExpandedTagFolderIds] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("scalbl:expandedTagFolders") || "[]"));
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("scalbl:expandedTagFolders", JSON.stringify([...expandedTagFolderIds]));
+    } catch {
+      // ignore — private browsing / storage disabled
+    }
+  }, [expandedTagFolderIds]);
+  const toggleTagFolderExpanded = (id) =>
+    setExpandedTagFolderIds((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const tagNamesInFolders = new Set(tagFolders.flatMap((f) => f.tagNames));
+  const ungroupedTagNames = contactTagNames.filter((t) => !tagNamesInFolders.has(t));
+  const tagFolderCount = (folder) => folder.tagNames.reduce((sum, t) => sum + (contactTagCounts[t] || 0), 0);
+
+  const [showManageTagFoldersModal, setShowManageTagFoldersModal] = useState(false);
+  const [newTagFolderName, setNewTagFolderName] = useState("");
+  const [savingTagFolder, setSavingTagFolder] = useState(false);
+
+  const handleCreateTagFolder = async (e) => {
+    e.preventDefault();
+    if (!newTagFolderName.trim()) return;
+    setSavingTagFolder(true);
+    try {
+      const folder = await api.post("/api/tag-folders", { name: newTagFolderName.trim() });
+      setTagFolders((fs) => [...fs, folder]);
+      setNewTagFolderName("");
+    } catch (err) {
+      alert(err.message || "Could not create the folder");
+    } finally {
+      setSavingTagFolder(false);
+    }
+  };
+
+  const renameTagFolder = async (id, name) => {
+    try {
+      const updated = await api.patch(`/api/tag-folders?id=${id}`, { name });
+      setTagFolders((fs) => fs.map((f) => (f.id === id ? updated : f)));
+    } catch (err) {
+      alert(err.message || "Could not rename the folder");
+    }
+  };
+
+  // A tag can only usefully live in one folder at a time — assigning
+  // it here removes it from whichever other folder had it, so the
+  // checklists in the modal never show the same tag "in" two folders
+  // at once.
+  const toggleTagInFolder = async (folder, tag) => {
+    const isInThisFolder = folder.tagNames.includes(tag);
+    const updates = [];
+    if (isInThisFolder) {
+      updates.push({ id: folder.id, tagNames: folder.tagNames.filter((t) => t !== tag) });
+    } else {
+      updates.push({ id: folder.id, tagNames: [...folder.tagNames, tag] });
+      for (const other of tagFolders) {
+        if (other.id !== folder.id && other.tagNames.includes(tag)) {
+          updates.push({ id: other.id, tagNames: other.tagNames.filter((t) => t !== tag) });
+        }
+      }
+    }
+    try {
+      const updatedFolders = await Promise.all(
+        updates.map((u) => api.patch(`/api/tag-folders?id=${u.id}`, { tagNames: u.tagNames }))
+      );
+      setTagFolders((fs) => fs.map((f) => updatedFolders.find((u) => u.id === f.id) || f));
+    } catch (err) {
+      alert(err.message || "Could not update the folder");
+    }
+  };
+
+  const deleteTagFolderById = async (id) => {
+    if (!window.confirm("Delete this folder? Its tags stay on their contacts and just become ungrouped again.")) {
+      return;
+    }
+    try {
+      await api.delete(`/api/tag-folders?id=${id}`);
+      setTagFolders((fs) => fs.filter((f) => f.id !== id));
+      setExpandedTagFolderIds((s) => {
+        const next = new Set(s);
+        next.delete(id);
+        return next;
+      });
+    } catch (err) {
+      alert(err.message || "Could not delete the folder");
+    }
   };
 
   // Filter bar (Contacts) — any number of filters, each on any
@@ -2189,6 +2749,10 @@ export default function SimpleCRM() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+  const sessionPausedRef = useRef(false);
+  useEffect(() => {
+    sessionPausedRef.current = sessionPaused;
+  }, [sessionPaused]);
 
   const WRAP_UP_SECONDS = 15;
 
@@ -2238,7 +2802,28 @@ export default function SimpleCRM() {
     setSession(null);
     setSessionPaused(false);
     setWrapUp(null);
-    if (multilineBatchIdRef.current) cancelMultilineBatch(multilineBatchIdRef.current);
+    // Stopped directly here rather than only relying on the Twilio
+    // call's own disconnect/cancel event to eventually fire
+    // onCallEnded — that event isn't guaranteed (e.g. the conference
+    // leg is in a bad state), and until it does, the poll loop would
+    // keep running against a batch the rep already walked away from,
+    // able to still set activeLeadId/callStatus="in-progress" if it
+    // later observes a winner.
+    stopMultilinePolling();
+    setMultilineBatch(null);
+    if (multilineBatchIdRef.current) {
+      cancelMultilineBatch(multilineBatchIdRef.current);
+      multilineBatchIdRef.current = null;
+    }
+    // Deliberately NOT clearing multilineWinnerRef here — if the rep
+    // is actively connected to a winner when they hit Stop, the
+    // conference call's disconnect event is still going to fire
+    // onCallEnded asynchronously, and it needs to still see the real
+    // winner there to log the call at all (session is already null by
+    // then, so it logs it directly rather than opening a wrap-up
+    // screen — see onCallEnded's `!winner` branch). Nulling it here
+    // used to silently drop that call's outcome — no call log, no
+    // conversation log — any time "Stop session" was clicked mid-call.
     if (calling) {
       hangUp();
       activeCallRef.current = null;
@@ -2307,7 +2892,13 @@ export default function SimpleCRM() {
   // the table has no wrap-up to force, so it's logged directly — but
   // still remembered (lastAdHocCall) so "Call again"/"Call again with
   // a different number" can offer an immediate redial on it too.
-  const handleCallEnded = (lead, durationMs) => {
+  // `batchLeadIds` is every lead actually dialled in this round — for
+  // a normal single-line call that's always just [lead.id], but for a
+  // Multi Line winner it's every line that was tried, not just the one
+  // that answered. finishWrapUp needs the whole set so the ones that
+  // rang and lost leave the queue too, instead of contaminating the
+  // next round with numbers that were just tried a moment ago.
+  const handleCallEnded = (lead, durationMs, batchLeadIds) => {
     if (!lead) return;
     if (!sessionRef.current) {
       logCallDirect(lead, durationMs);
@@ -2328,6 +2919,7 @@ export default function SimpleCRM() {
       notes: draft ? draft.notes : lead.notes || "",
       durationMs,
       secondsLeft: WRAP_UP_SECONDS,
+      batchLeadIds: batchLeadIds && batchLeadIds.length ? batchLeadIds : [lead.id],
     });
   };
 
@@ -2336,7 +2928,7 @@ export default function SimpleCRM() {
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, customStage, notes, durationMs } = wrapUp;
+    const { lead, customStage, notes, durationMs, batchLeadIds } = wrapUp;
     // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
@@ -2398,7 +2990,12 @@ export default function SimpleCRM() {
     removeLeadFromLists(lead.id);
 
     if (!session) return;
-    const remainingQueue = session.queue.filter((id) => id !== lead.id);
+    // Every lead actually dialled this round comes off the queue, not
+    // just the one who answered — otherwise a Multi Line batch's other
+    // lines (rang, didn't pick up) stay in the queue and mostly re-ring
+    // on the very next round instead of the fresh leads after them.
+    const dialledIds = new Set(batchLeadIds && batchLeadIds.length ? batchLeadIds : [lead.id]);
+    const remainingQueue = session.queue.filter((id) => !dialledIds.has(id));
     if (!remainingQueue.length) {
       setSession(null);
       setSessionPaused(false);
@@ -2448,6 +3045,12 @@ export default function SimpleCRM() {
         setCalling(false);
         setCallStatus("idle");
         setActiveCallerId("");
+        // See the matching comment in startMultilineCall's onCallEnded
+        // — cleared here rather than left for the next call to
+        // overwrite, so a stray render in between can't show a "Live
+        // call" card for a lead who's already been hung up on.
+        setActiveLeadId(null);
+        setActiveCallPhone("");
         activeCallRef.current = null;
         const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
         callStartRef.current = null;
@@ -2521,12 +3124,30 @@ export default function SimpleCRM() {
   const startMultilinePolling = (batchId, giveUpAt) => {
     stopMultilinePolling();
     multilinePollRef.current = setInterval(async () => {
+      // Second line of defense against a stale poll outliving the
+      // call it belongs to (see the callEndedRef check right before
+      // this function is called in startMultilineCall) — if the call
+      // it was tracking has already ended one way or another, there's
+      // nothing left for this tick to usefully do, and the give-up
+      // branch below calling hangUp() would otherwise risk dropping
+      // whatever call the rep has since moved on to.
+      if (callEndedRef.current) {
+        stopMultilinePolling();
+        return;
+      }
       let data;
       try {
         data = await api.get(`/api/multiline-batch?id=${batchId}`);
       } catch {
         return; // transient — try again next tick
       }
+      // clearInterval (stopMultilinePolling) only stops *future* ticks
+      // — it can't cancel this tick's fetch once it's already in
+      // flight. If the call ended while that fetch was pending (the
+      // rep hung up right as this tick started), re-check here too:
+      // otherwise this stale tick would still set state for a call
+      // that's no longer live.
+      if (callEndedRef.current) return;
       setMultilineBatch((b) => (b && b.id === batchId ? { ...b, candidates: data.calls } : b));
 
       if (data.status === "connected" && data.winner && !multilineWinnerRef.current) {
@@ -2563,7 +3184,7 @@ export default function SimpleCRM() {
         hangUp();
         if (batchId) cancelMultilineBatch(batchId); // best-effort — drop any leg still stuck ringing
       }
-    }, 1200);
+    }, 600); // was 400ms — still snappy, but that rate was adding meaningfully to the concurrent load that tipped the database into "remaining connection slots" errors (see server/db.js)
   };
 
   // Dials several leads at once (see startSession/togglePause/
@@ -2586,15 +3207,16 @@ export default function SimpleCRM() {
 
     let batchId;
     try {
+      // Phase 1: reserve the batch and a row per lead, but don't dial
+      // anyone yet — see api/multiline-start.js's comment for why.
       const started = await api.post("/api/multiline-start", { leadIds: leadsToTry.map((l) => l.id) });
       batchId = started.batchId;
       multilineBatchIdRef.current = batchId;
       const ringSeconds = started.ringSeconds || 25;
-      const startedAt = Date.now();
       setMultilineBatch({
         id: batchId,
         candidates: started.candidates.map((c) => ({ ...c, status: "placed" })),
-        startedAt,
+        startedAt: Date.now(), // corrected below, once the leads are actually dialled
         ringSeconds,
       });
 
@@ -2610,6 +3232,20 @@ export default function SimpleCRM() {
         setCalling(false);
         setCallStatus("idle");
         setActiveCallerId("");
+        // Cleared the instant the call ends, not left to whenever the
+        // *next* dial attempt happens to get around to it — the "Live
+        // call" panel is gated on `calling && activeLead`, and the
+        // next multi-line batch's own activeLeadId reset doesn't land
+        // until a moment into that batch's async setup (reserving the
+        // batch, joining the conference, waiting for it to connect).
+        // Leaving the just-ended lead's id sitting here in the
+        // meantime is exactly what let a stray render during that gap
+        // redisplay this lead's full "Live call" card — script panel,
+        // soundboard and all — for a few confusing seconds after the
+        // rep had already hung up on them, right as the wrap-up screen
+        // was handing off to the next batch.
+        setActiveLeadId(null);
+        setActiveCallPhone("");
         activeCallRef.current = null;
         stopMultilinePolling();
         setMultilineBatch(null);
@@ -2627,15 +3263,78 @@ export default function SimpleCRM() {
           if (sessionRef.current) setSessionPaused(true);
           return;
         }
-        if (!winner) return; // rep hung up (or nothing answered) before anyone was bridged — nothing to log
+        if (!winner) {
+          // Nobody answered any of this round's lines (or the rep
+          // cancelled mid-dial) — there's no wrap-up screen for a round
+          // with no one to log, so this is the only place a losing
+          // round's leads ever leave the queue. Without this, the
+          // session just sat idle forever after a no-answer batch —
+          // finishWrapUp (the only other place that advances the
+          // queue) only ever runs once someone's actually been talked
+          // to. All of leadsToTry — not just one lead — needs to come
+          // off the queue, or the very next batch would mostly re-dial
+          // the same numbers that just failed to pick up.
+          if (sessionRef.current) {
+            const dialledIds = new Set(leadsToTry.map((l) => l.id));
+            const remainingQueue = sessionRef.current.queue.filter((id) => !dialledIds.has(id));
+            if (!remainingQueue.length) {
+              setSession(null);
+              setSessionPaused(false);
+            } else {
+              setSession((s) => (s ? { ...s, queue: remainingQueue } : s));
+              if (!sessionPausedRef.current) dialNextInQueue(remainingQueue, sessionRef.current.lines);
+            }
+          }
+          return;
+        }
 
         logCallToConversation(winner, durationMs);
-        handleCallEnded(winner, durationMs);
+        handleCallEnded(
+          winner,
+          durationMs,
+          leadsToTry.map((l) => l.id)
+        );
       };
 
       call.on("disconnect", () => onCallEnded());
       call.on("cancel", () => onCallEnded());
       call.on("error", (err) => onCallEnded(err));
+
+      // Wait for the rep's own leg to actually be live in the
+      // conference before dialling anyone — startConferenceOnEnter
+      // means THIS leg is what starts the conference (see
+      // buildConferenceTwiml), so placing a lead's call any earlier
+      // risks it answering into a conference that hasn't started yet:
+      // it would sit there on hold, unable to hear anything, until
+      // the rep's leg caught up a moment later. A lead who answers
+      // fast enough to land in that window experiences exactly "I
+      // picked up and couldn't hear anyone." 'accept' is the SDK's
+      // signal that this leg is genuinely connected.
+      await new Promise((resolve, reject) => {
+        call.once("accept", resolve);
+        call.once("disconnect", () => reject(new Error("Call ended before connecting.")));
+        call.once("cancel", () => reject(new Error("Call ended before connecting.")));
+        call.once("error", (err) => reject(err));
+      });
+      if (callEndedRef.current) return; // onCallEnded already ran (e.g. hung up mid-connect) — nothing left to do
+
+      const startedAt = Date.now();
+      setMultilineBatch((b) => (b && b.id === batchId ? { ...b, startedAt } : b));
+
+      // Phase 2: now that the conference is actually live, place the
+      // real Twilio call to every reserved lead.
+      await api.post("/api/multiline-place-legs", { batchId });
+      // That POST is a real network round trip (up to 6 concurrent
+      // Twilio REST calls server-side) — long enough for the rep to
+      // hit Stop/Cancel while it's in flight. onCallEnded (from the
+      // call's own disconnect/cancel/error, or stopSession acting
+      // directly) can't reach into an already-sent fetch to stop it,
+      // so without this check a batch the UI already tore down would
+      // still start polling once the POST resolves — reviving "in a
+      // call" UI for a call the rep dismissed, or worse, since the
+      // give-up branch below calls hangUp() (device.disconnectAll()),
+      // silently dropping whatever call the rep has since moved on to.
+      if (callEndedRef.current) return;
 
       // A few seconds of slack on top of Twilio's own per-leg ring
       // timeout, so a normal "genuinely nobody answered" resolution
@@ -2643,10 +3342,19 @@ export default function SimpleCRM() {
       // isn't raced by this backstop firing first.
       startMultilinePolling(batchId, startedAt + ringSeconds * 1000 + 8000);
     } catch (err) {
+      if (callEndedRef.current) return; // onCallEnded (above) already fully handled this
       setCallError(err.message || "Could not start multi-line dialling.");
       setCalling(false);
       setCallStatus("idle");
+      setActiveCallerId("");
       setMultilineBatch(null);
+      // The rep's own leg may already be live in an empty conference
+      // (e.g. /api/multiline-place-legs failed after 'accept') — don't
+      // strand it.
+      if (activeCallRef.current) {
+        hangUp();
+        activeCallRef.current = null;
+      }
       if (batchId) cancelMultilineBatch(batchId);
       multilineBatchIdRef.current = null;
     }
@@ -2679,6 +3387,21 @@ export default function SimpleCRM() {
   // call's wrap-up actually finishes (or this one's logged directly,
   // for an ad hoc redial).
   const callLeadAgain = (lead, draft) => {
+    // A redial via "Call again" skips finishWrapUp entirely — it goes
+    // straight back into startCall — so finishWrapUp's batchLeadIds
+    // cleanup (stripping every lead actually dialled this round, not
+    // just the one who answered, off the queue) never runs for this
+    // path. Left alone, a Multi Line winner's other lines that rang
+    // and lost stay in session.queue and get redialled again almost
+    // immediately on the very next round. Apply the same cleanup here
+    // (minus the lead being redialled itself, which is about to be
+    // dialled on purpose).
+    if (session && wrapUp?.batchLeadIds?.length) {
+      const staleIds = wrapUp.batchLeadIds.filter((id) => id !== lead.id);
+      if (staleIds.length) {
+        setSession({ ...session, queue: session.queue.filter((id) => !staleIds.includes(id)) });
+      }
+    }
     setWrapUp(null);
     setLastAdHocCall(null);
     startCall(draft ? { ...lead, __wrapUpDraft: draft } : lead);
@@ -2849,8 +3572,15 @@ export default function SimpleCRM() {
         <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
           {page === "contacts" && (
             <>
-              <div className="px-4 pt-5 pb-2">
+              <div className="px-4 pt-5 pb-2 flex items-center justify-between">
                 <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Tags</span>
+                <button
+                  onClick={() => setShowManageTagFoldersModal(true)}
+                  title="Manage tag folders"
+                  className="text-gray-300 hover:text-gray-600"
+                >
+                  <FolderPlus size={13} />
+                </button>
               </div>
               <nav className="flex-1 pb-4">
                 <button
@@ -2864,7 +3594,45 @@ export default function SimpleCRM() {
                   <span className="truncate">All contacts</span>
                   <span className="text-xs text-gray-400 shrink-0">{contacts.length}</span>
                 </button>
-                {contactTagNames.map((tag) => (
+                {tagFolders.map((folder) => {
+                  const expanded = expandedTagFolderIds.has(folder.id);
+                  return (
+                    <div key={folder.id}>
+                      <button
+                        onClick={() => toggleTagFolderExpanded(folder.id)}
+                        className="w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left text-gray-600 hover:bg-gray-100"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <ChevronDown
+                            size={12}
+                            className={`text-gray-400 shrink-0 transition-transform ${expanded ? "" : "-rotate-90"}`}
+                          />
+                          <Folder size={13} className="text-gray-400 shrink-0" />
+                          <span className="truncate">{folder.name}</span>
+                        </span>
+                        <span className="text-xs text-gray-400 shrink-0">{tagFolderCount(folder)}</span>
+                      </button>
+                      {expanded &&
+                        folder.tagNames.map((tag) => (
+                          <button
+                            key={tag}
+                            onClick={() => setTagQuickFilter("is", tag)}
+                            className={`w-full flex items-center justify-between gap-2 pl-8 pr-4 py-2 text-sm text-left transition-colors ${
+                              tagQuickFilter?.op === "is" && tagQuickFilter.value === tag
+                                ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                                : "hover:bg-gray-100"
+                            }`}
+                          >
+                            <span className={`truncate text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
+                              {tag}
+                            </span>
+                            <span className="text-xs text-gray-400 shrink-0">{contactTagCounts[tag] || 0}</span>
+                          </button>
+                        ))}
+                    </div>
+                  );
+                })}
+                {ungroupedTagNames.map((tag) => (
                   <button
                     key={tag}
                     onClick={() => setTagQuickFilter("is", tag)}
@@ -5843,6 +6611,780 @@ export default function SimpleCRM() {
           </div>
         )}
 
+        {/* Calendars */}
+        {page === "calendars" && (
+          <div className="flex-1 overflow-y-auto">
+            {!openCalendar ? (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <h1 className="text-xl font-bold">Calendars</h1>
+                  <button
+                    onClick={() => setShowAddCalendarModal(true)}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Plus size={15} /> Add Calendar
+                  </button>
+                </div>
+                <div className="p-8">
+                  {calendarsLoading ? (
+                    <div className="flex justify-center py-16">
+                      <Loader2 className="animate-spin text-gray-400" size={20} />
+                    </div>
+                  ) : calendars.length === 0 ? (
+                    <div className="text-center py-16 text-sm text-gray-400">
+                      <Calendar size={28} className="mx-auto mb-3 text-gray-300" />
+                      No calendars yet. Add one to start taking bookings.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {calendars.map((cal) => (
+                        <div key={cal.id} className="border border-gray-200 rounded-xl p-5 bg-white">
+                          <div className="flex items-start justify-between mb-2">
+                            <h3 className="font-semibold text-sm">{cal.name}</h3>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border ${
+                                cal.active
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-gray-100 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {cal.active ? "Active" : "Paused"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-400 mb-1.5 flex items-center gap-1">
+                            <Clock size={12} /> {cal.eventLengthMinutes} min · {cal.timezone}
+                          </p>
+                          <p className="text-xs mb-4">
+                            {cal.googleConnected ? (
+                              <span className="text-emerald-600 flex items-center gap-1">
+                                <CheckCircle2 size={12} /> Google connected
+                              </span>
+                            ) : (
+                              <span className="text-gray-400">Google not connected</span>
+                            )}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setOpenCalendarId(cal.id);
+                                setCalendarSettingsTab("integrate");
+                              }}
+                              className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-3 py-2 rounded-lg font-medium"
+                            >
+                              Open
+                            </button>
+                            <button
+                              onClick={() => deleteCalendar(cal.id)}
+                              className="text-gray-400 hover:text-red-600 p-2"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <button
+                      onClick={() => setOpenCalendarId(null)}
+                      className="text-xs text-gray-400 hover:text-gray-700 mb-1"
+                    >
+                      ← Back to Calendars
+                    </button>
+                    <h1 className="text-xl font-bold">{openCalendar.name}</h1>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-500">
+                    <input
+                      type="checkbox"
+                      checked={openCalendar.active}
+                      onChange={(e) => patchCalendar(openCalendar.id, { active: e.target.checked })}
+                    />
+                    Active
+                  </label>
+                </div>
+                <div className="flex">
+                  <div className="w-48 shrink-0 border-r border-gray-100 py-6 px-3 space-y-1">
+                    {CALENDAR_SETTINGS_SECTIONS.map(({ key, label, icon: Icon }) => (
+                      <button
+                        key={key}
+                        onClick={() => setCalendarSettingsTab(key)}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg text-left ${
+                          calendarSettingsTab === key
+                            ? "bg-gray-100 font-semibold text-gray-900"
+                            : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+                        }`}
+                      >
+                        <Icon size={15} /> {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex-1 p-8">
+                    {calendarSettingsTab === "integrate" && (
+                      <div className="max-w-lg space-y-4">
+                        <h2 className="text-base font-bold">Integrate with Google</h2>
+                        <p className="text-sm text-gray-500">
+                          Connect a Google account so booked calls are added straight to that calendar, and existing
+                          events on it block off time here automatically.
+                        </p>
+                        {openCalendar.googleConnected ? (
+                          <>
+                            <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
+                              <div>
+                                <p className="text-sm font-medium">Connected</p>
+                                <p className="text-xs text-gray-500">{openCalendar.googleEmail}</p>
+                              </div>
+                              <button
+                                onClick={() => disconnectGoogleCalendar(openCalendar.id)}
+                                className="text-sm text-red-600 hover:text-red-700 font-medium"
+                              >
+                                Disconnect
+                              </button>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                                Which calendar should bookings use?
+                              </label>
+                              <Dropdown
+                                value={openCalendar.googleCalendarId}
+                                onChange={(googleCalendarId) => patchCalendar(openCalendar.id, { googleCalendarId })}
+                                options={
+                                  googleCalendarOptions.length
+                                    ? googleCalendarOptions
+                                    : [{ value: openCalendar.googleCalendarId, label: openCalendar.googleCalendarId }]
+                                }
+                                disabled={googleCalendarsLoading}
+                                searchable
+                              />
+                              {googleCalendarsError ? (
+                                <p className="text-xs text-red-600 mt-1.5">
+                                  {googleCalendarsError} If this was connected before other calendars were shared
+                                  with it, disconnect and reconnect Google to refresh access.
+                                </p>
+                              ) : (
+                                <p className="text-xs text-gray-400 mt-1.5">
+                                  Events are created here, and existing events on it block off time in the booking
+                                  widget.
+                                </p>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => connectGoogleCalendar(openCalendar.id)}
+                            className="flex items-center gap-2 border border-gray-200 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                          >
+                            <Globe size={15} /> Connect with Google
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "timezone" && (
+                      <div className="max-w-sm space-y-3">
+                        <h2 className="text-base font-bold">Timezone</h2>
+                        <p className="text-sm text-gray-500">Availability hours below are set in this timezone.</p>
+                        <Dropdown
+                          value={openCalendar.timezone}
+                          onChange={(tz) => patchCalendar(openCalendar.id, { timezone: tz })}
+                          options={timezoneDropdownOptions}
+                          searchable
+                        />
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "availability" && availabilityDraft && (
+                      <div className="max-w-2xl space-y-5">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Availability</h2>
+                          <button
+                            onClick={() => patchCalendar(openCalendar.id, { availability: availabilityDraft })}
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save availability
+                          </button>
+                        </div>
+                        {WEEKDAYS.map(({ key, label }) => {
+                          const ranges = availabilityDraft[key] || [];
+                          return (
+                            <div key={key} className="border border-gray-100 rounded-lg p-4">
+                              <div className="flex items-center justify-between mb-3">
+                                <label className="flex items-center gap-2 text-sm font-medium">
+                                  <input type="checkbox" checked={ranges.length > 0} onChange={() => toggleDayEnabled(key)} />
+                                  {label}
+                                </label>
+                                {ranges.length > 0 && (
+                                  <div className="flex items-center gap-3">
+                                    <button
+                                      onClick={() => applyDayToAllDays(key)}
+                                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 font-medium"
+                                      title="Copy this day's hours to every other day"
+                                    >
+                                      <Copy size={12} /> Apply to all
+                                    </button>
+                                    <button
+                                      onClick={() => addDayRange(key)}
+                                      className="text-xs text-gray-500 hover:text-gray-800 font-medium"
+                                    >
+                                      + Add range
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                              {ranges.map((range, i) => (
+                                <div key={i} className="flex items-center gap-2 mb-2">
+                                  <Dropdown
+                                    value={range.start}
+                                    onChange={(v) => setDayRange(key, i, "start", v)}
+                                    options={timeOfDayDropdownOptions}
+                                    className="w-36"
+                                  />
+                                  <span className="text-gray-400 text-sm">to</span>
+                                  <Dropdown
+                                    value={range.end}
+                                    onChange={(v) => setDayRange(key, i, "end", v)}
+                                    options={timeOfDayDropdownOptions}
+                                    className="w-36"
+                                  />
+                                  <button onClick={() => removeDayRange(key, i)} className="text-gray-400 hover:text-red-600 p-1">
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              ))}
+                              {ranges.length === 0 && <p className="text-xs text-gray-400">Unavailable</p>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "rules" && rulesDraft && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Booking rules</h2>
+                          <button
+                            onClick={() =>
+                              patchCalendar(openCalendar.id, {
+                                eventLengthMinutes: Number(rulesDraft.eventLengthMinutes),
+                                bufferMinutes: Number(rulesDraft.bufferMinutes),
+                                minNoticeHours: Number(rulesDraft.minNoticeHours),
+                                bookingWindowDays: Number(rulesDraft.bookingWindowDays),
+                                maxBookingsPerDay: rulesDraft.maxBookingsPerDay === "" ? null : Number(rulesDraft.maxBookingsPerDay),
+                              })
+                            }
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Call length</label>
+                          <Dropdown
+                            value={rulesDraft.eventLengthMinutes}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, eventLengthMinutes: v }))}
+                            options={EVENT_LENGTH_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Buffer between calls</label>
+                          <Dropdown
+                            value={rulesDraft.bufferMinutes}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, bufferMinutes: v }))}
+                            options={BUFFER_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Minimum notice</label>
+                          <Dropdown
+                            value={rulesDraft.minNoticeHours}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, minNoticeHours: v }))}
+                            options={MIN_NOTICE_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Booking window</label>
+                          <Dropdown
+                            value={rulesDraft.bookingWindowDays}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, bookingWindowDays: v }))}
+                            options={BOOKING_WINDOW_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                            Max bookings per day (optional)
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={rulesDraft.maxBookingsPerDay}
+                            onChange={(e) => setRulesDraft((d) => ({ ...d, maxBookingsPerDay: e.target.value }))}
+                            placeholder="No limit"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "share" && (
+                      <div className="max-w-xl space-y-6">
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Share</h2>
+                          <p className="text-sm text-gray-500 mb-3">
+                            Anyone with this link can book an open slot on this calendar.
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <input
+                              readOnly
+                              value={`${window.location.origin}/book/${openCalendar.slug}`}
+                              onFocus={(e) => e.target.select()}
+                              className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50"
+                            />
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(`${window.location.origin}/book/${openCalendar.slug}`)
+                              }
+                              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                            >
+                              <Copy size={14} /> Copy
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Embed</h2>
+                          <p className="text-sm text-gray-500 mb-3">
+                            Paste this into any website to embed the booking widget directly.
+                          </p>
+                          <div className="flex items-start gap-2">
+                            <textarea
+                              readOnly
+                              rows={3}
+                              value={`<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`}
+                              onFocus={(e) => e.target.select()}
+                              className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50 font-mono"
+                            />
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(
+                                  `<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`
+                                )
+                              }
+                              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                            >
+                              <Copy size={14} /> Copy
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Bookings</h2>
+                          {calendarBookings.length === 0 ? (
+                            <p className="text-sm text-gray-400">No bookings yet.</p>
+                          ) : (
+                            <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                              {calendarBookings.map((b) => (
+                                <div key={b.id} className="flex items-center justify-between px-4 py-3">
+                                  <div>
+                                    <p className="text-sm font-medium">
+                                      {b.contactName}{" "}
+                                      {b.status === "cancelled" && (
+                                        <span className="text-xs text-red-500 font-normal">(cancelled)</span>
+                                      )}
+                                    </p>
+                                    <p className="text-xs text-gray-500 flex items-center gap-1">
+                                      <MapPin size={11} /> {b.contactEmail || b.contactPhone || "—"}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-gray-500">
+                                      {new Date(b.startTime).toLocaleString("en-US", {
+                                        dateStyle: "medium",
+                                        timeStyle: "short",
+                                        timeZone: openCalendar.timezone,
+                                      })}
+                                    </span>
+                                    {b.status !== "cancelled" && (
+                                      <button
+                                        onClick={() => cancelCalendarBooking(b.id)}
+                                        className="text-xs text-red-500 hover:text-red-700 font-medium"
+                                      >
+                                        Cancel
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Automations */}
+        {page === "automations" && (
+          <div className="flex-1 overflow-y-auto">
+            {!openAutomation ? (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h1 className="text-xl font-bold">Automations</h1>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Fire off emails and texts automatically when something happens in the CRM.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setShowAddAutomationModal(true)}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Plus size={15} /> Add Automation
+                  </button>
+                </div>
+                <div className="p-8">
+                  {automationsLoading ? (
+                    <div className="flex justify-center py-16">
+                      <Loader2 className="animate-spin text-gray-400" size={20} />
+                    </div>
+                  ) : automations.length === 0 ? (
+                    <div className="text-center py-16 text-sm text-gray-400">
+                      <Zap size={28} className="mx-auto mb-3 text-gray-300" />
+                      No automations yet. Add one to start automating follow-ups.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {automations.map((a) => (
+                        <div key={a.id} className="border border-gray-200 rounded-xl p-5 bg-white">
+                          <div className="flex items-start justify-between mb-2">
+                            <h3 className="font-semibold text-sm">{a.name}</h3>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border ${
+                                a.active
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-gray-100 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {a.active ? "Active" : "Paused"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-400 mb-1.5 flex items-center gap-1">
+                            <Zap size={12} />
+                            {AUTOMATION_TRIGGER_OPTIONS.find((t) => t.value === a.triggerType)?.label ||
+                              "Trigger not set"}
+                          </p>
+                          <p className="text-xs text-gray-400 mb-4">
+                            {a.actions.length} action{a.actions.length === 1 ? "" : "s"}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setOpenAutomationId(a.id)}
+                              className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-3 py-2 rounded-lg font-medium"
+                            >
+                              Open
+                            </button>
+                            <button
+                              onClick={() => deleteAutomation(a.id)}
+                              className="text-gray-400 hover:text-red-600 p-2"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <button
+                      onClick={() => {
+                        if (
+                          automationHasUnsavedChanges &&
+                          !window.confirm("You have unsaved changes — leave without saving?")
+                        ) {
+                          return;
+                        }
+                        setOpenAutomationId(null);
+                      }}
+                      className="text-xs text-gray-400 hover:text-gray-700 mb-1"
+                    >
+                      ← Back to Automations
+                    </button>
+                    <h1 className="text-xl font-bold">{openAutomation.name}</h1>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-gray-500">
+                      <input
+                        type="checkbox"
+                        checked={openAutomation.active}
+                        onChange={() => toggleAutomationActive(openAutomation)}
+                      />
+                      Active
+                    </label>
+                    <button
+                      onClick={saveAutomationDraft}
+                      disabled={savingAutomation}
+                      className={`flex items-center gap-2 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 ${
+                        automationHasUnsavedChanges ? "bg-amber-600" : "bg-gray-900"
+                      }`}
+                    >
+                      {savingAutomation && <Loader2 size={14} className="animate-spin" />}
+                      {automationHasUnsavedChanges ? "Save changes" : "Save"}
+                    </button>
+                  </div>
+                </div>
+
+                {automationHasUnsavedChanges && (
+                  <div className="px-8 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-800">
+                    You have unsaved changes — nothing above will actually run until you click{" "}
+                    <strong>Save changes</strong>.
+                  </div>
+                )}
+
+                {!openAutomation.triggerType && (
+                  <div className="px-8 py-2.5 bg-red-50 border-b border-red-200 text-sm text-red-700">
+                    No trigger is set on the saved automation yet — it will never fire until one is chosen and saved.
+                  </div>
+                )}
+
+                {automationDraft && (
+                  <div className="p-8 max-w-xl space-y-8">
+                    <div className="border border-gray-100 rounded-lg p-5 space-y-4">
+                      <h2 className="text-base font-bold flex items-center gap-2">
+                        <Zap size={16} className="text-gray-400" /> Trigger
+                      </h2>
+                      <Dropdown
+                        value={automationDraft.triggerType}
+                        onChange={setAutomationTriggerType}
+                        options={AUTOMATION_TRIGGER_OPTIONS}
+                        placeholder="Choose a trigger…"
+                      />
+
+                      {automationDraft.triggerType === "contact_tag_added" && (
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500 flex items-center gap-1">
+                            <Tag size={12} /> Contact tag is =
+                          </label>
+                          <Dropdown
+                            value={automationDraft.triggerConfig.tag || ""}
+                            onChange={(v) => setAutomationTriggerConfig({ tag: v || null })}
+                            options={[
+                              { value: "", label: "Any tag" },
+                              ...contactTagNames.map((t) => ({ value: t, label: t })),
+                            ]}
+                            searchable
+                          />
+                        </div>
+                      )}
+
+                      {automationDraft.triggerType === "booking_created" && (
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500 flex items-center gap-1">
+                            <Calendar size={12} /> Booking is in calendar
+                          </label>
+                          <Dropdown
+                            value={String(automationDraft.triggerConfig.calendarId || "")}
+                            onChange={(v) => setAutomationTriggerConfig({ calendarId: v ? Number(v) : null })}
+                            options={[
+                              { value: "", label: "Any calendar" },
+                              ...calendars.map((c) => ({ value: String(c.id), label: c.name })),
+                            ]}
+                            searchable
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-4">
+                      <h2 className="text-base font-bold">Actions</h2>
+
+                      <div>
+                        {automationDraft.actions.length === 0 && (
+                          <p className="text-sm text-gray-400 text-center pb-1">
+                            No steps yet — click below to add an email, SMS, or wait step.
+                          </p>
+                        )}
+                        <AddStepMenu onAdd={(a) => insertAutomationAction(0, a)} />
+                        {automationDraft.actions.map((action, i) => (
+                          <div key={i}>
+                            {action.type === "wait" ? (
+                              <div className="border border-gray-100 rounded-lg p-4 bg-gray-50">
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="text-sm font-semibold flex items-center gap-1.5">
+                                    <Clock size={13} /> Step {i + 1}: Wait
+                                  </span>
+                                  <button
+                                    onClick={() => removeAutomationAction(i)}
+                                    className="text-gray-400 hover:text-red-600 p-1"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <Dropdown
+                                    value={action.mode}
+                                    onChange={(mode) => updateAutomationAction(i, { mode })}
+                                    className="w-52"
+                                    options={[
+                                      { value: "duration", label: "Wait for" },
+                                      ...(automationDraft.triggerType === "booking_created"
+                                        ? [{ value: "before_appointment", label: "Wait until before appointment" }]
+                                        : []),
+                                    ]}
+                                  />
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={action.amount}
+                                    onChange={(e) => updateAutomationAction(i, { amount: e.target.value })}
+                                    className="w-20 border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400"
+                                  />
+                                  <Dropdown
+                                    value={action.unit}
+                                    onChange={(unit) => updateAutomationAction(i, { unit })}
+                                    className="w-32"
+                                    options={[
+                                      { value: "minutes", label: "Minutes" },
+                                      { value: "hours", label: "Hours" },
+                                      { value: "days", label: "Days" },
+                                    ]}
+                                  />
+                                  {action.mode === "before_appointment" && (
+                                    <span className="text-xs text-gray-500">before the appointment time</span>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="border border-gray-100 rounded-lg p-4">
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="text-sm font-semibold flex items-center gap-1.5">
+                                    {action.type === "email" ? <Send size={13} /> : <MessageSquare size={13} />}
+                                    Step {i + 1}: {action.type === "email" ? "Send Email" : "Send SMS"}
+                                  </span>
+                                  <button
+                                    onClick={() => removeAutomationAction(i)}
+                                    className="text-gray-400 hover:text-red-600 p-1"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                {action.type === "email" && (
+                                  <input
+                                    value={action.subject}
+                                    onChange={(e) => updateAutomationAction(i, { subject: e.target.value })}
+                                    onFocus={(e) => {
+                                      lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "subject" };
+                                    }}
+                                    placeholder="Subject"
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 mb-2"
+                                  />
+                                )}
+                                <textarea
+                                  value={action.body}
+                                  onChange={(e) => updateAutomationAction(i, { body: e.target.value })}
+                                  onFocus={(e) => {
+                                    lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "body" };
+                                  }}
+                                  placeholder={action.type === "email" ? "Email body…" : "Text message…"}
+                                  rows={3}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                                />
+                              </div>
+                            )}
+                            <AddStepMenu onAdd={(a) => insertAutomationAction(i + 1, a)} />
+                          </div>
+                        ))}
+                      </div>
+                      {automationDraft.actions.length > 0 && (
+                        <div>
+                          <p className="text-xs text-gray-500 mb-2">
+                            Click into a subject or body field, then click a merge field to insert it there:
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {MERGE_FIELDS.map((f) => (
+                              <button
+                                key={f.key}
+                                type="button"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  insertMergeField(f.key);
+                                }}
+                                className="text-xs px-2.5 py-1 rounded-full border border-gray-200 text-gray-600 hover:border-gray-400 hover:bg-gray-50 font-medium"
+                              >
+                                {f.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h2 className="text-base font-bold">Recent activity</h2>
+                        <button
+                          onClick={() => loadAutomationRuns(openAutomation.id)}
+                          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 font-medium"
+                        >
+                          <RefreshCw size={12} /> Refresh
+                        </button>
+                      </div>
+                      {automationRunsLoading ? (
+                        <div className="flex justify-center py-6">
+                          <Loader2 size={16} className="animate-spin text-gray-400" />
+                        </div>
+                      ) : automationRuns.length === 0 ? (
+                        <p className="text-sm text-gray-400">
+                          Never fired yet. If you expected it to have, check the trigger filter above, that the
+                          automation is <strong>Active</strong>, and that it's been saved.
+                        </p>
+                      ) : (
+                        <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                          {automationRuns.map((run) => (
+                            <div key={run.id} className="flex items-center justify-between px-4 py-3">
+                              <div>
+                                <span
+                                  className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
+                                    run.status === "done"
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : run.status === "failed"
+                                      ? "bg-red-50 text-red-700 border-red-200"
+                                      : "bg-gray-100 text-gray-500 border-gray-200"
+                                  }`}
+                                >
+                                  {run.status === "pending" ? "Waiting" : run.status === "processing" ? "Running" : run.status}
+                                </span>
+                                {run.lastError && <p className="text-xs text-red-500 mt-1">{run.lastError}</p>}
+                              </div>
+                              <span className="text-xs text-gray-400">
+                                {run.status === "pending"
+                                  ? `Next step due ${new Date(run.runAt).toLocaleString()}`
+                                  : new Date(run.runAt).toLocaleString()}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* Settings */}
         {page === "settings" && (
           <div className="flex-1 overflow-y-auto">
@@ -6282,6 +7824,199 @@ export default function SimpleCRM() {
                 </form>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manage Tag Folders modal */}
+      {showManageTagFoldersModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowManageTagFoldersModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Manage Tag Folders</h2>
+              <button
+                onClick={() => setShowManageTagFoldersModal(false)}
+                className="text-gray-400 hover:text-gray-700"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 py-5 overflow-y-auto space-y-5 flex-1">
+              <form onSubmit={handleCreateTagFolder} className="flex items-center gap-2">
+                <input
+                  value={newTagFolderName}
+                  onChange={(e) => setNewTagFolderName(e.target.value)}
+                  placeholder="New folder name…"
+                  className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <button
+                  type="submit"
+                  disabled={savingTagFolder}
+                  className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {savingTagFolder && <Loader2 size={14} className="animate-spin" />}
+                  Add
+                </button>
+              </form>
+
+              {tagFolders.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-6">
+                  No folders yet — add one above, then click the tags below that belong in it.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {tagFolders.map((folder) => (
+                    <div key={folder.id} className="border border-gray-100 rounded-lg p-4">
+                      <div className="flex items-center gap-2 mb-3">
+                        <input
+                          defaultValue={folder.name}
+                          onBlur={(e) => {
+                            const value = e.target.value.trim();
+                            if (value && value !== folder.name) renameTagFolder(folder.id, value);
+                          }}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm font-medium outline-none focus:border-gray-400"
+                        />
+                        <button
+                          onClick={() => deleteTagFolderById(folder.id)}
+                          className="text-gray-400 hover:text-red-600 p-1"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {contactTagNames.length === 0 && (
+                          <span className="text-xs text-gray-400">No tags exist yet.</span>
+                        )}
+                        {contactTagNames.map((tag) => {
+                          const checked = folder.tagNames.includes(tag);
+                          return (
+                            <button
+                              key={tag}
+                              onClick={() => toggleTagInFolder(folder, tag)}
+                              className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
+                                checked
+                                  ? "bg-gray-900 text-white border-gray-900"
+                                  : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                              }`}
+                            >
+                              {tag}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setShowManageTagFoldersModal(false)}
+                className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Automation modal */}
+      {showAddAutomationModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddAutomationModal(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add Automation</h2>
+              <button onClick={() => setShowAddAutomationModal(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddAutomation} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Automation name</label>
+                <input
+                  autoFocus
+                  required
+                  value={newAutomationName}
+                  onChange={(e) => setNewAutomationName(e.target.value)}
+                  placeholder="e.g. New lead follow-up"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddAutomationModal(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingAutomation}
+                  className="flex items-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {addingAutomation && <Loader2 size={14} className="animate-spin" />}
+                  Create automation
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add Calendar modal */}
+      {showAddCalendarModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddCalendarModal(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add Calendar</h2>
+              <button onClick={() => setShowAddCalendarModal(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddCalendar} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Calendar name</label>
+                <input
+                  autoFocus
+                  required
+                  value={newCalendarName}
+                  onChange={(e) => setNewCalendarName(e.target.value)}
+                  placeholder="e.g. Sales call"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddCalendarModal(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingCalendar}
+                  className="flex items-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {addingCalendar && <Loader2 size={14} className="animate-spin" />}
+                  Create calendar
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
