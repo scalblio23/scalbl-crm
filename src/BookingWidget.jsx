@@ -30,7 +30,7 @@ export default function BookingWidget({ slug }) {
   const [timezone, setTimezone] = useState(detectBrowserTimezone());
   const [windowStart, setWindowStart] = useState(() => new Date());
   const [selectedDayKey, setSelectedDayKey] = useState(null);
-  const [slots, setSlots] = useState([]);
+  const [windowSlots, setWindowSlots] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [form, setForm] = useState({ name: "", email: "", phone: "", notes: "" });
@@ -66,29 +66,47 @@ export default function BookingWidget({ slug }) {
       .catch((err) => setLoadError(err.message || "This booking page isn't available."));
   }, [slug]);
 
+  // Reset the picked slot whenever the selected day changes — it belongs
+  // to whichever day was active when it was picked.
   useEffect(() => {
-    if (!selectedDayKey) return;
-    setLoadingSlots(true);
     setSelectedSlot(null);
     setShowAllSlots(false);
-    // Query a day either side of the selected local day too — a
-    // visitor's local calendar day can span two of the host
-    // calendar's server-side days near the timezone boundary; slots
-    // are filtered back down to the selected day below.
-    const anchor = new Date(`${selectedDayKey}T12:00:00Z`);
-    const from = new Date(anchor);
+  }, [selectedDayKey]);
+
+  // Fetch slots for the whole visible 7-day window in one call, not just
+  // the selected day — the day picker needs every day's slot count up
+  // front to grey out days with nothing available.
+  useEffect(() => {
+    setLoadingSlots(true);
+    // Query a day either side of the visible window too — a visitor's
+    // local calendar day can span two of the host calendar's
+    // server-side days near a timezone boundary; slots are grouped
+    // back onto their local day below.
+    const firstKey = dateKeyInZone(visibleDays[0], timezone);
+    const lastKey = dateKeyInZone(visibleDays[6], timezone);
+    const from = new Date(`${firstKey}T12:00:00Z`);
     from.setUTCDate(from.getUTCDate() - 1);
-    const to = new Date(anchor);
+    const to = new Date(`${lastKey}T12:00:00Z`);
     to.setUTCDate(to.getUTCDate() + 1);
     const fmt = (d) => d.toISOString().slice(0, 10);
     api
       .get(`/api/calendar-slots?slug=${encodeURIComponent(slug)}&from=${fmt(from)}&to=${fmt(to)}`)
-      .then(({ slots: allSlots }) => {
-        setSlots(allSlots.filter((s) => dateKeyInZone(new Date(s.startUTC), timezone) === selectedDayKey));
-      })
-      .catch(() => setSlots([]))
+      .then(({ slots: allSlots }) => setWindowSlots(allSlots))
+      .catch(() => setWindowSlots([]))
       .finally(() => setLoadingSlots(false));
-  }, [selectedDayKey, timezone, slug]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowStart, timezone, slug]);
+
+  const slotsByDay = useMemo(() => {
+    const map = {};
+    for (const s of windowSlots) {
+      const key = dateKeyInZone(new Date(s.startUTC), timezone);
+      (map[key] ||= []).push(s);
+    }
+    return map;
+  }, [windowSlots, timezone]);
+
+  const slots = slotsByDay[selectedDayKey] || [];
 
   async function submitBooking(e) {
     e.preventDefault();
@@ -181,13 +199,21 @@ export default function BookingWidget({ slug }) {
               {visibleDays.map((d) => {
                 const key = dateKeyInZone(d, timezone);
                 const active = key === selectedDayKey;
+                // Grey out (and disable) days with no bookable slots, once
+                // the window has actually loaded — don't flash every day
+                // as unavailable while the fetch is still in flight.
+                const unavailable = !loadingSlots && !active && (slotsByDay[key] || []).length === 0;
                 return (
                   <button
                     key={key}
+                    type="button"
                     onClick={() => setSelectedDayKey(key)}
+                    disabled={unavailable}
                     className={`flex flex-col items-center py-2.5 rounded-lg text-xs font-medium border ${
                       active
                         ? "bg-gray-900 text-white border-gray-900"
+                        : unavailable
+                        ? "bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed"
                         : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
                     }`}
                   >
