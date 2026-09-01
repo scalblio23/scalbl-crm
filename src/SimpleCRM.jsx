@@ -5871,6 +5871,65 @@ export default function SimpleCRM() {
               <button className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">Save changes</button>
             </div>
 
+            <div className="px-8 pb-8 max-w-lg">
+              <div className="border-t border-gray-100 pt-8">
+                <div className="flex items-center justify-between mb-5">
+                  <h2 className="text-base font-bold">Booking rules</h2>
+                  <button className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">Save</button>
+                </div>
+                <div className="space-y-5">
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Call length</label>
+                    <select defaultValue="15" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 bg-white">
+                      <option value="15">15 minutes</option>
+                      <option value="30">30 minutes</option>
+                      <option value="45">45 minutes</option>
+                      <option value="60">60 minutes</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Buffer between calls</label>
+                    <select defaultValue="0" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 bg-white">
+                      <option value="0">No buffer</option>
+                      <option value="5">5 minutes</option>
+                      <option value="10">10 minutes</option>
+                      <option value="15">15 minutes</option>
+                      <option value="30">30 minutes</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Minimum notice</label>
+                    <select defaultValue="4" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 bg-white">
+                      {Array.from({ length: 24 }, (_, i) => i + 1).map((h) => (
+                        <option key={h} value={h}>
+                          {h} {h === 1 ? "hour" : "hours"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Booking window</label>
+                    <select defaultValue="7" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 bg-white">
+                      {Array.from({ length: 30 }, (_, i) => i + 1).map((d) => (
+                        <option key={d} value={d}>
+                          {d} {d === 1 ? "day" : "days"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Max bookings per day (optional)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder="No limit"
+                      className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="px-8 pb-10 max-w-3xl">
               <div className="border-t border-gray-100 pt-8">
                 <h2 className="text-base font-bold">Team &amp; permissions</h2>
