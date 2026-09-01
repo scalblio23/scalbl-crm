@@ -102,22 +102,18 @@ export const BUFFER_OPTIONS = [
   { value: "30", label: "30 minutes" },
 ];
 
-export const MIN_NOTICE_OPTIONS = [
-  { value: "0", label: "No minimum" },
-  { value: "1", label: "1 hour" },
-  { value: "4", label: "4 hours" },
-  { value: "12", label: "12 hours" },
-  { value: "24", label: "1 day" },
-  { value: "48", label: "2 days" },
-];
+// Every hour from 1 to 24 — minimum notice can't be set below 1 hour.
+export const MIN_NOTICE_OPTIONS = Array.from({ length: 24 }, (_, i) => {
+  const hours = i + 1;
+  return { value: String(hours), label: `${hours} ${hours === 1 ? "hour" : "hours"}` };
+});
 
-export const BOOKING_WINDOW_OPTIONS = [
-  { value: "7", label: "1 week" },
-  { value: "14", label: "2 weeks" },
-  { value: "30", label: "30 days" },
-  { value: "60", label: "60 days" },
-  { value: "90", label: "90 days" },
-];
+// Every day from 1 to 30 — booking window can be as short as a single day,
+// not just whole weeks.
+export const BOOKING_WINDOW_OPTIONS = Array.from({ length: 30 }, (_, i) => {
+  const days = i + 1;
+  return { value: String(days), label: `${days} ${days === 1 ? "day" : "days"}` };
+});
 
 export const WEEKDAYS = [
   { key: "mon", label: "Monday" },
