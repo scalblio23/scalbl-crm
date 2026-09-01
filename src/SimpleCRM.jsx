@@ -2815,7 +2815,15 @@ export default function SimpleCRM() {
       cancelMultilineBatch(multilineBatchIdRef.current);
       multilineBatchIdRef.current = null;
     }
-    multilineWinnerRef.current = null;
+    // Deliberately NOT clearing multilineWinnerRef here — if the rep
+    // is actively connected to a winner when they hit Stop, the
+    // conference call's disconnect event is still going to fire
+    // onCallEnded asynchronously, and it needs to still see the real
+    // winner there to log the call at all (session is already null by
+    // then, so it logs it directly rather than opening a wrap-up
+    // screen — see onCallEnded's `!winner` branch). Nulling it here
+    // used to silently drop that call's outcome — no call log, no
+    // conversation log — any time "Stop session" was clicked mid-call.
     if (calling) {
       hangUp();
       activeCallRef.current = null;
@@ -3295,6 +3303,21 @@ export default function SimpleCRM() {
   // call's wrap-up actually finishes (or this one's logged directly,
   // for an ad hoc redial).
   const callLeadAgain = (lead, draft) => {
+    // A redial via "Call again" skips finishWrapUp entirely — it goes
+    // straight back into startCall — so finishWrapUp's batchLeadIds
+    // cleanup (stripping every lead actually dialled this round, not
+    // just the one who answered, off the queue) never runs for this
+    // path. Left alone, a Multi Line winner's other lines that rang
+    // and lost stay in session.queue and get redialled again almost
+    // immediately on the very next round. Apply the same cleanup here
+    // (minus the lead being redialled itself, which is about to be
+    // dialled on purpose).
+    if (session && wrapUp?.batchLeadIds?.length) {
+      const staleIds = wrapUp.batchLeadIds.filter((id) => id !== lead.id);
+      if (staleIds.length) {
+        setSession({ ...session, queue: session.queue.filter((id) => !staleIds.includes(id)) });
+      }
+    }
     setWrapUp(null);
     setLastAdHocCall(null);
     startCall(draft ? { ...lead, __wrapUpDraft: draft } : lead);
