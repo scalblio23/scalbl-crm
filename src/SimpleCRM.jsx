@@ -3183,15 +3183,16 @@ export default function SimpleCRM() {
 
     let batchId;
     try {
+      // Phase 1: reserve the batch and a row per lead, but don't dial
+      // anyone yet — see api/multiline-start.js's comment for why.
       const started = await api.post("/api/multiline-start", { leadIds: leadsToTry.map((l) => l.id) });
       batchId = started.batchId;
       multilineBatchIdRef.current = batchId;
       const ringSeconds = started.ringSeconds || 25;
-      const startedAt = Date.now();
       setMultilineBatch({
         id: batchId,
         candidates: started.candidates.map((c) => ({ ...c, status: "placed" })),
-        startedAt,
+        startedAt: Date.now(), // corrected below, once the leads are actually dialled
         ringSeconds,
       });
 
@@ -3261,16 +3262,50 @@ export default function SimpleCRM() {
       call.on("cancel", () => onCallEnded());
       call.on("error", (err) => onCallEnded(err));
 
+      // Wait for the rep's own leg to actually be live in the
+      // conference before dialling anyone — startConferenceOnEnter
+      // means THIS leg is what starts the conference (see
+      // buildConferenceTwiml), so placing a lead's call any earlier
+      // risks it answering into a conference that hasn't started yet:
+      // it would sit there on hold, unable to hear anything, until
+      // the rep's leg caught up a moment later. A lead who answers
+      // fast enough to land in that window experiences exactly "I
+      // picked up and couldn't hear anyone." 'accept' is the SDK's
+      // signal that this leg is genuinely connected.
+      await new Promise((resolve, reject) => {
+        call.once("accept", resolve);
+        call.once("disconnect", () => reject(new Error("Call ended before connecting.")));
+        call.once("cancel", () => reject(new Error("Call ended before connecting.")));
+        call.once("error", (err) => reject(err));
+      });
+      if (callEndedRef.current) return; // onCallEnded already ran (e.g. hung up mid-connect) — nothing left to do
+
+      const startedAt = Date.now();
+      setMultilineBatch((b) => (b && b.id === batchId ? { ...b, startedAt } : b));
+
+      // Phase 2: now that the conference is actually live, place the
+      // real Twilio call to every reserved lead.
+      await api.post("/api/multiline-place-legs", { batchId });
+
       // A few seconds of slack on top of Twilio's own per-leg ring
       // timeout, so a normal "genuinely nobody answered" resolution
       // (which arrives via the status callback around ringSeconds)
       // isn't raced by this backstop firing first.
       startMultilinePolling(batchId, startedAt + ringSeconds * 1000 + 8000);
     } catch (err) {
+      if (callEndedRef.current) return; // onCallEnded (above) already fully handled this
       setCallError(err.message || "Could not start multi-line dialling.");
       setCalling(false);
       setCallStatus("idle");
+      setActiveCallerId("");
       setMultilineBatch(null);
+      // The rep's own leg may already be live in an empty conference
+      // (e.g. /api/multiline-place-legs failed after 'accept') — don't
+      // strand it.
+      if (activeCallRef.current) {
+        hangUp();
+        activeCallRef.current = null;
+      }
       if (batchId) cancelMultilineBatch(batchId);
       multilineBatchIdRef.current = null;
     }

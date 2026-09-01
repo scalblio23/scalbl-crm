@@ -66,7 +66,9 @@ import {
   findApiKeyByHash,
   touchApiKeyLastUsed,
   createMultilineBatch,
+  getMultilineBatchById,
   addMultilineBatchCall,
+  getUnplacedMultilineBatchCalls,
   setMultilineBatchCallSid,
   setMultilineBatchCallFailed,
   updateMultilineBatchCallStatusByRowId,
@@ -193,6 +195,7 @@ app.use(
     "/api/dial-lists",
     "/api/sms-bulk-send",
     "/api/multiline-start",
+    "/api/multiline-place-legs",
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
@@ -517,6 +520,15 @@ app.post("/api/status", (req, res) => {
 // mirrors route-for-route.
 const MULTILINE_MAX_LINES = 6;
 
+// Reserves a batch and a row per lead (an id to embed in each call's
+// own TwiML/status-callback URLs later) but does NOT dial anyone yet
+// — that's /api/multiline-place-legs below, called once the frontend's
+// own conference leg has actually joined and started the conference.
+// See that route's comment for why the split exists: dialling a lead
+// before the rep's own leg has joined leaves that lead's call sitting
+// in the conference on hold — unable to hear anything — until the rep
+// catches up, which a fast-answering lead can easily notice as "they
+// can't hear me".
 app.post(
   "/api/multiline-start",
   dbRoute(async (req, res) => {
@@ -524,8 +536,7 @@ app.post(
     if (missing.length) {
       return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
     }
-    const base = publicBaseUrl();
-    if (!base) {
+    if (!publicBaseUrl()) {
       return res.status(500).json({
         error:
           "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
@@ -546,29 +557,55 @@ app.post(
 
     const candidates = await mapWithConcurrency(withPhone, withPhone.length, async (contact, i) => {
       const fromNumber = pool[i % pool.length];
-      const row = await addMultilineBatchCall({
-        batchId: batch.id,
-        leadId: contact.id,
-        name: contact.name,
-        phone: contact.phone,
-        fromNumber,
-      });
-      try {
-        const call = await placeConferenceLeg({
-          to: contact.phone,
-          from: fromNumber,
-          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(conferenceName)}`,
-          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batch.id}&leadId=${contact.id}`,
-        });
-        await setMultilineBatchCallSid(row.id, call.sid);
-      } catch (err) {
-        console.error("[multiline-start] leg failed", contact.id, err.message);
-        await setMultilineBatchCallFailed(row.id, err.message);
-      }
+      await addMultilineBatchCall({ batchId: batch.id, leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber });
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
 
     res.status(201).json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
+  })
+);
+
+// Actually dials every lead reserved for a batch, via the REST API,
+// into the conference the rep's own browser leg already joined. See
+// the comment above /api/multiline-start for why this is a separate
+// step. Calling this twice for the same batch only dials whatever's
+// still unplaced — cheap to guard, shouldn't happen.
+app.post(
+  "/api/multiline-place-legs",
+  dbRoute(async (req, res) => {
+    const missing = missingTwilioEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const base = publicBaseUrl();
+    if (!base) {
+      return res.status(500).json({
+        error:
+          "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
+      });
+    }
+    const batchId = Number(req.body?.batchId);
+    if (!batchId) return res.status(400).json({ error: "Missing batchId" });
+    const batch = await getMultilineBatchById(batchId);
+    if (!batch) return res.status(404).json({ error: "Batch not found" });
+
+    const rows = await getUnplacedMultilineBatchCalls(batchId);
+    await mapWithConcurrency(rows, rows.length, async (row) => {
+      try {
+        const call = await placeConferenceLeg({
+          to: row.phone,
+          from: row.from_number,
+          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(batch.conference_name)}`,
+          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batchId}&leadId=${row.lead_id}`,
+        });
+        await setMultilineBatchCallSid(row.id, call.sid);
+      } catch (err) {
+        console.error("[multiline-place-legs] leg failed", row.lead_id, err.message);
+        await setMultilineBatchCallFailed(row.id, err.message);
+      }
+    });
+
+    res.status(200).json({ ok: true, placed: rows.length });
   })
 );
 

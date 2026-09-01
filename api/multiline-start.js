@@ -1,20 +1,5 @@
-import {
-  ensureSchema,
-  getContactsByIds,
-  createMultilineBatch,
-  addMultilineBatchCall,
-  setMultilineBatchCallSid,
-  setMultilineBatchCallFailed,
-  mapWithConcurrency,
-} from "../server/db.js";
-import {
-  missingTwilioEnv,
-  getCallerIdPool,
-  generateMultilineConferenceName,
-  placeConferenceLeg,
-  publicBaseUrl,
-  MULTILINE_RING_SECONDS,
-} from "../server/twilioCore.js";
+import { ensureSchema, getContactsByIds, createMultilineBatch, addMultilineBatchCall, getCallerIdPool, mapWithConcurrency } from "../server/db.js";
+import { missingTwilioEnv, generateMultilineConferenceName, publicBaseUrl, MULTILINE_RING_SECONDS } from "../server/twilioCore.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
 
 // Dial several leads at once for one rep — first to answer gets
@@ -23,12 +8,16 @@ import { requireAuth, forbidClientRole } from "../server/auth.js";
 // way through, mostly as a cost/sanity backstop.
 const MAX_LINES = 6;
 
-// POST /api/multiline-start — body: { leadIds: number[] }. Places one
-// REST-dialled leg per lead (all joining the same fresh conference —
-// see server/twilioCore.js) and returns straight away; the rep's own
-// browser leg joins that same conference separately (see
-// src/lib/twilioDevice.js's joinConference), and progress from here
-// is read via GET /api/multiline-batch.
+// POST /api/multiline-start — body: { leadIds: number[] }. Reserves a
+// batch and a row per lead (so each has an id to embed in its own
+// TwiML/status-callback URLs later) but does NOT dial anyone yet —
+// that's api/multiline-place-legs.js, called once the frontend's own
+// conference leg has actually joined and started the conference (see
+// its comment for why the split exists: dialling a lead before the
+// rep's own leg has joined leaves that lead's call sitting in the
+// conference on hold — unable to hear anything — until the rep
+// catches up, which a fast-answering lead can easily notice as "they
+// can't hear me").
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
@@ -43,8 +32,7 @@ export default async function handler(req, res) {
     if (missing.length) {
       return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
     }
-    const base = publicBaseUrl();
-    if (!base) {
+    if (!publicBaseUrl()) {
       return res.status(500).json({
         error:
           "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
@@ -66,31 +54,11 @@ export default async function handler(req, res) {
 
     const candidates = await mapWithConcurrency(withPhone, withPhone.length, async (contact, i) => {
       const fromNumber = pool[i % pool.length];
-      const row = await addMultilineBatchCall({
-        batchId: batch.id,
-        leadId: contact.id,
-        name: contact.name,
-        phone: contact.phone,
-        fromNumber,
-      });
-      try {
-        const call = await placeConferenceLeg({
-          to: contact.phone,
-          from: fromNumber,
-          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(conferenceName)}`,
-          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batch.id}&leadId=${contact.id}`,
-        });
-        await setMultilineBatchCallSid(row.id, call.sid);
-      } catch (err) {
-        console.error("[api/multiline-start] leg failed", contact.id, err.message);
-        await setMultilineBatchCallFailed(row.id, err.message);
-      }
+      await addMultilineBatchCall({ batchId: batch.id, leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber });
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
 
-    return res
-      .status(201)
-      .json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
+    return res.status(201).json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
   } catch (err) {
     console.error("[api/multiline-start]", err);
     return res.status(500).json({ error: err.message || "Could not start multi-line dialling" });

@@ -1465,6 +1465,11 @@ export async function createMultilineBatch({ conferenceName, createdBy }) {
   return rows[0];
 }
 
+export async function getMultilineBatchById(id) {
+  const rows = await query("SELECT * FROM multiline_batches WHERE id = $1", [id]);
+  return rows[0] || null;
+}
+
 // Inserted before the Twilio call is placed — its id gets embedded in
 // that call's TwiML/status-callback URLs, then setMultilineBatchCallSid
 // fills in the resulting call_sid once Twilio hands one back.
@@ -1474,6 +1479,15 @@ export async function addMultilineBatchCall({ batchId, leadId, name, phone, from
     [batchId, leadId, name, phone, fromNumber || null]
   );
   return rows[0];
+}
+
+// The rows a batch starts with — reserved (with a row id to embed in
+// each call's own TwiML/status-callback URLs) but not yet actually
+// dialled. See api/multiline-start.js (creates them, before the rep's
+// own leg has joined the conference) and api/multiline-place-legs.js
+// (places the real Twilio call for each, once it has).
+export async function getUnplacedMultilineBatchCalls(batchId) {
+  return query("SELECT * FROM multiline_batch_calls WHERE batch_id = $1 AND call_sid IS NULL", [batchId]);
 }
 
 export async function setMultilineBatchCallSid(rowId, callSid) {
