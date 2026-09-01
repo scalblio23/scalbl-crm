@@ -111,11 +111,21 @@ export default async function handler(req, res) {
     if (calendar.googleConnected) {
       try {
         const accessToken = await getValidAccessToken(calendar);
+        // The video conference link (Zoom, Meet, …) configured on the
+        // calendar, if any, is surfaced in brackets after the booker's
+        // name in the event title and set as the event's location —
+        // that's what makes it show up on both the Google Calendar
+        // event card and in the Meet/join button Google renders for a
+        // recognized link.
+        const summary = calendar.videoConferenceLink
+          ? `${calendar.name} with ${name} (${calendar.videoConferenceLink})`
+          : `${calendar.name} with ${name}`;
         const eventId = await createGoogleEvent({
           accessToken,
           calendarId: calendar.googleCalendarId,
-          summary: `${calendar.name} with ${name}`,
+          summary,
           description: notes || "",
+          location: calendar.videoConferenceLink || undefined,
           startISO: startUTC,
           endISO: endUTC,
           timezone: calendar.timezone,

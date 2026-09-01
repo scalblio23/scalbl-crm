@@ -50,6 +50,7 @@ import {
   Calendar,
   Clock,
   Link2,
+  Video,
   Globe,
   MapPin,
   Zap,
@@ -364,6 +365,7 @@ const CALENDAR_SETTINGS_SECTIONS = [
   { key: "timezone", label: "Timezone", icon: Clock },
   { key: "availability", label: "Availability", icon: Calendar },
   { key: "rules", label: "Booking rules", icon: ListChecks },
+  { key: "video", label: "Video conference", icon: Video },
   { key: "share", label: "Share & embed", icon: Link2 },
 ];
 
@@ -654,6 +656,7 @@ export default function SimpleCRM() {
   // one field at a time would otherwise fire a save per keystroke.
   const [availabilityDraft, setAvailabilityDraft] = useState(null);
   const [rulesDraft, setRulesDraft] = useState(null);
+  const [videoDraft, setVideoDraft] = useState(null);
   useEffect(() => {
     if (!openCalendar) return;
     setAvailabilityDraft(openCalendar.availability);
@@ -664,6 +667,7 @@ export default function SimpleCRM() {
       bookingWindowDays: String(openCalendar.bookingWindowDays),
       maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
     });
+    setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCalendar?.id]);
 
@@ -6929,6 +6933,44 @@ export default function SimpleCRM() {
                             className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
                           />
                         </div>
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "video" && videoDraft && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Video conference</h2>
+                          <button
+                            onClick={() =>
+                              patchCalendar(openCalendar.id, {
+                                videoConferenceLink: videoDraft.videoConferenceLink.trim(),
+                              })
+                            }
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <p className="text-sm text-gray-500">
+                          Add a Zoom (or other) link and every booking on this calendar carries it: it's appended in
+                          brackets after the booker's name in the Google Calendar event title, and set as that
+                          event's location.
+                        </p>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Meeting link</label>
+                          <input
+                            value={videoDraft.videoConferenceLink}
+                            onChange={(e) => setVideoDraft((d) => ({ ...d, videoConferenceLink: e.target.value }))}
+                            placeholder="https://zoom.us/j/…"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                        </div>
+                        {openCalendar.videoConferenceLink && (
+                          <p className="text-xs text-gray-400">
+                            Event title will read: “{openCalendar.name} with Jane Smith ({openCalendar.videoConferenceLink})”
+                          </p>
+                        )}
                       </div>
                     )}
 

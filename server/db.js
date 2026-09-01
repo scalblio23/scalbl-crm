@@ -394,6 +394,11 @@ export async function ensureSchema() {
     // table first shipped (was hardcoded to "primary"), so existing
     // rows default to the same behavior they already had.
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS google_calendar_id TEXT NOT NULL DEFAULT 'primary'`);
+    // A video-call link (Zoom, Meet, whatever) for this calendar's
+    // bookings. When set, api/calendar-book.js appends it in brackets
+    // after the booker's name in the Google event title and sets it as
+    // the event's location — there's no per-booking way to override it.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS video_conference_link TEXT`);
     // One row per booked slot on a calendar. booker_timezone is the
     // timezone the visitor had selected in the widget at booking time
     // (purely for display in the confirmation email/SMS — start_time/
@@ -1620,6 +1625,7 @@ function calendarFromRow(r, { includeSecrets = false } = {}) {
     bookingWindowDays: r.booking_window_days,
     maxBookingsPerDay: r.max_bookings_per_day,
     availability: r.availability || {},
+    videoConferenceLink: r.video_conference_link || "",
     googleConnected: r.google_connected,
     googleEmail: r.google_email,
     googleCalendarId: r.google_calendar_id || "primary",
@@ -1704,7 +1710,8 @@ export async function updateCalendar(id, patch) {
        max_bookings_per_day = CASE WHEN $9 THEN $10 ELSE max_bookings_per_day END,
        availability = COALESCE($11::jsonb, availability),
        active = COALESCE($12, active),
-       google_calendar_id = COALESCE($13, google_calendar_id)
+       google_calendar_id = COALESCE($13, google_calendar_id),
+       video_conference_link = COALESCE($14, video_conference_link)
      WHERE id = $1
      RETURNING *`,
     [
@@ -1721,6 +1728,7 @@ export async function updateCalendar(id, patch) {
       patch.availability ? JSON.stringify(patch.availability) : null,
       patch.active ?? null,
       patch.googleCalendarId ?? null,
+      patch.videoConferenceLink ?? null,
     ]
   );
   return rows[0] ? calendarFromRow(rows[0]) : null;

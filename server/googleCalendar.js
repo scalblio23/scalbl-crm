@@ -192,6 +192,7 @@ export async function createGoogleEvent({
   calendarId = "primary",
   summary,
   description,
+  location,
   startISO,
   endISO,
   timezone,
@@ -205,6 +206,7 @@ export async function createGoogleEvent({
       body: JSON.stringify({
         summary,
         description,
+        location: location || undefined,
         start: { dateTime: startISO, timeZone: timezone },
         end: { dateTime: endISO, timeZone: timezone },
         attendees: attendeeEmail ? [{ email: attendeeEmail }] : [],
