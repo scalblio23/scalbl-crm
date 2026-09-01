@@ -3045,6 +3045,12 @@ export default function SimpleCRM() {
         setCalling(false);
         setCallStatus("idle");
         setActiveCallerId("");
+        // See the matching comment in startMultilineCall's onCallEnded
+        // — cleared here rather than left for the next call to
+        // overwrite, so a stray render in between can't show a "Live
+        // call" card for a lead who's already been hung up on.
+        setActiveLeadId(null);
+        setActiveCallPhone("");
         activeCallRef.current = null;
         const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
         callStartRef.current = null;
@@ -3135,6 +3141,13 @@ export default function SimpleCRM() {
       } catch {
         return; // transient — try again next tick
       }
+      // clearInterval (stopMultilinePolling) only stops *future* ticks
+      // — it can't cancel this tick's fetch once it's already in
+      // flight. If the call ended while that fetch was pending (the
+      // rep hung up right as this tick started), re-check here too:
+      // otherwise this stale tick would still set state for a call
+      // that's no longer live.
+      if (callEndedRef.current) return;
       setMultilineBatch((b) => (b && b.id === batchId ? { ...b, candidates: data.calls } : b));
 
       if (data.status === "connected" && data.winner && !multilineWinnerRef.current) {
@@ -3219,6 +3232,20 @@ export default function SimpleCRM() {
         setCalling(false);
         setCallStatus("idle");
         setActiveCallerId("");
+        // Cleared the instant the call ends, not left to whenever the
+        // *next* dial attempt happens to get around to it — the "Live
+        // call" panel is gated on `calling && activeLead`, and the
+        // next multi-line batch's own activeLeadId reset doesn't land
+        // until a moment into that batch's async setup (reserving the
+        // batch, joining the conference, waiting for it to connect).
+        // Leaving the just-ended lead's id sitting here in the
+        // meantime is exactly what let a stray render during that gap
+        // redisplay this lead's full "Live call" card — script panel,
+        // soundboard and all — for a few confusing seconds after the
+        // rep had already hung up on them, right as the wrap-up screen
+        // was handing off to the next batch.
+        setActiveLeadId(null);
+        setActiveCallPhone("");
         activeCallRef.current = null;
         stopMultilinePolling();
         setMultilineBatch(null);
