@@ -2373,9 +2373,6 @@ export default function SimpleCRM() {
   const slotDurationLabel = (mins) => (mins < 60 ? `${mins} minutes` : `${mins / 60} hour${mins / 60 > 1 ? "s" : ""}`);
   // 15, 30, 60 minutes, then hourly up to 8 hours — per the ask.
   const BOOKING_SLOT_OPTIONS = [15, 30, 60, 120, 180, 240, 300, 360, 420, 480];
-  // Minimum notice: every hour from 1 to 24. Booking window: every day from 1 to 30.
-  const MIN_NOTICE_HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => i + 1);
-  const BOOKING_WINDOW_DAY_OPTIONS = Array.from({ length: 30 }, (_, i) => i + 1);
   const BOOKING_WEEKDAYS = [
     ["mon", "Monday"],
     ["tue", "Tuesday"],
@@ -6053,32 +6050,25 @@ export default function SimpleCRM() {
                             </select>
                           </div>
                           <div>
-                            <label className="text-xs font-medium block mb-1.5 text-gray-500">Minimum notice</label>
-                            <select
+                            <label className="text-xs font-medium block mb-1.5 text-gray-500">Minimum notice (hours)</label>
+                            <input
+                              type="number"
+                              min={0}
                               value={bookingForm.minNoticeHours}
                               onChange={(e) => setBookingForm((f) => ({ ...f, minNoticeHours: Number(e.target.value) }))}
-                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
-                            >
-                              {MIN_NOTICE_HOUR_OPTIONS.map((h) => (
-                                <option key={h} value={h}>
-                                  {h} {h === 1 ? "hour" : "hours"}
-                                </option>
-                              ))}
-                            </select>
+                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                            />
                           </div>
                           <div>
-                            <label className="text-xs font-medium block mb-1.5 text-gray-500">Booking window</label>
-                            <select
+                            <label className="text-xs font-medium block mb-1.5 text-gray-500">Bookable how far ahead (days)</label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={60}
                               value={bookingForm.daysAhead}
                               onChange={(e) => setBookingForm((f) => ({ ...f, daysAhead: Number(e.target.value) }))}
-                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
-                            >
-                              {BOOKING_WINDOW_DAY_OPTIONS.map((d) => (
-                                <option key={d} value={d}>
-                                  {d} {d === 1 ? "day" : "days"}
-                                </option>
-                              ))}
-                            </select>
+                              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                            />
                           </div>
                           <div>
                             <label className="text-xs font-medium mb-1.5 text-gray-500 flex items-center gap-1">
