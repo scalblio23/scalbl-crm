@@ -3118,6 +3118,17 @@ export default function SimpleCRM() {
   const startMultilinePolling = (batchId, giveUpAt) => {
     stopMultilinePolling();
     multilinePollRef.current = setInterval(async () => {
+      // Second line of defense against a stale poll outliving the
+      // call it belongs to (see the callEndedRef check right before
+      // this function is called in startMultilineCall) — if the call
+      // it was tracking has already ended one way or another, there's
+      // nothing left for this tick to usefully do, and the give-up
+      // branch below calling hangUp() would otherwise risk dropping
+      // whatever call the rep has since moved on to.
+      if (callEndedRef.current) {
+        stopMultilinePolling();
+        return;
+      }
       let data;
       try {
         data = await api.get(`/api/multiline-batch?id=${batchId}`);
@@ -3286,6 +3297,17 @@ export default function SimpleCRM() {
       // Phase 2: now that the conference is actually live, place the
       // real Twilio call to every reserved lead.
       await api.post("/api/multiline-place-legs", { batchId });
+      // That POST is a real network round trip (up to 6 concurrent
+      // Twilio REST calls server-side) — long enough for the rep to
+      // hit Stop/Cancel while it's in flight. onCallEnded (from the
+      // call's own disconnect/cancel/error, or stopSession acting
+      // directly) can't reach into an already-sent fetch to stop it,
+      // so without this check a batch the UI already tore down would
+      // still start polling once the POST resolves — reviving "in a
+      // call" UI for a call the rep dismissed, or worse, since the
+      // give-up branch below calls hangUp() (device.disconnectAll()),
+      // silently dropping whatever call the rep has since moved on to.
+      if (callEndedRef.current) return;
 
       // A few seconds of slack on top of Twilio's own per-leg ring
       // timeout, so a normal "genuinely nobody answered" resolution
