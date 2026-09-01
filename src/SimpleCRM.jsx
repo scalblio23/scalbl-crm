@@ -2749,6 +2749,10 @@ export default function SimpleCRM() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+  const sessionPausedRef = useRef(false);
+  useEffect(() => {
+    sessionPausedRef.current = sessionPaused;
+  }, [sessionPaused]);
 
   const WRAP_UP_SECONDS = 15;
 
@@ -2798,7 +2802,20 @@ export default function SimpleCRM() {
     setSession(null);
     setSessionPaused(false);
     setWrapUp(null);
-    if (multilineBatchIdRef.current) cancelMultilineBatch(multilineBatchIdRef.current);
+    // Stopped directly here rather than only relying on the Twilio
+    // call's own disconnect/cancel event to eventually fire
+    // onCallEnded — that event isn't guaranteed (e.g. the conference
+    // leg is in a bad state), and until it does, the poll loop would
+    // keep running against a batch the rep already walked away from,
+    // able to still set activeLeadId/callStatus="in-progress" if it
+    // later observes a winner.
+    stopMultilinePolling();
+    setMultilineBatch(null);
+    if (multilineBatchIdRef.current) {
+      cancelMultilineBatch(multilineBatchIdRef.current);
+      multilineBatchIdRef.current = null;
+    }
+    multilineWinnerRef.current = null;
     if (calling) {
       hangUp();
       activeCallRef.current = null;
@@ -2867,7 +2884,13 @@ export default function SimpleCRM() {
   // the table has no wrap-up to force, so it's logged directly — but
   // still remembered (lastAdHocCall) so "Call again"/"Call again with
   // a different number" can offer an immediate redial on it too.
-  const handleCallEnded = (lead, durationMs) => {
+  // `batchLeadIds` is every lead actually dialled in this round — for
+  // a normal single-line call that's always just [lead.id], but for a
+  // Multi Line winner it's every line that was tried, not just the one
+  // that answered. finishWrapUp needs the whole set so the ones that
+  // rang and lost leave the queue too, instead of contaminating the
+  // next round with numbers that were just tried a moment ago.
+  const handleCallEnded = (lead, durationMs, batchLeadIds) => {
     if (!lead) return;
     if (!sessionRef.current) {
       logCallDirect(lead, durationMs);
@@ -2888,6 +2911,7 @@ export default function SimpleCRM() {
       notes: draft ? draft.notes : lead.notes || "",
       durationMs,
       secondsLeft: WRAP_UP_SECONDS,
+      batchLeadIds: batchLeadIds && batchLeadIds.length ? batchLeadIds : [lead.id],
     });
   };
 
@@ -2896,7 +2920,7 @@ export default function SimpleCRM() {
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, customStage, notes, durationMs } = wrapUp;
+    const { lead, customStage, notes, durationMs, batchLeadIds } = wrapUp;
     // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
@@ -2958,7 +2982,12 @@ export default function SimpleCRM() {
     removeLeadFromLists(lead.id);
 
     if (!session) return;
-    const remainingQueue = session.queue.filter((id) => id !== lead.id);
+    // Every lead actually dialled this round comes off the queue, not
+    // just the one who answered — otherwise a Multi Line batch's other
+    // lines (rang, didn't pick up) stay in the queue and mostly re-ring
+    // on the very next round instead of the fresh leads after them.
+    const dialledIds = new Set(batchLeadIds && batchLeadIds.length ? batchLeadIds : [lead.id]);
+    const remainingQueue = session.queue.filter((id) => !dialledIds.has(id));
     if (!remainingQueue.length) {
       setSession(null);
       setSessionPaused(false);
@@ -3187,10 +3216,37 @@ export default function SimpleCRM() {
           if (sessionRef.current) setSessionPaused(true);
           return;
         }
-        if (!winner) return; // rep hung up (or nothing answered) before anyone was bridged — nothing to log
+        if (!winner) {
+          // Nobody answered any of this round's lines (or the rep
+          // cancelled mid-dial) — there's no wrap-up screen for a round
+          // with no one to log, so this is the only place a losing
+          // round's leads ever leave the queue. Without this, the
+          // session just sat idle forever after a no-answer batch —
+          // finishWrapUp (the only other place that advances the
+          // queue) only ever runs once someone's actually been talked
+          // to. All of leadsToTry — not just one lead — needs to come
+          // off the queue, or the very next batch would mostly re-dial
+          // the same numbers that just failed to pick up.
+          if (sessionRef.current) {
+            const dialledIds = new Set(leadsToTry.map((l) => l.id));
+            const remainingQueue = sessionRef.current.queue.filter((id) => !dialledIds.has(id));
+            if (!remainingQueue.length) {
+              setSession(null);
+              setSessionPaused(false);
+            } else {
+              setSession((s) => (s ? { ...s, queue: remainingQueue } : s));
+              if (!sessionPausedRef.current) dialNextInQueue(remainingQueue, sessionRef.current.lines);
+            }
+          }
+          return;
+        }
 
         logCallToConversation(winner, durationMs);
-        handleCallEnded(winner, durationMs);
+        handleCallEnded(
+          winner,
+          durationMs,
+          leadsToTry.map((l) => l.id)
+        );
       };
 
       call.on("disconnect", () => onCallEnded());
