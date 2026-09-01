@@ -34,15 +34,57 @@ function getPool() {
       // chain Node won't fully validate by default — this matches the
       // common Vercel + Postgres deployment pattern.
       ssl: cs.includes("sslmode=disable") ? false : { rejectUnauthorized: false },
-      max: 5,
+      // Kept small deliberately — this app is 45+ separate /api/*.js
+      // files, each its own serverless function with its own process
+      // and its own Pool. Every one of those adds up against the
+      // *database's* single shared connection limit, not just this
+      // process's — a generous `max` here multiplies straight into
+      // that shared ceiling once more than a couple of functions are
+      // warm at once, which is exactly how "remaining connection
+      // slots are reserved for roles with the SUPERUSER attribute"
+      // showed up in production. Almost nothing in this file issues
+      // more than one query concurrently per invocation anyway.
+      max: 3,
+      // Closes a connection this process isn't using instead of
+      // holding it open indefinitely — matters because a frozen
+      // serverless container doesn't run its own idle timers, so an
+      // idle connection can otherwise sit open from one invocation to
+      // the next for as long as the container happens to stay warm.
+      idleTimeoutMillis: 10_000,
+      // Fail fast and clearly if every slot really is taken, instead
+      // of hanging until the platform's own request timeout does it
+      // less clearly.
+      connectionTimeoutMillis: 8_000,
     });
   }
   return pool;
 }
 
-async function query(text, params = []) {
-  const { rows } = await getPool().query(text, params);
-  return rows;
+// Matches Postgres' own "out of connections" family of errors —
+// SQLSTATE 53300 ("too_many_connections", which is also what's behind
+// the "remaining connection slots are reserved for roles with the
+// SUPERUSER attribute" message), plus a couple of message-only
+// variants some poolers/providers raise instead of a proper code.
+// This always fails *before* any SQL runs (Postgres rejects the new
+// connection outright), so retrying is safe — there's no risk of a
+// write applying twice.
+function isConnectionExhaustedError(err) {
+  if (err?.code === "53300") return true;
+  const msg = String(err?.message || "");
+  return /remaining connection slots|too many (clients|connections)/i.test(msg);
+}
+
+async function query(text, params = [], attempt = 0) {
+  try {
+    const { rows } = await getPool().query(text, params);
+    return rows;
+  } catch (err) {
+    if (isConnectionExhaustedError(err) && attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+      return query(text, params, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 // Runs `fn` over `items` with at most `limit` in flight at once —
@@ -70,6 +112,27 @@ let schemaReady = null;
 export async function ensureSchema() {
   if (schemaReady) return schemaReady;
   schemaReady = (async () => {
+    // The full migration chain below is ~100 sequential round trips —
+    // fine to pay once, expensive to repeat on every cold serverless
+    // container. This app is 45+ separate /api/*.js functions, each
+    // its own process with its own in-memory `schemaReady` — so
+    // "once per warm process" still means paying this chain on every
+    // fresh cold start, of which there are many under real traffic.
+    // A cold start stuck making ~100 round trips (each holding its
+    // connection open the whole time) piling up concurrently across
+    // several functions is exactly the kind of thing that occasionally
+    // exhausted the database's connection limit ("remaining connection
+    // slots are reserved for roles with the SUPERUSER attribute" —
+    // seen in production on the Multi Line dialler, whose 400ms status
+    // poll keeps its own function's containers churning fastest).
+    // Skipping straight past the whole chain once its last table
+    // (tag_folders) already exists turns the overwhelming majority of
+    // real invocations — schema already migrated — into a single
+    // lightweight check instead. Whoever adds the NEXT table/column
+    // below must also update this check, or an already-migrated
+    // database will never pick up that migration.
+    const [{ exists }] = await query(`SELECT to_regclass('public.tag_folders') IS NOT NULL AS exists`);
+    if (!exists) {
     await query(`
       CREATE TABLE IF NOT EXISTS clients (
         id SERIAL PRIMARY KEY,
@@ -430,6 +493,7 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    }
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role

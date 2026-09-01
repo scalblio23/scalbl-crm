@@ -3160,7 +3160,7 @@ export default function SimpleCRM() {
         hangUp();
         if (batchId) cancelMultilineBatch(batchId); // best-effort — drop any leg still stuck ringing
       }
-    }, 400);
+    }, 600); // was 400ms — still snappy, but that rate was adding meaningfully to the concurrent load that tipped the database into "remaining connection slots" errors (see server/db.js)
   };
 
   // Dials several leads at once (see startSession/togglePause/
