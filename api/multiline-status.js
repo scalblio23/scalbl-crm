@@ -6,17 +6,22 @@
 // This is where "first to answer wins" actually gets decided: the
 // instant a leg's status turns "in-progress" (Twilio's name for
 // answered-and-connected), it races to atomically claim the batch's
-// winner slot. Win it, and this leg is left alone — it's already
-// joining the conference via its own TwiML (see
-// api/voice-multiline-leg.js). Lose it (another leg claimed it a
-// moment earlier), and it gets hung up right here.
+// winner slot. Every leg joins its conference muted (see
+// buildConferenceTwiml) — winning is what unmutes this leg so the rep
+// can actually hear it; losing (another leg claimed it a moment
+// earlier) hangs it up right here. Until one of those happens, a leg
+// sitting in the conference is silent to the rep either way, which is
+// what actually prevents cross-talk between two leads answering close
+// together (as opposed to just racing to hang up the loser fast
+// enough — hanging up is still a REST round trip, but a muted leg
+// mid-hangup was never audible in the first place).
 import {
   ensureSchema,
   updateMultilineBatchCallStatusByRowId,
   claimMultilineWinner,
   getOtherPendingMultilineBatchCalls,
 } from "../server/db.js";
-import { endOrCancelCall } from "../server/twilioCore.js";
+import { endOrCancelCall, unmuteConferenceParticipant } from "../server/twilioCore.js";
 
 export default async function handler(req, res) {
   try {
@@ -36,12 +41,28 @@ export default async function handler(req, res) {
     if (callStatus === "in-progress") {
       const won = await claimMultilineWinner({ batchId, callSid, leadId });
       if (won) {
-        // Won — drop every other still-live leg in this batch. Fire
-        // these without waiting on all of them before responding;
-        // Twilio doesn't need to wait on it and a slow straggler
-        // shouldn't hold up this webhook's response.
+        // Won — unmute this leg (the only thing that makes it audible
+        // to the rep at all) and drop every other still-live leg,
+        // concurrently. Genuinely awaited, not fire-and-forget: Twilio
+        // webhooks have no tight response-time requirement that
+        // needs it, and unawaited work here is exactly the kind that
+        // can get cut off if the platform freezes the function right
+        // after an early response (see the Automations fix earlier —
+        // same underlying caveat with @vercel/functions' waitUntil()
+        // applies to any unawaited async work, not just that one).
         const others = await getOtherPendingMultilineBatchCalls(batchId, callSid);
-        Promise.all(others.filter((o) => o.call_sid).map((o) => endOrCancelCall(o.call_sid))).catch(() => {});
+        await Promise.all([
+          unmuteConferenceParticipant({ conferenceName: won.conference_name, callSid }).catch((err) =>
+            console.error("[api/multiline-status] failed to unmute the winner", err)
+          ),
+          ...others
+            .filter((o) => o.call_sid)
+            .map((o) =>
+              endOrCancelCall(o.call_sid).catch((err) =>
+                console.error("[api/multiline-status] failed to hang up a losing leg", err)
+              )
+            ),
+        ]);
       } else {
         // Lost — someone else already won this batch a moment ago.
         await endOrCancelCall(callSid);

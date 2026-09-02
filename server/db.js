@@ -34,15 +34,57 @@ function getPool() {
       // chain Node won't fully validate by default — this matches the
       // common Vercel + Postgres deployment pattern.
       ssl: cs.includes("sslmode=disable") ? false : { rejectUnauthorized: false },
-      max: 5,
+      // Kept small deliberately — this app is 45+ separate /api/*.js
+      // files, each its own serverless function with its own process
+      // and its own Pool. Every one of those adds up against the
+      // *database's* single shared connection limit, not just this
+      // process's — a generous `max` here multiplies straight into
+      // that shared ceiling once more than a couple of functions are
+      // warm at once, which is exactly how "remaining connection
+      // slots are reserved for roles with the SUPERUSER attribute"
+      // showed up in production. Almost nothing in this file issues
+      // more than one query concurrently per invocation anyway.
+      max: 3,
+      // Closes a connection this process isn't using instead of
+      // holding it open indefinitely — matters because a frozen
+      // serverless container doesn't run its own idle timers, so an
+      // idle connection can otherwise sit open from one invocation to
+      // the next for as long as the container happens to stay warm.
+      idleTimeoutMillis: 10_000,
+      // Fail fast and clearly if every slot really is taken, instead
+      // of hanging until the platform's own request timeout does it
+      // less clearly.
+      connectionTimeoutMillis: 8_000,
     });
   }
   return pool;
 }
 
-async function query(text, params = []) {
-  const { rows } = await getPool().query(text, params);
-  return rows;
+// Matches Postgres' own "out of connections" family of errors —
+// SQLSTATE 53300 ("too_many_connections", which is also what's behind
+// the "remaining connection slots are reserved for roles with the
+// SUPERUSER attribute" message), plus a couple of message-only
+// variants some poolers/providers raise instead of a proper code.
+// This always fails *before* any SQL runs (Postgres rejects the new
+// connection outright), so retrying is safe — there's no risk of a
+// write applying twice.
+function isConnectionExhaustedError(err) {
+  if (err?.code === "53300") return true;
+  const msg = String(err?.message || "");
+  return /remaining connection slots|too many (clients|connections)/i.test(msg);
+}
+
+async function query(text, params = [], attempt = 0) {
+  try {
+    const { rows } = await getPool().query(text, params);
+    return rows;
+  } catch (err) {
+    if (isConnectionExhaustedError(err) && attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+      return query(text, params, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 // Runs `fn` over `items` with at most `limit` in flight at once —
@@ -70,6 +112,27 @@ let schemaReady = null;
 export async function ensureSchema() {
   if (schemaReady) return schemaReady;
   schemaReady = (async () => {
+    // The full migration chain below is ~100 sequential round trips —
+    // fine to pay once, expensive to repeat on every cold serverless
+    // container. This app is 45+ separate /api/*.js functions, each
+    // its own process with its own in-memory `schemaReady` — so
+    // "once per warm process" still means paying this chain on every
+    // fresh cold start, of which there are many under real traffic.
+    // A cold start stuck making ~100 round trips (each holding its
+    // connection open the whole time) piling up concurrently across
+    // several functions is exactly the kind of thing that occasionally
+    // exhausted the database's connection limit ("remaining connection
+    // slots are reserved for roles with the SUPERUSER attribute" —
+    // seen in production on the Multi Line dialler, whose 400ms status
+    // poll keeps its own function's containers churning fastest).
+    // Skipping straight past the whole chain once its last table
+    // (tag_folders) already exists turns the overwhelming majority of
+    // real invocations — schema already migrated — into a single
+    // lightweight check instead. Whoever adds the NEXT table/column
+    // below must also update this check, or an already-migrated
+    // database will never pick up that migration.
+    const [{ exists }] = await query(`SELECT to_regclass('public.tag_folders') IS NOT NULL AS exists`);
+    if (!exists) {
     await query(`
       CREATE TABLE IF NOT EXISTS clients (
         id SERIAL PRIMARY KEY,
@@ -311,6 +374,150 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // ---------- Calendars (Google-connected booking calendars) ----------
+    // One row per bookable calendar (a rep/team can have more than
+    // one, e.g. "Sales call" vs "Onboarding call"). `availability` is
+    // a per-weekday map of time ranges in the calendar's own
+    // `timezone`, e.g. {"mon":[{"start":"09:00","end":"17:00"}]} — see
+    // server/calendarAvailability.js for how it's turned into actual
+    // bookable slots. The google_* columns hold the OAuth tokens for
+    // whichever Google account was connected via "Integrate with
+    // Google" (see server/googleCalendar.js) — stored in the clear,
+    // same as api_keys.raw_key above; there's no separate secrets
+    // store in this app.
+    await query(`
+      CREATE TABLE IF NOT EXISTS calendars (
+        id SERIAL PRIMARY KEY,
+        owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        name TEXT NOT NULL,
+        slug TEXT UNIQUE NOT NULL,
+        description TEXT,
+        timezone TEXT NOT NULL DEFAULT 'UTC',
+        event_length_minutes INTEGER NOT NULL DEFAULT 30,
+        buffer_minutes INTEGER NOT NULL DEFAULT 0,
+        min_notice_hours INTEGER NOT NULL DEFAULT 4,
+        booking_window_days INTEGER NOT NULL DEFAULT 30,
+        max_bookings_per_day INTEGER,
+        availability JSONB NOT NULL DEFAULT '{}',
+        google_connected BOOLEAN NOT NULL DEFAULT false,
+        google_email TEXT,
+        google_access_token TEXT,
+        google_refresh_token TEXT,
+        google_token_expiry TIMESTAMPTZ,
+        active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // Which calendar on the connected Google account events get
+    // created on/checked for conflicts against — added after the
+    // table first shipped (was hardcoded to "primary"), so existing
+    // rows default to the same behavior they already had.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS google_calendar_id TEXT NOT NULL DEFAULT 'primary'`);
+    // A video-call link (Zoom, Meet, whatever) for this calendar's
+    // bookings. When set, api/calendar-book.js appends it in brackets
+    // after the booker's name in the Google event title and sets it as
+    // the event's location — there's no per-booking way to override it.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS video_conference_link TEXT`);
+    // One row per booked slot on a calendar. booker_timezone is the
+    // timezone the visitor had selected in the widget at booking time
+    // (purely for display in the confirmation email/SMS — start_time/
+    // end_time are always stored in UTC). cancel_token is a bearer
+    // token embedded in the confirmation email's cancel link, so a
+    // booker can cancel without an account. The partial unique index
+    // below is what actually prevents double-booking under a race —
+    // the availability check alone is a best-effort filter, not a
+    // guarantee, once two people can hit "book" on the same slot at
+    // the same moment.
+    await query(`
+      CREATE TABLE IF NOT EXISTS calendar_bookings (
+        id SERIAL PRIMARY KEY,
+        calendar_id INTEGER REFERENCES calendars(id) ON DELETE CASCADE,
+        contact_name TEXT NOT NULL,
+        contact_email TEXT,
+        contact_phone TEXT,
+        notes TEXT,
+        start_time TIMESTAMPTZ NOT NULL,
+        end_time TIMESTAMPTZ NOT NULL,
+        booker_timezone TEXT,
+        status TEXT NOT NULL DEFAULT 'confirmed',
+        google_event_id TEXT,
+        cancel_token TEXT UNIQUE,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    await query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS calendar_bookings_no_double_book
+      ON calendar_bookings (calendar_id, start_time)
+      WHERE status = 'confirmed'
+    `);
+    // ---------- Automations ----------
+    // One trigger + an ordered list of actions, same linear shape as
+    // GoHighLevel's workflow builder (no branching in this first
+    // version). trigger_type is nullable — a freshly-created
+    // automation starts unconfigured until its builder is filled in
+    // and saved (see server/automations.js for how trigger_config and
+    // actions are actually interpreted).
+    await query(`
+      CREATE TABLE IF NOT EXISTS automations (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        trigger_type TEXT,
+        trigger_config JSONB NOT NULL DEFAULT '{}',
+        actions JSONB NOT NULL DEFAULT '[]',
+        active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // One row per in-progress (or finished) firing of an automation.
+    // Exists because "wait" steps mean an automation can't just run
+    // start-to-finish inside the request that triggered it — a
+    // serverless function doesn't live long enough to sleep for hours
+    // or days. Instead each firing is a durable row: `context` is a
+    // snapshot of the trigger's data (contact, calendar, appointment
+    // time, …) taken once at trigger time, `next_step_index` is how
+    // far through the automation's `actions` array it's gotten, and
+    // `run_at` is when it's next due to be advanced — either "now"
+    // (nothing to wait on) or the target time a "wait" step computed.
+    // See server/automations.js for how a run is actually advanced,
+    // and api/automations-process-runs.js for what moves it forward
+    // once its wait is up.
+    await query(`
+      CREATE TABLE IF NOT EXISTS automation_runs (
+        id SERIAL PRIMARY KEY,
+        automation_id INTEGER REFERENCES automations(id) ON DELETE CASCADE,
+        context JSONB NOT NULL DEFAULT '{}',
+        next_step_index INTEGER NOT NULL DEFAULT 0,
+        run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // Bumped every time a run is claimed or advanced — lets a stuck
+    // 'processing' row (advanceAutomationRun crashed in a way that
+    // somehow still escaped its own catch-all) be told apart from one
+    // genuinely mid-flight, by how long ago it last moved rather than
+    // by created_at (which for a run that already went through one or
+    // more "wait" cycles reflects the original trigger time, not the
+    // current step). See reapStuckAutomationRuns below.
+    await query(`ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
+    // ---------- Tag folders ----------
+    // Purely organizational — a tag is still just free text on a
+    // contact (see contacts.tag), never owned by a folder at the
+    // model level. A folder is just a name + the list of tag strings
+    // it groups in the Contacts sidebar; a tag not listed in any
+    // folder's tag_names still shows up ungrouped, exactly as it
+    // always has.
+    await query(`
+      CREATE TABLE IF NOT EXISTS tag_folders (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        tag_names JSONB NOT NULL DEFAULT '[]',
+        position INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    }
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1360,6 +1567,11 @@ export async function createMultilineBatch({ conferenceName, createdBy }) {
   return rows[0];
 }
 
+export async function getMultilineBatchById(id) {
+  const rows = await query("SELECT * FROM multiline_batches WHERE id = $1", [id]);
+  return rows[0] || null;
+}
+
 // Inserted before the Twilio call is placed — its id gets embedded in
 // that call's TwiML/status-callback URLs, then setMultilineBatchCallSid
 // fills in the resulting call_sid once Twilio hands one back.
@@ -1369,6 +1581,15 @@ export async function addMultilineBatchCall({ batchId, leadId, name, phone, from
     [batchId, leadId, name, phone, fromNumber || null]
   );
   return rows[0];
+}
+
+// The rows a batch starts with — reserved (with a row id to embed in
+// each call's own TwiML/status-callback URLs) but not yet actually
+// dialled. See api/multiline-start.js (creates them, before the rep's
+// own leg has joined the conference) and api/multiline-place-legs.js
+// (places the real Twilio call for each, once it has).
+export async function getUnplacedMultilineBatchCalls(batchId) {
+  return query("SELECT * FROM multiline_batch_calls WHERE batch_id = $1 AND call_sid IS NULL", [batchId]);
 }
 
 export async function setMultilineBatchCallSid(rowId, callSid) {
@@ -1483,4 +1704,496 @@ export async function createSoundboardClip({ label, audioData, mimeType, created
 
 export async function deleteSoundboardClip(id) {
   await query("DELETE FROM soundboard_clips WHERE id = $1", [id]);
+}
+
+// ---------- Calendars ----------
+
+function calendarFromRow(r, { includeSecrets = false } = {}) {
+  const base = {
+    id: r.id,
+    ownerUserId: r.owner_user_id,
+    name: r.name,
+    slug: r.slug,
+    description: r.description || "",
+    timezone: r.timezone,
+    eventLengthMinutes: r.event_length_minutes,
+    bufferMinutes: r.buffer_minutes,
+    minNoticeHours: r.min_notice_hours,
+    bookingWindowDays: r.booking_window_days,
+    maxBookingsPerDay: r.max_bookings_per_day,
+    availability: r.availability || {},
+    videoConferenceLink: r.video_conference_link || "",
+    googleConnected: r.google_connected,
+    googleEmail: r.google_email,
+    googleCalendarId: r.google_calendar_id || "primary",
+    active: r.active,
+    createdAt: r.created_at,
+  };
+  // Access/refresh tokens never leave the server — only
+  // server/googleCalendar.js reads them directly off the DB row.
+  if (includeSecrets) {
+    base.googleAccessToken = r.google_access_token;
+    base.googleRefreshToken = r.google_refresh_token;
+    base.googleTokenExpiry = r.google_token_expiry;
+  }
+  return base;
+}
+
+function slugifyCalendarName(name) {
+  const base = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${base || "calendar"}-${crypto.randomBytes(3).toString("hex")}`;
+}
+
+const DEFAULT_AVAILABILITY = {
+  mon: [{ start: "09:00", end: "17:00" }],
+  tue: [{ start: "09:00", end: "17:00" }],
+  wed: [{ start: "09:00", end: "17:00" }],
+  thu: [{ start: "09:00", end: "17:00" }],
+  fri: [{ start: "09:00", end: "17:00" }],
+  sat: [],
+  sun: [],
+};
+
+export async function getCalendars() {
+  const rows = await query("SELECT * FROM calendars ORDER BY created_at ASC");
+  return rows.map((r) => calendarFromRow(r));
+}
+
+export async function getCalendarById(id, opts) {
+  const rows = await query("SELECT * FROM calendars WHERE id = $1", [id]);
+  return rows[0] ? calendarFromRow(rows[0], opts) : null;
+}
+
+// Used by the public booking endpoints — looked up by slug rather
+// than id, and only ever needs the row itself (callers decide what
+// to expose to the visitor).
+export async function getCalendarBySlug(slug, opts) {
+  const rows = await query("SELECT * FROM calendars WHERE slug = $1", [slug]);
+  return rows[0] ? calendarFromRow(rows[0], opts) : null;
+}
+
+export async function createCalendar({ name, ownerUserId }) {
+  const slug = slugifyCalendarName(name);
+  const rows = await query(
+    `INSERT INTO calendars (owner_user_id, name, slug, availability)
+     VALUES ($1,$2,$3,$4) RETURNING *`,
+    [ownerUserId || null, name, slug, JSON.stringify(DEFAULT_AVAILABILITY)]
+  );
+  return calendarFromRow(rows[0]);
+}
+
+// Settings patch from the Calendar settings panel — every field is
+// optional so the frontend can save one section (Timezone, Booking
+// rules, Availability, …) at a time without resending the rest.
+export async function updateCalendar(id, patch) {
+  const rows = await query(
+    `UPDATE calendars SET
+       name = COALESCE($2, name),
+       description = COALESCE($3, description),
+       timezone = COALESCE($4, timezone),
+       event_length_minutes = COALESCE($5, event_length_minutes),
+       buffer_minutes = COALESCE($6, buffer_minutes),
+       min_notice_hours = COALESCE($7, min_notice_hours),
+       booking_window_days = COALESCE($8, booking_window_days),
+       -- max_bookings_per_day is nullable *by design* (null = no
+       -- limit), so it can't use the COALESCE(new, existing) trick
+       -- every other field above uses — that would make "explicitly
+       -- clear the limit" indistinguishable from "field wasn't part
+       -- of this patch". $9 says which case this is.
+       max_bookings_per_day = CASE WHEN $9 THEN $10 ELSE max_bookings_per_day END,
+       availability = COALESCE($11::jsonb, availability),
+       active = COALESCE($12, active),
+       google_calendar_id = COALESCE($13, google_calendar_id),
+       video_conference_link = COALESCE($14, video_conference_link)
+     WHERE id = $1
+     RETURNING *`,
+    [
+      id,
+      patch.name ?? null,
+      patch.description ?? null,
+      patch.timezone ?? null,
+      patch.eventLengthMinutes ?? null,
+      patch.bufferMinutes ?? null,
+      patch.minNoticeHours ?? null,
+      patch.bookingWindowDays ?? null,
+      Object.prototype.hasOwnProperty.call(patch, "maxBookingsPerDay"),
+      patch.maxBookingsPerDay ?? null,
+      patch.availability ? JSON.stringify(patch.availability) : null,
+      patch.active ?? null,
+      patch.googleCalendarId ?? null,
+      patch.videoConferenceLink ?? null,
+    ]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+export async function deleteCalendar(id) {
+  await query("DELETE FROM calendars WHERE id = $1", [id]);
+}
+
+// Called once the OAuth callback exchanges a code for tokens. Google
+// only returns a refresh_token on the very first consent (or when
+// prompt=consent forces re-consent) — reconnecting without a new
+// refresh_token keeps the old one rather than wiping it out.
+export async function setCalendarGoogleTokens(id, { googleEmail, accessToken, refreshToken, expiry }) {
+  const rows = await query(
+    `UPDATE calendars SET
+       google_connected = true,
+       google_email = $2,
+       google_access_token = $3,
+       google_refresh_token = COALESCE($4, google_refresh_token),
+       google_token_expiry = $5
+     WHERE id = $1
+     RETURNING *`,
+    [id, googleEmail, accessToken, refreshToken || null, expiry]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+// Used by server/googleCalendar.js after a token refresh — updates
+// just the access token/expiry without touching google_email/refresh.
+export async function updateCalendarGoogleAccessToken(id, { accessToken, expiry }) {
+  await query("UPDATE calendars SET google_access_token = $2, google_token_expiry = $3 WHERE id = $1", [
+    id,
+    accessToken,
+    expiry,
+  ]);
+}
+
+export async function clearCalendarGoogleTokens(id) {
+  const rows = await query(
+    `UPDATE calendars SET
+       google_connected = false,
+       google_email = NULL,
+       google_access_token = NULL,
+       google_refresh_token = NULL,
+       google_token_expiry = NULL,
+       google_calendar_id = 'primary'
+     WHERE id = $1
+     RETURNING *`,
+    [id]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+// ---------- Calendar bookings ----------
+
+function calendarBookingFromRow(r) {
+  return {
+    id: r.id,
+    calendarId: r.calendar_id,
+    contactName: r.contact_name,
+    contactEmail: r.contact_email,
+    contactPhone: r.contact_phone,
+    notes: r.notes,
+    startTime: r.start_time,
+    endTime: r.end_time,
+    bookerTimezone: r.booker_timezone,
+    status: r.status,
+    googleEventId: r.google_event_id,
+    cancelToken: r.cancel_token,
+    createdAt: r.created_at,
+  };
+}
+
+export async function getCalendarBookings(calendarId) {
+  const rows = await query(
+    "SELECT * FROM calendar_bookings WHERE calendar_id = $1 ORDER BY start_time DESC",
+    [calendarId]
+  );
+  return rows.map(calendarBookingFromRow);
+}
+
+// Confirmed bookings overlapping [fromISO, toISO) — treated as busy
+// time when computing available slots, on top of whatever Google's
+// freebusy API reports (keeps a calendar's own bookings authoritative
+// even the moment before Google's copy of the event exists).
+export async function getConfirmedBookingsInRange(calendarId, fromISO, toISO) {
+  const rows = await query(
+    `SELECT * FROM calendar_bookings
+     WHERE calendar_id = $1 AND status = 'confirmed' AND start_time < $3 AND end_time > $2
+     ORDER BY start_time ASC`,
+    [calendarId, fromISO, toISO]
+  );
+  return rows.map(calendarBookingFromRow);
+}
+
+export async function countConfirmedBookingsOnDay(calendarId, dayStartISO, dayEndISO) {
+  const [{ count }] = await query(
+    `SELECT count(*)::int AS count FROM calendar_bookings
+     WHERE calendar_id = $1 AND status = 'confirmed' AND start_time >= $2 AND start_time < $3`,
+    [calendarId, dayStartISO, dayEndISO]
+  );
+  return count;
+}
+
+export async function createCalendarBooking(b) {
+  const cancelToken = crypto.randomBytes(16).toString("hex");
+  const rows = await query(
+    `INSERT INTO calendar_bookings
+       (calendar_id, contact_name, contact_email, contact_phone, notes, start_time, end_time, booker_timezone, cancel_token)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     RETURNING *`,
+    [
+      b.calendarId,
+      b.contactName,
+      b.contactEmail || null,
+      b.contactPhone || null,
+      b.notes || null,
+      b.startTime,
+      b.endTime,
+      b.bookerTimezone || null,
+      cancelToken,
+    ]
+  );
+  return calendarBookingFromRow(rows[0]);
+}
+
+export async function setCalendarBookingGoogleEventId(id, googleEventId) {
+  await query("UPDATE calendar_bookings SET google_event_id = $2 WHERE id = $1", [id, googleEventId]);
+}
+
+export async function getCalendarBookingByCancelToken(token) {
+  const rows = await query("SELECT * FROM calendar_bookings WHERE cancel_token = $1", [token]);
+  return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+export async function getCalendarBookingById(id) {
+  const rows = await query("SELECT * FROM calendar_bookings WHERE id = $1", [id]);
+  return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+export async function cancelCalendarBooking(id) {
+  const rows = await query(
+    "UPDATE calendar_bookings SET status = 'cancelled' WHERE id = $1 RETURNING *",
+    [id]
+  );
+  return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+// ---------- Automations ----------
+
+function automationFromRow(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    triggerType: r.trigger_type,
+    triggerConfig: r.trigger_config || {},
+    actions: r.actions || [],
+    active: r.active,
+    createdAt: r.created_at,
+  };
+}
+
+export async function getAutomations() {
+  const rows = await query("SELECT * FROM automations ORDER BY created_at ASC");
+  return rows.map(automationFromRow);
+}
+
+export async function getAutomationById(id) {
+  const rows = await query("SELECT * FROM automations WHERE id = $1", [id]);
+  return rows[0] ? automationFromRow(rows[0]) : null;
+}
+
+// Only ever called with a real trigger_type by server/automations.js,
+// and only for automations actually switched on — an inactive one, or
+// one whose builder was never finished (trigger_type still null),
+// should never fire.
+export async function getActiveAutomationsByTrigger(triggerType) {
+  const rows = await query(
+    "SELECT * FROM automations WHERE trigger_type = $1 AND active = true ORDER BY created_at ASC",
+    [triggerType]
+  );
+  return rows.map(automationFromRow);
+}
+
+export async function createAutomation({ name }) {
+  const rows = await query("INSERT INTO automations (name) VALUES ($1) RETURNING *", [name]);
+  return automationFromRow(rows[0]);
+}
+
+// Same "every field optional" shape as updateCalendar — the builder
+// can save the trigger and the actions list independently.
+export async function updateAutomation(id, patch) {
+  const rows = await query(
+    `UPDATE automations SET
+       name = COALESCE($2, name),
+       trigger_type = COALESCE($3, trigger_type),
+       trigger_config = COALESCE($4::jsonb, trigger_config),
+       actions = COALESCE($5::jsonb, actions),
+       active = COALESCE($6, active)
+     WHERE id = $1
+     RETURNING *`,
+    [
+      id,
+      patch.name ?? null,
+      patch.triggerType ?? null,
+      patch.triggerConfig ? JSON.stringify(patch.triggerConfig) : null,
+      patch.actions ? JSON.stringify(patch.actions) : null,
+      patch.active ?? null,
+    ]
+  );
+  return rows[0] ? automationFromRow(rows[0]) : null;
+}
+
+export async function deleteAutomation(id) {
+  await query("DELETE FROM automations WHERE id = $1", [id]);
+}
+
+// ---------- Automation runs (durable queue for "wait" steps) ----------
+
+function automationRunFromRow(r) {
+  return {
+    id: r.id,
+    automationId: r.automation_id,
+    context: r.context || {},
+    nextStepIndex: r.next_step_index,
+    runAt: r.run_at,
+    status: r.status,
+    lastError: r.last_error,
+  };
+}
+
+export async function createAutomationRun({ automationId, context, runAt }) {
+  const rows = await query(
+    "INSERT INTO automation_runs (automation_id, context, run_at) VALUES ($1,$2,$3) RETURNING *",
+    [automationId, JSON.stringify(context || {}), (runAt || new Date()).toISOString()]
+  );
+  return automationRunFromRow(rows[0]);
+}
+
+// Atomically claims up to `limit` due runs by flipping them to
+// 'processing' in one statement — the FOR UPDATE SKIP LOCKED subquery
+// is what makes this safe to call concurrently (a trigger firing's
+// own immediate advance and the cron poller both call this same
+// path), same idea as claimMultilineWinner's atomic UPDATE above,
+// just claiming a batch instead of a single winner.
+export async function claimDueAutomationRuns(limit = 20) {
+  const rows = await query(
+    `UPDATE automation_runs SET status = 'processing', updated_at = now()
+     WHERE id IN (
+       SELECT id FROM automation_runs
+       WHERE status = 'pending' AND run_at <= now()
+       ORDER BY run_at ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING *`,
+    [limit]
+  );
+  return rows.map(automationRunFromRow);
+}
+
+// Marks any run that's been sitting at 'processing' for too long as
+// 'failed' instead — 'processing' is meant to be a momentary state
+// (claimed right before advanceAutomationRun runs, normally resolved
+// within seconds), and nothing ever re-claims a 'processing' row, so
+// one that gets stuck there (advanceAutomationRun crashing in a way
+// that somehow still escaped its own catch-all) would otherwise stay
+// stuck forever with no way to tell it apart from one genuinely still
+// working. Called alongside processDueAutomationRuns on the same
+// schedule.
+export async function reapStuckAutomationRuns(olderThanMinutes = 5) {
+  await query(
+    `UPDATE automation_runs SET status = 'failed', last_error = 'Timed out stuck in processing'
+     WHERE status = 'processing' AND updated_at < now() - make_interval(mins => $1)`,
+    [olderThanMinutes]
+  );
+}
+
+// Claims exactly one run by id, the same 'pending' -> 'processing'
+// flip as claimDueAutomationRuns but for a run whose id is already
+// known (used right after creating one, to advance it immediately
+// instead of waiting for the next poll). The WHERE status = 'pending'
+// guard is what actually matters here: it's what makes this safe to
+// race against claimDueAutomationRuns — whichever of the two gets
+// here first wins, and the loser's UPDATE affects zero rows instead
+// of both processing the same run's steps twice.
+// For the builder's "Recent activity" panel — the only real way to
+// answer "did this actually fire" without direct DB access: zero rows
+// means the trigger never matched at all (wrong filter, not saved, or
+// not active); a 'done' row that didn't seem to do anything points at
+// delivery (SendGrid/Twilio) rather than the trigger; a 'pending' row
+// with a future run_at is just mid-wait, not stuck.
+export async function getAutomationRunsByAutomationId(automationId, limit = 20) {
+  const rows = await query(
+    "SELECT * FROM automation_runs WHERE automation_id = $1 ORDER BY created_at DESC LIMIT $2",
+    [automationId, limit]
+  );
+  return rows.map(automationRunFromRow);
+}
+
+export async function claimAutomationRunById(id) {
+  const rows = await query(
+    "UPDATE automation_runs SET status = 'processing', updated_at = now() WHERE id = $1 AND status = 'pending' RETURNING *",
+    [id]
+  );
+  return rows[0] ? automationRunFromRow(rows[0]) : null;
+}
+
+// Advances a claimed run: either reschedules it (more steps left,
+// status goes back to 'pending' so a later poll picks it up) or
+// closes it out ('done'/'failed').
+export async function updateAutomationRunProgress(id, { nextStepIndex, runAt, status, lastError }) {
+  await query(
+    `UPDATE automation_runs SET
+       next_step_index = COALESCE($2, next_step_index),
+       run_at = COALESCE($3, run_at),
+       status = COALESCE($4, status),
+       last_error = COALESCE($5, last_error),
+       updated_at = now()
+     WHERE id = $1`,
+    [
+      id,
+      nextStepIndex ?? null,
+      runAt ? new Date(runAt).toISOString() : null,
+      status ?? null,
+      lastError ?? null,
+    ]
+  );
+}
+
+// ---------- Tag folders ----------
+
+function tagFolderFromRow(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    tagNames: r.tag_names || [],
+    position: r.position,
+  };
+}
+
+export async function getTagFolders() {
+  const rows = await query("SELECT * FROM tag_folders ORDER BY position, id");
+  return rows.map(tagFolderFromRow);
+}
+
+export async function createTagFolder({ name }) {
+  const [{ next_position }] = await query("SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM tag_folders");
+  const rows = await query("INSERT INTO tag_folders (name, position) VALUES ($1,$2) RETURNING *", [
+    name,
+    next_position,
+  ]);
+  return tagFolderFromRow(rows[0]);
+}
+
+export async function updateTagFolder(id, { name, tagNames }) {
+  const rows = await query(
+    `UPDATE tag_folders SET
+       name = COALESCE($2, name),
+       tag_names = COALESCE($3::jsonb, tag_names)
+     WHERE id = $1
+     RETURNING *`,
+    [id, name ?? null, tagNames ? JSON.stringify(tagNames) : null]
+  );
+  return rows[0] ? tagFolderFromRow(rows[0]) : null;
+}
+
+export async function deleteTagFolder(id) {
+  await query("DELETE FROM tag_folders WHERE id = $1", [id]);
 }

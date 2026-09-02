@@ -15,6 +15,7 @@ import {
   generateMultilineConferenceName,
   placeConferenceLeg,
   endOrCancelCall,
+  unmuteConferenceParticipant,
   publicBaseUrl,
   MULTILINE_RING_SECONDS,
 } from "./twilioCore.js";
@@ -65,7 +66,9 @@ import {
   findApiKeyByHash,
   touchApiKeyLastUsed,
   createMultilineBatch,
+  getMultilineBatchById,
   addMultilineBatchCall,
+  getUnplacedMultilineBatchCalls,
   setMultilineBatchCallSid,
   setMultilineBatchCallFailed,
   updateMultilineBatchCallStatusByRowId,
@@ -85,7 +88,29 @@ import {
   revokePortalInvite,
   getPortalInviteByToken,
   claimPortalInvite,
+  reapStuckAutomationRuns,
 } from "./db.js";
+// Calendars — unlike every route above, these are mounted straight
+// from their /api/*.js handlers rather than reimplemented inline.
+// Each handler is a plain (req, res) function with no Vercel-specific
+// behavior (query/body/status/json all work identically under
+// Express), and the feature's actual logic (Google OAuth, freebusy,
+// SendGrid, Twilio SMS) is substantial enough that keeping one copy
+// of it is worth the small deviation from this file's usual pattern.
+import calendarsHandler from "../api/calendars.js";
+import calendarGoogleConnectHandler from "../api/calendar-google-connect.js";
+import calendarGoogleCallbackHandler from "../api/calendar-google-callback.js";
+import calendarGoogleDisconnectHandler from "../api/calendar-google-disconnect.js";
+import calendarGoogleCalendarsHandler from "../api/calendar-google-calendars.js";
+import calendarBookingsHandler from "../api/calendar-bookings.js";
+import calendarPublicHandler from "../api/calendar-public.js";
+import calendarSlotsHandler from "../api/calendar-slots.js";
+import calendarBookHandler from "../api/calendar-book.js";
+import calendarCancelHandler from "../api/calendar-cancel.js";
+import automationsHandler from "../api/automations.js";
+import tagFoldersHandler from "../api/tag-folders.js";
+import automationsProcessRunsHandler from "../api/automations-process-runs.js";
+import { processDueAutomationRuns } from "./automations.js";
 import {
   getSessionUser,
   requireAuth,
@@ -140,6 +165,18 @@ const PUBLIC_PATHS = new Set([
   // /api/sms-inbound above.
   "/api/voice-multiline-leg",
   "/api/multiline-status",
+  // Calendars — the public booking-widget side (see api/calendar-*.js
+  // for how each authenticates itself instead: signed OAuth state,
+  // a calendar's own slug, or a booking's cancel token).
+  "/api/calendar-google-callback",
+  "/api/calendar-public",
+  "/api/calendar-slots",
+  "/api/calendar-book",
+  "/api/calendar-cancel",
+  // Cron-invoked, not user-invoked — authenticated by its own
+  // CRON_SECRET bearer-token check instead of a session (see
+  // api/automations-process-runs.js).
+  "/api/automations-process-runs",
 ]);
 
 app.use(async (req, res, next) => {
@@ -166,10 +203,17 @@ app.use(
     "/api/dial-lists",
     "/api/sms-bulk-send",
     "/api/multiline-start",
+    "/api/multiline-place-legs",
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
     "/api/portal-invites",
+    "/api/calendars",
+    "/api/calendar-google-connect",
+    "/api/calendar-google-disconnect",
+    "/api/calendar-google-calendars",
+    "/api/calendar-bookings",
+    "/api/automations",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -177,6 +221,11 @@ app.use(
   }
 );
 app.use("/api/contact-columns", (req, res, next) => {
+  if (req.method === "GET") return next();
+  if (forbidClientRole(req.user, res)) return;
+  next();
+});
+app.use("/api/tag-folders", (req, res, next) => {
   if (req.method === "GET") return next();
   if (forbidClientRole(req.user, res)) return;
   next();
@@ -540,6 +589,15 @@ app.post("/api/status", (req, res) => {
 // mirrors route-for-route.
 const MULTILINE_MAX_LINES = 6;
 
+// Reserves a batch and a row per lead (an id to embed in each call's
+// own TwiML/status-callback URLs later) but does NOT dial anyone yet
+// — that's /api/multiline-place-legs below, called once the frontend's
+// own conference leg has actually joined and started the conference.
+// See that route's comment for why the split exists: dialling a lead
+// before the rep's own leg has joined leaves that lead's call sitting
+// in the conference on hold — unable to hear anything — until the rep
+// catches up, which a fast-answering lead can easily notice as "they
+// can't hear me".
 app.post(
   "/api/multiline-start",
   dbRoute(async (req, res) => {
@@ -547,8 +605,7 @@ app.post(
     if (missing.length) {
       return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
     }
-    const base = publicBaseUrl();
-    if (!base) {
+    if (!publicBaseUrl()) {
       return res.status(500).json({
         error:
           "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
@@ -569,29 +626,55 @@ app.post(
 
     const candidates = await mapWithConcurrency(withPhone, withPhone.length, async (contact, i) => {
       const fromNumber = pool[i % pool.length];
-      const row = await addMultilineBatchCall({
-        batchId: batch.id,
-        leadId: contact.id,
-        name: contact.name,
-        phone: contact.phone,
-        fromNumber,
-      });
-      try {
-        const call = await placeConferenceLeg({
-          to: contact.phone,
-          from: fromNumber,
-          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(conferenceName)}`,
-          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batch.id}&leadId=${contact.id}`,
-        });
-        await setMultilineBatchCallSid(row.id, call.sid);
-      } catch (err) {
-        console.error("[multiline-start] leg failed", contact.id, err.message);
-        await setMultilineBatchCallFailed(row.id, err.message);
-      }
+      await addMultilineBatchCall({ batchId: batch.id, leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber });
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
 
     res.status(201).json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
+  })
+);
+
+// Actually dials every lead reserved for a batch, via the REST API,
+// into the conference the rep's own browser leg already joined. See
+// the comment above /api/multiline-start for why this is a separate
+// step. Calling this twice for the same batch only dials whatever's
+// still unplaced — cheap to guard, shouldn't happen.
+app.post(
+  "/api/multiline-place-legs",
+  dbRoute(async (req, res) => {
+    const missing = missingTwilioEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const base = publicBaseUrl();
+    if (!base) {
+      return res.status(500).json({
+        error:
+          "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
+      });
+    }
+    const batchId = Number(req.body?.batchId);
+    if (!batchId) return res.status(400).json({ error: "Missing batchId" });
+    const batch = await getMultilineBatchById(batchId);
+    if (!batch) return res.status(404).json({ error: "Batch not found" });
+
+    const rows = await getUnplacedMultilineBatchCalls(batchId);
+    await mapWithConcurrency(rows, rows.length, async (row) => {
+      try {
+        const call = await placeConferenceLeg({
+          to: row.phone,
+          from: row.from_number,
+          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(batch.conference_name)}`,
+          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batchId}&leadId=${row.lead_id}`,
+        });
+        await setMultilineBatchCallSid(row.id, call.sid);
+      } catch (err) {
+        console.error("[multiline-place-legs] leg failed", row.lead_id, err.message);
+        await setMultilineBatchCallFailed(row.id, err.message);
+      }
+    });
+
+    res.status(200).json({ ok: true, placed: rows.length });
   })
 );
 
@@ -621,8 +704,21 @@ app.post("/api/multiline-status", async (req, res) => {
     if (callStatus === "in-progress") {
       const won = await claimMultilineWinner({ batchId, callSid, leadId });
       if (won) {
+        // See api/multiline-status.js for the full reasoning — genuinely
+        // awaited (not fire-and-forget) on purpose.
         const others = await getOtherPendingMultilineBatchCalls(batchId, callSid);
-        Promise.all(others.filter((o) => o.call_sid).map((o) => endOrCancelCall(o.call_sid))).catch(() => {});
+        await Promise.all([
+          unmuteConferenceParticipant({ conferenceName: won.conference_name, callSid }).catch((err) =>
+            console.error("[db] /api/multiline-status failed to unmute the winner", err)
+          ),
+          ...others
+            .filter((o) => o.call_sid)
+            .map((o) =>
+              endOrCancelCall(o.call_sid).catch((err) =>
+                console.error("[db] /api/multiline-status failed to hang up a losing leg", err)
+              )
+            ),
+        ]);
       } else {
         await endOrCancelCall(callSid);
       }
@@ -1139,6 +1235,23 @@ app.post(
   )
 );
 
+// ---------- Calendars ----------
+// See the import comment above — these are the actual /api/*.js
+// handlers, mounted directly rather than reimplemented here.
+app.all("/api/calendars", calendarsHandler);
+app.all("/api/calendar-google-connect", calendarGoogleConnectHandler);
+app.all("/api/calendar-google-callback", calendarGoogleCallbackHandler);
+app.all("/api/calendar-google-disconnect", calendarGoogleDisconnectHandler);
+app.all("/api/calendar-google-calendars", calendarGoogleCalendarsHandler);
+app.all("/api/calendar-bookings", calendarBookingsHandler);
+app.all("/api/calendar-public", calendarPublicHandler);
+app.all("/api/calendar-slots", calendarSlotsHandler);
+app.all("/api/calendar-book", calendarBookHandler);
+app.all("/api/calendar-cancel", calendarCancelHandler);
+app.all("/api/automations", automationsHandler);
+app.all("/api/tag-folders", tagFoldersHandler);
+app.all("/api/automations-process-runs", automationsProcessRunsHandler);
+
 app.listen(PORT, () => {
   const missing = missingTwilioEnv();
   console.log(`Local backend listening on http://localhost:${PORT}`);
@@ -1151,3 +1264,15 @@ app.listen(PORT, () => {
     console.warn(`⚠ POSTGRES_URL not set yet — database routes will fail until you add it to .env`);
   }
 });
+
+// Local dev has no Vercel Cron of its own — this is what advances
+// "wait" steps here instead. The deployed site relies on vercel.json's
+// `crons` entry hitting /api/automations-process-runs on a schedule;
+// this poller only runs in this long-lived local process.
+if (isDbConfigured()) {
+  setInterval(() => {
+    reapStuckAutomationRuns()
+      .then(() => processDueAutomationRuns())
+      .catch((err) => console.error("[automations] local poller failed", err));
+  }, 15000);
+}

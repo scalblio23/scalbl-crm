@@ -127,14 +127,14 @@ export async function sendSms({ to, body }, env = process.env) {
 // even one ringing out to voicemail on its own — never touches the
 // conference itself.
 //
-// There's no participant mute/unmute choreography here — every leg
-// that reaches the conference is audible immediately. In practice the
-// rep's leg (a fast WebRTC connect) is almost always already in place
-// long before any PSTN line rings through, and the moment a second
-// line answers it's cancelled within one status-callback round trip
-// (well under a second) — but a rep dialling several lines at once
-// should know a brief moment of cross-talk between two answered lines
-// is possible before the loser is dropped.
+// Every lead leg joins muted (see buildConferenceTwiml) — a lead's
+// audio never reaches the rep just by answering, only once
+// unmuteConferenceParticipant() below confirms it as the winner. This
+// is what actually prevents cross-talk: a losing leg answering a
+// moment after the winner is claimed is still fully live in the
+// conference (it can hear it) for as long as it takes endOrCancelCall
+// to reach it, but it was never audible to the rep in the first
+// place, muted the instant it joined.
 export function generateMultilineConferenceName() {
   return `ml_${crypto.randomBytes(8).toString("hex")}`;
 }
@@ -159,11 +159,39 @@ export function buildConferenceTwiml({ conferenceName, isRep }) {
     {
       startConferenceOnEnter: isRep,
       endConferenceOnExit: isRep,
+      // A lead leg joins muted — it can hear the conference but isn't
+      // heard by the rep — until api/multiline-status.js confirms it
+      // as the winner and explicitly unmutes it. Without this, every
+      // leg that answers is live audio to the rep the instant it's
+      // picked up, regardless of whether the server has decided it's
+      // the winner yet — exactly what let a losing (already-hung-up-
+      // in-Twilio's-eyes-a-moment-later) call's audio bleed through.
+      muted: !isRep,
       beep: false,
     },
     conferenceName
   );
   return twiml.toString();
+}
+
+// Unmutes the winning leg once claimMultilineWinner has confirmed it
+// server-side — this is the only thing that ever makes a lead leg
+// audible to the rep; joining the conference (buildConferenceTwiml
+// above) never does on its own. `conferenceName` accepts the
+// Conference's friendly name in place of its SID for this endpoint
+// (documented Twilio REST API behavior) — tried first since it's one
+// less round trip — falling back to looking the conference up by
+// name (it's always "in-progress" by the time a leg inside it has
+// answered) if that's ever rejected.
+export async function unmuteConferenceParticipant({ conferenceName, callSid }, env = process.env) {
+  const client = restClient(env);
+  try {
+    await client.conferences(conferenceName).participants(callSid).update({ muted: false });
+  } catch (err) {
+    const conferences = await client.conferences.list({ friendlyName: conferenceName, limit: 1 });
+    if (!conferences[0]) throw err;
+    await client.conferences(conferences[0].sid).participants(callSid).update({ muted: false });
+  }
 }
 
 // How long a lead's line is allowed to ring before Twilio gives up on
