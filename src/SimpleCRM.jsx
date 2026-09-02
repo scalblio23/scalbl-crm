@@ -47,6 +47,13 @@ import {
   Play,
   Mic,
   Square,
+  Globe,
+  Megaphone,
+  Image,
+  Eye,
+  MousePointerClick,
+  DollarSign,
+  TrendingUp,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -193,6 +200,111 @@ const statusColors = {
   "No Answer": "bg-gray-50 text-gray-500 border-gray-200",
 };
 
+// ---------- Activity stream (dial attempts by time of day) ----------
+// Shared by Reports (internal, full roster) and the client Portal
+// (scoped to one tag) — same 30-min bucketing + gap detection either
+// way, just fed a different slice of the call log. Pulled out to a
+// pure function so both call sites stay byte-for-byte identical.
+const ACTIVITY_BUCKET_MINUTES = 30;
+function buildActivityStream(callLogItems) {
+  const bucketsPerHour = 60 / ACTIVITY_BUCKET_MINUTES;
+  const totalBuckets = 24 * bucketsPerHour;
+  const counts = new Array(totalBuckets).fill(0);
+  for (const e of callLogItems) {
+    if (!e.calledAt) continue;
+    const d = new Date(e.calledAt);
+    if (Number.isNaN(d.getTime())) continue;
+    const idx = d.getHours() * bucketsPerHour + Math.floor(d.getMinutes() / ACTIVITY_BUCKET_MINUTES);
+    counts[idx] += 1;
+  }
+
+  const bucketLabel = (idx) => {
+    const h = Math.floor(idx / bucketsPerHour);
+    const m = (idx % bucketsPerHour) * ACTIVITY_BUCKET_MINUTES;
+    const h12 = h % 12 || 12;
+    return `${h12}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`;
+  };
+
+  const activeIdx = counts.map((c, i) => (c > 0 ? i : -1)).filter((i) => i >= 0);
+  if (activeIdx.length === 0) return { buckets: [], gaps: [] };
+
+  // Frame the chart on the working window actually seen in the data
+  // (padded by one bucket either side) instead of a full, mostly-empty
+  // 24 hours.
+  const first = Math.max(0, activeIdx[0] - 1);
+  const last = Math.min(totalBuckets - 1, activeIdx[activeIdx.length - 1] + 1);
+  const buckets = [];
+  for (let i = first; i <= last; i++) {
+    buckets.push({ time: bucketLabel(i), calls: counts[i] });
+  }
+
+  // Flag any stretch of 60+ minutes with zero dial attempts that sits
+  // *between* two active buckets — quiet time in the middle of a
+  // working stretch, not just before the first call or after the last.
+  const gaps = [];
+  let runStart = null;
+  for (let i = activeIdx[0]; i <= activeIdx[activeIdx.length - 1]; i++) {
+    if (counts[i] === 0) {
+      if (runStart === null) runStart = i;
+    } else if (runStart !== null) {
+      if (i - runStart >= bucketsPerHour) {
+        gaps.push({
+          start: bucketLabel(runStart),
+          end: bucketLabel(i - 1),
+          minutes: (i - runStart) * ACTIVITY_BUCKET_MINUTES,
+        });
+      }
+      runStart = null;
+    }
+  }
+  return { buckets, gaps };
+}
+
+// ---------- Client Portal — ad placeholders ----------
+// No ad-platform integration yet, so these are illustrative sample
+// cards only (clearly labelled "Preview data" wherever they render,
+// never presented as a client's real numbers). The dial/lead numbers
+// on the same screen are real, pulled from the same contacts/call log
+// data as the rest of the app — swapping this constant for a real
+// fetch (e.g. Meta/Google Ads insights) is the only change needed
+// once that integration exists; the card layout already expects this
+// shape.
+const PLACEHOLDER_ADS = [
+  {
+    id: "sample-1",
+    name: "Battery Rebate — Carousel",
+    platform: "Meta",
+    status: "Active",
+    impressions: 18400,
+    clicks: 612,
+    ctr: 3.3,
+    spend: 940,
+    leads: 24,
+  },
+  {
+    id: "sample-2",
+    name: "Free Site Assessment — Video",
+    platform: "Meta",
+    status: "Active",
+    impressions: 9250,
+    clicks: 287,
+    ctr: 3.1,
+    spend: 460,
+    leads: 11,
+  },
+  {
+    id: "sample-3",
+    name: "Savings Calculator — Static",
+    platform: "Google",
+    status: "Paused",
+    impressions: 5100,
+    clicks: 96,
+    ctr: 1.9,
+    spend: 210,
+    leads: 4,
+  },
+];
+
 // ---------- Dynamic columns (shared by the Client table and the
 // Contact table — same column types, same storage pattern: a
 // `_columns` metadata table plus a `fields` JSONB blob per row) ----------
@@ -324,6 +436,7 @@ const navItems = [
   { key: "bulk-sms", label: "Bulk SMS", icon: Send },
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
+  { key: "portal", label: "Portal", icon: Globe },
   { key: "clients", label: "Clients", icon: Briefcase },
   { key: "settings", label: "Settings", icon: Settings },
 ];
@@ -1184,7 +1297,7 @@ export default function SimpleCRM() {
   // sees their own leads, so Powerdialler/Log/Clients/Settings (which
   // are either full-roster tools or nothing-to-do-with-leads config)
   // are hidden rather than just data-scoped.
-  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports"];
+  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal"];
   const visibleNavItems =
     authUser?.role === "client" ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
   useEffect(() => {
@@ -2114,66 +2227,51 @@ export default function SimpleCRM() {
   // The point isn't the trend over the date range, it's the shape of
   // a working day: a rep who's clocked in but has gone quiet shows up
   // as a flat-to-zero stretch between two active buckets, which is
-  // exactly what the gap-detection below flags.
-  const ACTIVITY_BUCKET_MINUTES = 30;
-  const reportsActivity = useMemo(() => {
-    const bucketsPerHour = 60 / ACTIVITY_BUCKET_MINUTES;
-    const totalBuckets = 24 * bucketsPerHour;
-    const counts = new Array(totalBuckets).fill(0);
-    for (const e of reportsCallLog) {
-      if (!e.calledAt) continue;
-      const d = new Date(e.calledAt);
-      if (Number.isNaN(d.getTime())) continue;
-      const idx = d.getHours() * bucketsPerHour + Math.floor(d.getMinutes() / ACTIVITY_BUCKET_MINUTES);
-      counts[idx] += 1;
-    }
-
-    const bucketLabel = (idx) => {
-      const h = Math.floor(idx / bucketsPerHour);
-      const m = (idx % bucketsPerHour) * ACTIVITY_BUCKET_MINUTES;
-      const h12 = h % 12 || 12;
-      return `${h12}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`;
-    };
-
-    const activeIdx = counts.map((c, i) => (c > 0 ? i : -1)).filter((i) => i >= 0);
-    if (activeIdx.length === 0) return { buckets: [], gaps: [] };
-
-    // Frame the chart on the working window actually seen in the data
-    // (padded by one bucket either side) instead of a full, mostly-empty
-    // 24 hours.
-    const first = Math.max(0, activeIdx[0] - 1);
-    const last = Math.min(totalBuckets - 1, activeIdx[activeIdx.length - 1] + 1);
-    const buckets = [];
-    for (let i = first; i <= last; i++) {
-      buckets.push({ time: bucketLabel(i), calls: counts[i] });
-    }
-
-    // Flag any stretch of 60+ minutes with zero dial attempts that sits
-    // *between* two active buckets — quiet time in the middle of a
-    // working stretch, not just before the first call or after the last.
-    const gaps = [];
-    let runStart = null;
-    for (let i = activeIdx[0]; i <= activeIdx[activeIdx.length - 1]; i++) {
-      if (counts[i] === 0) {
-        if (runStart === null) runStart = i;
-      } else if (runStart !== null) {
-        if (i - runStart >= bucketsPerHour) {
-          gaps.push({
-            start: bucketLabel(runStart),
-            end: bucketLabel(i - 1),
-            minutes: (i - runStart) * ACTIVITY_BUCKET_MINUTES,
-          });
-        }
-        runStart = null;
-      }
-    }
-    return { buckets, gaps };
-  }, [reportsCallLog]);
+  // exactly what the gap-detection below flags. (buildActivityStream
+  // is the module-level function above — shared with the Portal tab.)
+  const reportsActivity = useMemo(() => buildActivityStream(reportsCallLog), [reportsCallLog]);
   // The actual list behind the Bookings tile — every call in range
   // whose outcome was Booked, most recent first.
   const reportsBookedList = reportsCallLog
     .filter((e) => e.status === "Booked")
     .sort((a, b) => new Date(b.calledAt) - new Date(a.calledAt));
+
+  // ---------- Client Portal ----------
+  // A read-only, client-facing summary: total current leads, a dial
+  // activity graph in the exact same shape as the internal Activity
+  // Stream above (just scoped down), and placeholder ad creative/
+  // metrics until a real ad-platform integration exists. Scoped by
+  // tag exactly like everywhere else a client role's data is limited
+  // — a client account is pinned to their own allowedTags; staff pick
+  // one tag from the dropdown below to preview that client's portal.
+  const portalIsClientRole = authUser?.role === "client";
+  const [portalSelectedTag, setPortalSelectedTag] = useState("");
+  const portalEffectiveTags = portalIsClientRole ? authUser?.allowedTags || [] : portalSelectedTag ? [portalSelectedTag] : [];
+  const portalHasScope = portalEffectiveTags.length > 0;
+
+  const portalContacts = portalHasScope ? contacts.filter((c) => portalEffectiveTags.includes(c.tag)) : [];
+  const portalTotalLeads = portalContacts.length;
+  const portalStatusCounts = portalContacts.reduce((acc, c) => {
+    const s = c.status || "New Lead";
+    acc[s] = (acc[s] || 0) + 1;
+    return acc;
+  }, {});
+
+  const [portalFrom, setPortalFrom] = useState(() => isoDaysAgo(30));
+  const [portalTo, setPortalTo] = useState(() => isoToday());
+  const portalCallLog = portalHasScope
+    ? callLog.filter((e) => {
+        if (!portalEffectiveTags.includes(e.tag)) return false;
+        if (!e.calledAt) return false;
+        const d = String(e.calledAt).slice(0, 10);
+        if (portalFrom && d < portalFrom) return false;
+        if (portalTo && d > portalTo) return false;
+        return true;
+      })
+    : [];
+  const portalTotalDials = portalCallLog.length;
+  const portalBookedCalls = portalCallLog.filter((e) => e.status === "Booked").length;
+  const portalActivity = useMemo(() => buildActivityStream(portalCallLog), [portalCallLog]);
 
   // Call log "status"/"outcome" is written from the imported STAGE
   // column's value (see finishWrapUp) — colored the same way STAGE
@@ -5649,6 +5747,229 @@ export default function SimpleCRM() {
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Portal — client-facing summary: total leads, a dial activity
+            graph in the same shape as the internal Activity Stream, and
+            (for now) placeholder ad creative/metrics. Scoped by tag — a
+            client role sees their own allowedTags; staff pick one tag
+            from the dropdown to preview that client's view. */}
+        {page === "portal" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
+              <div>
+                <h1 className="text-xl font-bold flex items-center gap-2">
+                  <Globe size={20} className="text-gray-400" />
+                  Client Portal
+                </h1>
+                <div className="text-sm text-gray-400 mt-0.5">
+                  {portalIsClientRole
+                    ? "Your leads, dial activity, and current ad campaigns."
+                    : "Preview exactly what a client sees for their tag."}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {portalIsClientRole ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {(authUser.allowedTags || []).map((tag) => (
+                      <span key={tag} className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <select
+                    value={portalSelectedTag}
+                    onChange={(e) => setPortalSelectedTag(e.target.value)}
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    <option value="">Select a client…</option>
+                    {contactTagNames.map((tag) => (
+                      <option key={tag} value={tag}>
+                        {tag}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+
+            {!portalHasScope ? (
+              <div className="p-8">
+                <div className="border border-dashed border-gray-200 rounded-2xl py-16 text-center text-sm text-gray-400">
+                  {portalIsClientRole
+                    ? "No client tag is assigned to your account yet — ask your account manager to assign one."
+                    : contactTagNames.length === 0
+                    ? "No client tags yet — import some leads first."
+                    : "Select a client above to preview their portal."}
+                </div>
+              </div>
+            ) : (
+              <div className="p-8 space-y-8">
+                {/* KPIs */}
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <div className="border border-gray-200 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Total leads</div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums">{portalTotalLeads}</div>
+                  </div>
+                  <div className="border border-gray-200 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Dials in range</div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums">{portalTotalDials}</div>
+                  </div>
+                  <div className="border border-green-200 bg-green-50/40 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-green-700 uppercase tracking-wide">Bookings</div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums text-green-800">{portalBookedCalls}</div>
+                  </div>
+                </div>
+
+                {portalTotalLeads > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(portalStatusCounts).map(([status, count]) => (
+                      <span
+                        key={status}
+                        className={`text-xs px-2.5 py-1 rounded-full border ${
+                          statusColors[status] || "bg-gray-50 text-gray-600 border-gray-200"
+                        }`}
+                      >
+                        {status} · {count}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Dial activity — same chart as Reports' Activity
+                    Stream, scoped to this client's leads. */}
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
+                    <div>
+                      <div className="font-semibold text-sm">Dial activity</div>
+                      <div className="text-xs text-gray-400 mt-0.5">
+                        Dial attempts to your leads by time of day &middot; {ACTIVITY_BUCKET_MINUTES}-min buckets, all
+                        days in range combined
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        value={portalFrom}
+                        onChange={(e) => setPortalFrom(e.target.value)}
+                        className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                      />
+                      <span className="text-sm text-gray-400">to</span>
+                      <input
+                        type="date"
+                        value={portalTo}
+                        onChange={(e) => setPortalTo(e.target.value)}
+                        className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                      />
+                    </div>
+                  </div>
+                  <div className="px-5 py-4">
+                    {portalActivity.buckets.length === 0 ? (
+                      <div className="text-sm text-gray-400 text-center py-14">No dials in this range</div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height={260}>
+                        <AreaChart data={portalActivity.buckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="portalActivityStreamFill" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.35} />
+                              <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.02} />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                          <XAxis
+                            dataKey="time"
+                            tick={{ fontSize: 11, fill: "#9ca3af" }}
+                            tickLine={false}
+                            axisLine={{ stroke: "#e5e7eb" }}
+                            interval="preserveStartEnd"
+                            minTickGap={28}
+                          />
+                          <YAxis
+                            allowDecimals={false}
+                            tick={{ fontSize: 11, fill: "#9ca3af" }}
+                            tickLine={false}
+                            axisLine={false}
+                            width={28}
+                          />
+                          <Tooltip
+                            formatter={(value) => [`${value} call${value === 1 ? "" : "s"}`, "Dial attempts"]}
+                            labelFormatter={(label) => label}
+                            contentStyle={{ borderRadius: 10, border: "1px solid #e5e7eb", fontSize: 12 }}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="calls"
+                            stroke="#3b82f6"
+                            strokeWidth={2}
+                            fill="url(#portalActivityStreamFill)"
+                            isAnimationActive={false}
+                          />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </div>
+
+                {/* Ads — placeholder creative + metrics until a real ad
+                    account is connected. Clearly labelled as preview
+                    data so it's never mistaken for a client's real
+                    numbers. */}
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <Megaphone size={16} className="text-gray-400" />
+                      <div className="font-semibold text-sm">Current ads</div>
+                    </div>
+                    <span className="text-xs px-2.5 py-1 rounded-full border bg-amber-50 text-amber-700 border-amber-200">
+                      Preview data — ad account not connected yet
+                    </span>
+                  </div>
+                  <div className="p-5 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {PLACEHOLDER_ADS.map((ad) => (
+                      <div key={ad.id} className="border border-gray-200 rounded-xl overflow-hidden">
+                        <div className="h-32 bg-gradient-to-br from-gray-100 to-gray-50 flex items-center justify-center">
+                          <Image size={28} className="text-gray-300" />
+                        </div>
+                        <div className="p-4">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-medium text-sm truncate">{ad.name}</div>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border whitespace-nowrap ${
+                                ad.status === "Active"
+                                  ? "bg-green-50 text-green-700 border-green-200"
+                                  : "bg-gray-50 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {ad.status}
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-400 mt-0.5">{ad.platform}</div>
+                          <div className="grid grid-cols-2 gap-2 mt-3">
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <Eye size={12} className="text-gray-300" />
+                              {ad.impressions.toLocaleString()} impr.
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <MousePointerClick size={12} className="text-gray-300" />
+                              {ad.clicks.toLocaleString()} clicks
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <TrendingUp size={12} className="text-gray-300" />
+                              {ad.ctr}% CTR
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <DollarSign size={12} className="text-gray-300" />${ad.spend.toLocaleString()} spent
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
