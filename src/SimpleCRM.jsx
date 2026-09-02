@@ -54,6 +54,7 @@ import {
   MousePointerClick,
   DollarSign,
   TrendingUp,
+  Link2,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -505,6 +506,75 @@ export default function SimpleCRM() {
       // Cookie may already be gone — reload regardless.
     }
     window.location.reload();
+  };
+
+  // ---------- Portal invite claim (client self-signup link) ----------
+  // A client's invite link is this same app URL with ?invite=<token>
+  // on it — see api/portal-invite-claim.js. Detected once on mount;
+  // when present it takes over the whole screen (below, ahead of the
+  // normal login form) regardless of whether someone else is already
+  // logged in on this browser.
+  const [inviteToken] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("invite") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [inviteTags, setInviteTags] = useState(null); // null = still checking / invalid
+  const [inviteCheckError, setInviteCheckError] = useState("");
+  const [inviteChecking, setInviteChecking] = useState(Boolean(inviteToken));
+  const [claimForm, setClaimForm] = useState({ name: "", email: "", password: "", confirm: "" });
+  const [claimError, setClaimError] = useState("");
+  const [claimSubmitting, setClaimSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    let cancelled = false;
+    api
+      .get(`/api/portal-invite-claim?token=${encodeURIComponent(inviteToken)}`)
+      .then(({ tags }) => {
+        if (!cancelled) setInviteTags(tags || []);
+      })
+      .catch((err) => {
+        if (!cancelled) setInviteCheckError(err.message || "This invite link is invalid or has been revoked.");
+      })
+      .finally(() => {
+        if (!cancelled) setInviteChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [inviteToken]);
+
+  const handleClaimSubmit = async (e) => {
+    e.preventDefault();
+    setClaimError("");
+    if (!claimForm.name.trim() || !claimForm.email.trim() || !claimForm.password) {
+      setClaimError("Fill in your name, email and password.");
+      return;
+    }
+    if (claimForm.password !== claimForm.confirm) {
+      setClaimError("Passwords don't match.");
+      return;
+    }
+    setClaimSubmitting(true);
+    try {
+      const { user } = await api.post("/api/portal-invite-claim", {
+        token: inviteToken,
+        name: claimForm.name.trim(),
+        email: claimForm.email.trim(),
+        password: claimForm.password,
+      });
+      // Drop ?invite= from the URL now that it's claimed, then let the
+      // normal logged-in app take over.
+      window.history.replaceState({}, "", window.location.pathname);
+      setAuthUser(user);
+    } catch (err) {
+      setClaimError(err.message || "Something went wrong.");
+    } finally {
+      setClaimSubmitting(false);
+    }
   };
 
   // Start empty rather than pre-filled with the sample data — that
@@ -1380,6 +1450,79 @@ export default function SimpleCRM() {
     patchTeamUser(u.id, { allowedTags: next });
   };
   const canDeleteTeamUser = (targetRole) => canManageUsers && targetRole !== "owner";
+
+  // ---------- Portal invite links (Settings → Team, client self-signup) ----------
+  // There's no email infrastructure to send a portal invite, so
+  // instead of pre-creating a named user (like handleInviteUser
+  // above), an owner/super admin generates a shareable link scoped to
+  // one or more tags and hands it to the client directly — whoever
+  // opens it picks their own name/email/password (see
+  // api/portal-invite-claim.js). Reusable, so one link can onboard a
+  // whole client team; revoking it just stops new signups.
+  const [portalInvites, setPortalInvites] = useState([]);
+  const [portalInvitesLoading, setPortalInvitesLoading] = useState(false);
+  const [newInviteTags, setNewInviteTags] = useState([]);
+  const [creatingInvite, setCreatingInvite] = useState(false);
+  const [copiedInviteId, setCopiedInviteId] = useState(null);
+
+  useEffect(() => {
+    if (page !== "settings" || !authUser || authUser.role === "client") return;
+    let cancelled = false;
+    setPortalInvitesLoading(true);
+    api
+      .get("/api/portal-invites")
+      .then((list) => {
+        if (!cancelled) setPortalInvites(list);
+      })
+      .catch((err) => {
+        if (!cancelled) setDbError(err.message || "Could not load invite links.");
+      })
+      .finally(() => {
+        if (!cancelled) setPortalInvitesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page, authUser]);
+
+  const toggleNewInviteTag = (tag) =>
+    setNewInviteTags((tags) => (tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]));
+
+  const handleCreatePortalInvite = async () => {
+    if (!newInviteTags.length) return;
+    setCreatingInvite(true);
+    try {
+      const created = await api.post("/api/portal-invites", { tags: newInviteTags });
+      setPortalInvites((list) => [created, ...list]);
+      setNewInviteTags([]);
+    } catch (err) {
+      setDbError(err.message || "Could not create that invite link.");
+    } finally {
+      setCreatingInvite(false);
+    }
+  };
+
+  const handleRevokePortalInvite = async (id) => {
+    if (!window.confirm("Revoke this invite link? Anyone who hasn't already signed up with it won't be able to.")) return;
+    try {
+      await api.delete(`/api/portal-invites?id=${id}`);
+      setPortalInvites((list) => list.filter((inv) => inv.id !== id));
+    } catch (err) {
+      setDbError(err.message || "Could not revoke that invite link.");
+    }
+  };
+
+  const portalInviteUrl = (invite) => `${window.location.origin}/?invite=${invite.token}`;
+  const copyPortalInviteUrl = async (invite) => {
+    const url = portalInviteUrl(invite);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedInviteId(invite.id);
+      setTimeout(() => setCopiedInviteId((cur) => (cur === invite.id ? null : cur)), 2000);
+    } catch {
+      window.prompt("Copy this invite link:", url);
+    }
+  };
 
   // Generates the key the first time, or replaces the existing one —
   // there's only ever at most one (see api/api-keys.js). Regenerating
@@ -2793,6 +2936,119 @@ export default function SimpleCRM() {
     if (!newNumber) return;
     callLeadAgain({ ...lead, phone: newNumber }, draft);
   };
+
+  // A portal invite link takes over the whole screen — checked ahead
+  // of the normal auth states below, and regardless of whether this
+  // browser already has an unrelated session cookie.
+  if (inviteToken && !authUser) {
+    return (
+      <div
+        className="flex h-screen items-center justify-center bg-gray-50"
+        style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
+      >
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-6">
+            <div className="text-xl font-bold tracking-tight text-gray-900">Scalbl CRM</div>
+            <div className="text-xs text-gray-400 mt-0.5">Client portal invite</div>
+          </div>
+
+          {inviteChecking ? (
+            <div className="bg-white border border-gray-200 rounded-lg p-8 shadow-sm flex items-center justify-center gap-2 text-sm text-gray-400">
+              <Loader2 size={16} className="animate-spin" /> Checking invite…
+            </div>
+          ) : inviteCheckError ? (
+            <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm text-center">
+              <AlertTriangle size={20} className="mx-auto text-red-400 mb-2" />
+              <div className="text-sm text-gray-600">{inviteCheckError}</div>
+              <button
+                onClick={() => {
+                  window.history.replaceState({}, "", window.location.pathname);
+                  window.location.reload();
+                }}
+                className="mt-4 text-xs text-gray-400 hover:text-gray-600"
+              >
+                Go to login instead
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleClaimSubmit} className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+              <div className="flex items-center gap-2 mb-1 text-sm font-semibold text-gray-800">
+                <Globe size={15} />
+                Set up your portal access
+              </div>
+              {inviteTags?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-4 mt-2">
+                  {inviteTags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {claimError && (
+                <div className="mb-4 mt-3 flex items-start gap-2 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  {claimError}
+                </div>
+              )}
+
+              <label className="block text-xs font-medium text-gray-500 mb-1 mt-3">Your name</label>
+              <input
+                autoComplete="name"
+                value={claimForm.name}
+                onChange={(e) => setClaimForm((f) => ({ ...f, name: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="Jane Smith"
+              />
+
+              <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
+              <input
+                type="email"
+                autoComplete="email"
+                value={claimForm.email}
+                onChange={(e) => setClaimForm((f) => ({ ...f, email: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="you@example.com"
+              />
+
+              <label className="block text-xs font-medium text-gray-500 mb-1">Choose a password</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={claimForm.password}
+                onChange={(e) => setClaimForm((f) => ({ ...f, password: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="At least 8 characters"
+              />
+
+              <label className="block text-xs font-medium text-gray-500 mb-1">Confirm password</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={claimForm.confirm}
+                onChange={(e) => setClaimForm((f) => ({ ...f, confirm: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="••••••••"
+              />
+
+              <button
+                type="submit"
+                disabled={claimSubmitting}
+                className="w-full mt-1 flex items-center justify-center gap-2 rounded-md bg-gray-900 text-white text-sm font-medium py-2 hover:bg-gray-800 disabled:opacity-60"
+              >
+                {claimSubmitting && <Loader2 size={14} className="animate-spin" />}
+                Create account &amp; log in
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (authLoading) {
     return (
@@ -6378,6 +6634,129 @@ export default function SimpleCRM() {
                       {teamUsersLoading && (
                         <tr>
                           <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
+                            <Loader2 size={14} className="animate-spin inline" />
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-8 pb-10 max-w-3xl">
+              <div className="border-t border-gray-100 pt-8">
+                <h2 className="text-base font-bold">Portal invite links</h2>
+                <p className="text-sm text-gray-500 mt-1 max-w-lg">
+                  No email infrastructure sends a portal invite — instead, generate a link scoped to one or more
+                  tags and share it however you like (text, WhatsApp, in person). Anyone with the link picks
+                  their own email and password; the link stays reusable so a whole client team can sign up with
+                  it until you revoke it.
+                </p>
+
+                {canManageUsers && (
+                  <div className="mt-4 border border-gray-200 rounded-lg p-3 max-w-md">
+                    <div className="text-xs font-medium text-gray-500 mb-1.5">Tags this invite grants access to</div>
+                    {contactTagNames.length === 0 ? (
+                      <div className="text-xs text-gray-400">No tags yet — import some leads first.</div>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                        {contactTagNames.map((tag) => (
+                          <button
+                            type="button"
+                            key={tag}
+                            onClick={() => toggleNewInviteTag(tag)}
+                            className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${
+                              newInviteTags.includes(tag)
+                                ? "bg-gray-900 text-white border-gray-900"
+                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                            }`}
+                          >
+                            {tag}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={handleCreatePortalInvite}
+                      disabled={creatingInvite || !newInviteTags.length}
+                      className="mt-3 flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {creatingInvite ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+                      Create invite link
+                    </button>
+                  </div>
+                )}
+
+                <div className="mt-5 border border-gray-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                        <th className="px-4 py-2.5 font-medium">Tags</th>
+                        <th className="px-4 py-2.5 font-medium">Link</th>
+                        <th className="px-4 py-2.5 font-medium">Claimed</th>
+                        <th className="px-4 py-2.5 font-medium">Status</th>
+                        <th className="px-4 py-2.5"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {portalInvites.map((inv) => (
+                        <tr key={inv.id} className="border-b border-gray-50 last:border-0">
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-1 max-w-[220px]">
+                              {inv.tags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200 whitespace-nowrap"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            {inv.revokedAt ? (
+                              <span className="text-gray-300 text-xs">—</span>
+                            ) : (
+                              <button
+                                onClick={() => copyPortalInviteUrl(inv)}
+                                title="Copy invite link"
+                                className="flex items-center gap-1 text-xs font-medium px-2.5 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                              >
+                                <Copy size={12} />
+                                {copiedInviteId === inv.id ? "Copied" : "Copy link"}
+                              </button>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {inv.claimCount} {inv.claimCount === 1 ? "signup" : "signups"}
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {inv.revokedAt ? "Revoked" : "Active"}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {canManageUsers && !inv.revokedAt && (
+                              <button
+                                onClick={() => handleRevokePortalInvite(inv.id)}
+                                className="text-gray-300 hover:text-red-500"
+                                title="Revoke invite link"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                      {!portalInvitesLoading && portalInvites.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
+                            No invite links yet
+                          </td>
+                        </tr>
+                      )}
+                      {portalInvitesLoading && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
                             <Loader2 size={14} className="animate-spin inline" />
                           </td>
                         </tr>

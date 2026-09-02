@@ -80,6 +80,11 @@ import {
   inviteUser,
   updateUser,
   deleteUserById,
+  getPortalInvites,
+  createPortalInvite,
+  revokePortalInvite,
+  getPortalInviteByToken,
+  claimPortalInvite,
 } from "./db.js";
 import {
   getSessionUser,
@@ -122,6 +127,9 @@ const PUBLIC_PATHS = new Set([
   "/api/auth-set-password",
   "/api/auth-logout",
   "/api/auth-me",
+  // A client's self-signup link — see api/portal-invite-claim.js. No
+  // session exists yet at the point this is hit (that's the point).
+  "/api/portal-invite-claim",
   // Auth here is the CRM's single API key, passed in the URL itself
   // (?token=) and checked inside the route below — see
   // api/lead-webhook.js.
@@ -161,6 +169,7 @@ app.use(
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
+    "/api/portal-invites",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -371,6 +380,66 @@ app.delete(
     }
     await deleteUserById(id);
     res.status(204).end();
+  })
+);
+
+// ---------- Portal invites (client self-signup links) ----------
+// Mirrors api/portal-invites.js + api/portal-invite-claim.js. Reads
+// are blocked for the client role by the forbidClientRole middleware
+// above; POST/DELETE are further gated to owner/super_admin here.
+app.get("/api/portal-invites", dbRoute(async (req, res) => res.json(await getPortalInvites())));
+app.post(
+  "/api/portal-invites",
+  dbRoute(async (req, res) => {
+    if (!canManageUsers(req.user.role)) {
+      return res.status(403).json({ error: "Only an owner or super admin can create invite links." });
+    }
+    const tags = Array.isArray(req.body?.tags) ? req.body.tags.filter(Boolean) : [];
+    if (!tags.length) return res.status(400).json({ error: "Pick at least one tag for this invite." });
+    res.status(201).json(await createPortalInvite({ tags, createdBy: req.user.id }));
+  })
+);
+app.delete(
+  "/api/portal-invites",
+  dbRoute(async (req, res) => {
+    if (!canManageUsers(req.user.role)) {
+      return res.status(403).json({ error: "Only an owner or super admin can revoke invite links." });
+    }
+    const id = Number(req.query.id);
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    await revokePortalInvite(id);
+    res.status(204).end();
+  })
+);
+
+app.get(
+  "/api/portal-invite-claim",
+  dbRoute(async (req, res) => {
+    const token = String(req.query?.token || "").trim();
+    if (!token) return res.status(400).json({ error: "Missing token" });
+    const invite = await getPortalInviteByToken(token);
+    if (!invite) return res.status(404).json({ error: "This invite link is invalid or has been revoked." });
+    res.json({ tags: invite.tags || [] });
+  })
+);
+app.post(
+  "/api/portal-invite-claim",
+  dbRoute(async (req, res) => {
+    const { token, name, email, password } = req.body || {};
+    if (!token || !name || !email || !password) {
+      return res.status(400).json({ error: "Missing name, email or password" });
+    }
+    if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+    const hash = await hashPassword(password);
+    const result = await claimPortalInvite({ token, name: String(name).trim(), email, passwordHash: hash });
+    if (result.error === "invalid") {
+      return res.status(404).json({ error: "This invite link is invalid or has been revoked." });
+    }
+    if (result.error === "exists") {
+      return res.status(409).json({ error: "An account with that email already exists — log in instead." });
+    }
+    res.setHeader("Set-Cookie", createSessionCookie(result.user));
+    res.json({ user: result.user });
   })
 );
 

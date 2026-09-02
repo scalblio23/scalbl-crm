@@ -208,6 +208,25 @@ export async function ensureSchema() {
     // they can manage other users (see server/auth.js).
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'`);
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tags JSONB DEFAULT '[]'`);
+    // Client self-signup links (see createPortalInvite/claimPortalInvite
+    // below) — there's no email infrastructure to send a per-person
+    // portal invite, so an admin generates one of these scoped to a set
+    // of tags instead, and whoever holds the link picks their own
+    // email/password. Reusable (not one-time) so a single link can
+    // onboard everyone at a client; revoked_at is how an admin retires
+    // one instead of deleting it, keeping its claim history around.
+    await query(`
+      CREATE TABLE IF NOT EXISTS portal_invites (
+        id SERIAL PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        tags JSONB DEFAULT '[]',
+        created_by INTEGER,
+        created_at TIMESTAMPTZ DEFAULT now(),
+        revoked_at TIMESTAMPTZ,
+        claim_count INTEGER DEFAULT 0,
+        last_claimed_at TIMESTAMPTZ
+      )
+    `);
     // Single global credential (see getApiKey/regenerateApiKey below) —
     // used both as the Bearer/X-Api-Key for programmatic CRM access
     // and as the ?token= on the public /api/lead-webhook endpoint,
@@ -1187,6 +1206,84 @@ export async function updateUser(id, { name, role, allowedTags }) {
 
 export async function deleteUserById(id) {
   await query("DELETE FROM users WHERE id = $1", [id]);
+}
+
+// ---------- Portal invites (client self-signup links) ----------
+// There's no email infrastructure to deliver a per-person invite, so
+// instead an owner/super_admin generates a link scoped to one or more
+// lead tags and hands it to the client however they like (text,
+// WhatsApp, in person). Anyone holding the link picks their own name/
+// email/password — no admin has to know their email ahead of time.
+// Links are reusable on purpose (see claimPortalInvite below) so one
+// link can onboard a whole client team; an admin revokes it when it's
+// no longer needed.
+function portalInviteFromRow(r) {
+  return {
+    id: r.id,
+    token: r.token,
+    tags: r.tags || [],
+    createdAt: r.created_at,
+    createdByName: r.created_by_name || null,
+    revokedAt: r.revoked_at,
+    claimCount: r.claim_count || 0,
+    lastClaimedAt: r.last_claimed_at,
+  };
+}
+
+function generatePortalInviteToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+export async function createPortalInvite({ tags, createdBy }) {
+  const rows = await query(
+    "INSERT INTO portal_invites (token, tags, created_by) VALUES ($1,$2,$3) RETURNING *",
+    [generatePortalInviteToken(), JSON.stringify(tags || []), createdBy || null]
+  );
+  const withName = createdBy ? await getUserById(createdBy) : null;
+  return portalInviteFromRow({ ...rows[0], created_by_name: withName?.name || null });
+}
+
+export async function getPortalInvites() {
+  const rows = await query(
+    "SELECT pi.*, u.name AS created_by_name FROM portal_invites pi " +
+      "LEFT JOIN users u ON u.id = pi.created_by ORDER BY pi.created_at DESC"
+  );
+  return rows.map(portalInviteFromRow);
+}
+
+// Active (non-revoked) invite by its token — used both to preview an
+// invite before the signup form is filled in and to actually claim it.
+export async function getPortalInviteByToken(token) {
+  const rows = await query("SELECT * FROM portal_invites WHERE token = $1 AND revoked_at IS NULL", [token]);
+  return rows[0] ? portalInviteFromRow(rows[0]) : null;
+}
+
+export async function revokePortalInvite(id) {
+  await query("UPDATE portal_invites SET revoked_at = now() WHERE id = $1", [id]);
+}
+
+// Turns a claimed invite into a brand-new client-role user — see
+// api/portal-invite-claim.js. ON CONFLICT DO NOTHING (rather than
+// checking getUserByEmail first) closes the race where the same email
+// claims twice at once; either way the caller gets back { error:
+// "exists" } instead of a crash. { error: "invalid" } means the token
+// itself is unknown or was revoked.
+export async function claimPortalInvite({ token, name, email, passwordHash }) {
+  const invite = await getPortalInviteByToken(token);
+  if (!invite) return { error: "invalid" };
+
+  const rows = await query(
+    `INSERT INTO users (name, email, password_hash, role, allowed_tags)
+     VALUES ($1,$2,$3,'client',$4)
+     ON CONFLICT (email) DO NOTHING RETURNING *`,
+    [name, String(email).toLowerCase().trim(), passwordHash, JSON.stringify(invite.tags || [])]
+  );
+  if (!rows[0]) return { error: "exists" };
+
+  await query("UPDATE portal_invites SET claim_count = claim_count + 1, last_claimed_at = now() WHERE id = $1", [
+    invite.id,
+  ]);
+  return { user: userFromRow(rows[0]) };
 }
 
 // ---------- API key (single global credential) ----------
