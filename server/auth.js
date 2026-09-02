@@ -207,15 +207,25 @@ export function hashApiKey(rawKey) {
   return crypto.createHash("sha256").update(rawKey).digest("hex");
 }
 
-// Extracts a bearer key from `Authorization: Bearer <key>` or the
-// `X-Api-Key` header, verifies it against the database, and — if
-// valid — returns a synthetic "user" so the rest of the app doesn't
-// need to know the difference. Updates last_used_at in the
-// background (never blocks or fails the request over it).
+// Extracts a bearer key from `Authorization: Bearer <key>`, the
+// `X-Api-Key` header, or (GET only) a `?token=` query param, verifies
+// it against the database, and — if valid — returns a synthetic
+// "user" so the rest of the app doesn't need to know the difference.
+// Updates last_used_at in the background (never blocks or fails the
+// request over it).
+//
+// The query-param form exists so a read (e.g. GET /api/contacts?
+// token=...) works from a plain URL — a browser tab, or a fetcher
+// that can't set custom headers — same as /api/lead-webhook already
+// does. It's GET-only: a token that can sit in a URL ends up in
+// server logs and browser history, so mutating requests (POST/PATCH/
+// DELETE) still require it in a header.
 async function getUserFromApiKey(req) {
   const authHeader = req.headers?.authorization || "";
   const bearerMatch = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
-  const rawKey = (bearerMatch ? bearerMatch[1] : req.headers?.["x-api-key"] || "").trim();
+  const headerKey = bearerMatch ? bearerMatch[1] : req.headers?.["x-api-key"] || "";
+  const queryKey = req.method === "GET" ? req.query?.token || "" : "";
+  const rawKey = String(headerKey || queryKey).trim();
   if (!rawKey || !rawKey.startsWith(API_KEY_PREFIX)) return null;
 
   // A DB error here (not configured, connection dropped, …) should
