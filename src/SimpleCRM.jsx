@@ -63,11 +63,13 @@ import {
   Tag,
   Folder,
   FolderPlus,
+  Bot,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
+import AIVoicePanel from "./components/AIVoicePanel";
 import {
   timezoneOptions,
   detectBrowserTimezone,
@@ -466,6 +468,7 @@ const navItems = [
   { key: "clients", label: "Clients", icon: Briefcase },
   { key: "calendars", label: "Calendars", icon: Calendar },
   { key: "automations", label: "Automations", icon: Zap },
+  { key: "ai-voice", label: "AI Voice", icon: Bot },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -8465,6 +8468,8 @@ export default function SimpleCRM() {
             </div>
           </div>
         )}
+
+        {page === "ai-voice" && <AIVoicePanel />}
       </main>
 
       {/* Soundboard — record a new quick-play clip */}
