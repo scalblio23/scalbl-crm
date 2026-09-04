@@ -96,6 +96,14 @@ import {
   forbidClientRole,
   ROLES,
 } from "./auth.js";
+import {
+  missingAiVoiceEnv,
+  transcribeAudio,
+  getAiReply,
+  synthesizeSpeech,
+  AI_VOICE_MAX_AUDIO_BYTES,
+  AI_VOICE_MAX_HISTORY_TURNS,
+} from "./aiVoiceCore.js";
 
 dotenv.config();
 
@@ -620,6 +628,48 @@ app.delete(
   })
 );
 
+// ---------- AI Voice ----------
+// Turn-based AI voice agent behind the "AI Voice" tab — see
+// server/aiVoiceCore.js for the Deepgram → Claude → ElevenLabs
+// pipeline and api/ai-voice-turn.js for the equivalent Vercel route
+// this mirrors. Session/API-key only, no client-role restriction.
+app.get("/api/ai-voice-turn", (req, res) => {
+  res.json({ missing: missingAiVoiceEnv() });
+});
+app.post("/api/ai-voice-turn", async (req, res) => {
+  try {
+    const missing = missingAiVoiceEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `AI Voice is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const { audioData, mimeType, history, systemPrompt } = req.body || {};
+    if (!audioData || !mimeType) return res.status(400).json({ error: "Missing audio data" });
+    if (audioData.length > AI_VOICE_MAX_AUDIO_BYTES * 1.4) {
+      return res.status(400).json({ error: "That recording is too long — keep turns under ~30s." });
+    }
+
+    const audioBuffer = Buffer.from(audioData, "base64");
+    const transcript = await transcribeAudio(audioBuffer, mimeType);
+    if (!transcript.trim()) {
+      return res.status(200).json({ transcript: "", reply: "", audioData: null });
+    }
+
+    const safeHistory = Array.isArray(history) ? history.slice(-AI_VOICE_MAX_HISTORY_TURNS) : [];
+    const reply = await getAiReply({ systemPrompt, history: safeHistory, userText: transcript });
+    const replyAudio = await synthesizeSpeech(reply);
+
+    res.json({
+      transcript,
+      reply,
+      audioData: replyAudio.toString("base64"),
+      mimeType: "audio/mpeg",
+    });
+  } catch (err) {
+    console.error("[ai-voice-turn]", err);
+    res.status(500).json({ error: err.message || "AI Voice turn failed" });
+  }
+});
+
 // ---------- SMS ----------
 
 // Sends an outbound SMS and logs it onto the lead's conversation.
@@ -1080,5 +1130,9 @@ app.listen(PORT, () => {
   }
   if (!isDbConfigured()) {
     console.warn(`⚠ POSTGRES_URL not set yet — database routes will fail until you add it to .env`);
+  }
+  const missingAiVoice = missingAiVoiceEnv();
+  if (missingAiVoice.length) {
+    console.warn(`⚠ AI Voice env vars not set yet, that tab will show "not configured" until you add: ${missingAiVoice.join(", ")}`);
   }
 });

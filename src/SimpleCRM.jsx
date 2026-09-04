@@ -47,9 +47,11 @@ import {
   Play,
   Mic,
   Square,
+  Bot,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
+import AIVoicePanel from "./components/AIVoicePanel";
 
 // ---------- Sample data ----------
 const initialContacts = [
@@ -325,6 +327,7 @@ const navItems = [
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "clients", label: "Clients", icon: Briefcase },
+  { key: "ai-voice", label: "AI Voice", icon: Bot },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -6183,6 +6186,8 @@ export default function SimpleCRM() {
             </div>
           </div>
         )}
+
+        {page === "ai-voice" && <AIVoicePanel />}
       </main>
 
       {/* Soundboard — record a new quick-play clip */}
