@@ -89,6 +89,8 @@ import {
   getPortalInviteByToken,
   claimPortalInvite,
   reapStuckAutomationRuns,
+  getAiVoiceSettings,
+  updateAiVoiceSettings,
 } from "./db.js";
 // Calendars — unlike every route above, these are mounted straight
 // from their /api/*.js handlers rather than reimplemented inline.
@@ -128,9 +130,11 @@ import {
 } from "./auth.js";
 import {
   missingAiVoiceEnv,
+  resolveAiVoiceEnv,
   transcribeAudio,
   getAiReply,
   synthesizeSpeech,
+  DEFAULT_SYSTEM_PROMPT,
   AI_VOICE_MAX_AUDIO_BYTES,
   AI_VOICE_MAX_HISTORY_TURNS,
 } from "./aiVoiceCore.js";
@@ -797,13 +801,17 @@ app.delete(
 // Turn-based AI voice agent behind the "AI Voice" tab — see
 // server/aiVoiceCore.js for the Deepgram → Claude → ElevenLabs
 // pipeline and api/ai-voice-turn.js for the equivalent Vercel route
-// this mirrors. Session/API-key only, no client-role restriction.
-app.get("/api/ai-voice-turn", (req, res) => {
-  res.json({ missing: missingAiVoiceEnv() });
+// this mirrors. Session/API-key only, no client-role restriction (the
+// keys themselves are managed separately below, gated more tightly).
+app.get("/api/ai-voice-turn", async (req, res) => {
+  const env = resolveAiVoiceEnv(await getAiVoiceSettings());
+  res.json({ missing: missingAiVoiceEnv(env) });
 });
 app.post("/api/ai-voice-turn", async (req, res) => {
   try {
-    const missing = missingAiVoiceEnv();
+    const settings = await getAiVoiceSettings();
+    const env = resolveAiVoiceEnv(settings);
+    const missing = missingAiVoiceEnv(env);
     if (missing.length) {
       return res.status(500).json({ error: `AI Voice is not configured. Missing: ${missing.join(", ")}` });
     }
@@ -814,14 +822,17 @@ app.post("/api/ai-voice-turn", async (req, res) => {
     }
 
     const audioBuffer = Buffer.from(audioData, "base64");
-    const transcript = await transcribeAudio(audioBuffer, mimeType);
+    const transcript = await transcribeAudio(audioBuffer, mimeType, env);
     if (!transcript.trim()) {
       return res.status(200).json({ transcript: "", reply: "", audioData: null });
     }
 
     const safeHistory = Array.isArray(history) ? history.slice(-AI_VOICE_MAX_HISTORY_TURNS) : [];
-    const reply = await getAiReply({ systemPrompt, history: safeHistory, userText: transcript });
-    const replyAudio = await synthesizeSpeech(reply);
+    const reply = await getAiReply(
+      { systemPrompt: systemPrompt || settings?.systemPrompt, history: safeHistory, userText: transcript },
+      env
+    );
+    const replyAudio = await synthesizeSpeech(reply, env);
 
     res.json({
       transcript,
@@ -834,6 +845,69 @@ app.post("/api/ai-voice-turn", async (req, res) => {
     res.status(500).json({ error: err.message || "AI Voice turn failed" });
   }
 });
+
+// The AI Voice tab's own Settings panel — lets the Anthropic/Deepgram/
+// ElevenLabs API keys (and default system prompt) be saved in-app
+// instead of a .env edit + redeploy. Mirrors api/ai-voice-settings.js.
+// Session-only and blocked for the client role, same reasoning as
+// requireKeyManager above — these are billing-relevant credentials.
+async function requireAiVoiceSettingsManager(req, res) {
+  const user = await getSessionUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Log in to manage AI Voice settings." });
+    return null;
+  }
+  if (user.role === "client") {
+    res.status(403).json({ error: "Not available on this account." });
+    return null;
+  }
+  return user;
+}
+function aiVoiceSettingsFallbackFlags() {
+  return {
+    anthropicApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
+    deepgramApiKey: Boolean(process.env.DEEPGRAM_API_KEY),
+    elevenlabsApiKey: Boolean(process.env.ELEVENLABS_API_KEY),
+    elevenlabsVoiceId: Boolean(process.env.ELEVENLABS_VOICE_ID),
+  };
+}
+app.get(
+  "/api/ai-voice-settings",
+  dbRoute(async (req, res) => {
+    const user = await requireAiVoiceSettingsManager(req, res);
+    if (!user) return;
+    const settings = (await getAiVoiceSettings()) || {
+      anthropicApiKey: "",
+      deepgramApiKey: "",
+      elevenlabsApiKey: "",
+      elevenlabsVoiceId: "",
+      systemPrompt: "",
+    };
+    res.json({
+      ...settings,
+      systemPrompt: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+      envFallback: aiVoiceSettingsFallbackFlags(),
+    });
+  })
+);
+app.patch(
+  "/api/ai-voice-settings",
+  dbRoute(async (req, res) => {
+    const user = await requireAiVoiceSettingsManager(req, res);
+    if (!user) return;
+    const body = req.body || {};
+    const patch = {};
+    for (const key of ["anthropicApiKey", "deepgramApiKey", "elevenlabsApiKey", "elevenlabsVoiceId", "systemPrompt"]) {
+      if (key in body) patch[key] = String(body[key] ?? "").trim();
+    }
+    const settings = await updateAiVoiceSettings(patch);
+    res.json({
+      ...settings,
+      systemPrompt: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+      envFallback: aiVoiceSettingsFallbackFlags(),
+    });
+  })
+);
 
 // ---------- SMS ----------
 

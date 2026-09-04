@@ -21,6 +21,22 @@ export function missingAiVoiceEnv(env = process.env) {
   return REQUIRED_ENV_KEYS.filter((key) => !env[key]);
 }
 
+// Every function below takes an `env`-shaped object rather than
+// reading process.env directly, so a key entered in the AI Voice tab's
+// own Settings panel (stored in the ai_voice_settings table — see
+// server/db.js) can take priority over the .env-configured one without
+// each provider call needing to know two different places to look.
+// Callers build that object once per request with this: a saved
+// setting wins, an unset/blank one falls through to the env var.
+export function resolveAiVoiceEnv(settings, env = process.env) {
+  return {
+    ANTHROPIC_API_KEY: settings?.anthropicApiKey || env.ANTHROPIC_API_KEY,
+    DEEPGRAM_API_KEY: settings?.deepgramApiKey || env.DEEPGRAM_API_KEY,
+    ELEVENLABS_API_KEY: settings?.elevenlabsApiKey || env.ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID: settings?.elevenlabsVoiceId || env.ELEVENLABS_VOICE_ID,
+  };
+}
+
 // A generic, neutral ElevenLabs voice ("Rachel") — good enough to
 // prove the pipeline out. Override per-deployment via
 // ELEVENLABS_VOICE_ID once you've picked/cloned a voice in the
@@ -75,13 +91,11 @@ export async function transcribeAudio(audioBuffer, mimeType, env = process.env) 
 }
 
 // ---------- LLM reply (Claude) ----------
-let anthropicClient = null;
+// Built fresh per call rather than cached at module scope — the key
+// can change at runtime now (edited in the Settings panel), and
+// constructing the SDK client is cheap (no connection setup).
 function getAnthropicClient(env = process.env) {
-  // Lazily constructed (and cached) rather than at module load, so a
-  // dev box without ANTHROPIC_API_KEY set yet can still start the
-  // server — missingAiVoiceEnv() is what actually gates the route.
-  if (!anthropicClient) anthropicClient = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  return anthropicClient;
+  return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 }
 
 // history: [{role: "user"|"assistant", content: "..."}], already

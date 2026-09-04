@@ -1,6 +1,8 @@
 import { requireAuth } from "../server/auth.js";
+import { ensureSchema, getAiVoiceSettings } from "../server/db.js";
 import {
   missingAiVoiceEnv,
+  resolveAiVoiceEnv,
   transcribeAudio,
   getAiReply,
   synthesizeSpeech,
@@ -14,21 +16,29 @@ import {
 // server/aiVoiceCore.js for the actual Deepgram → Claude → ElevenLabs
 // pipeline this and server/index.js's equivalent route both share.
 // Session/API-key only, same as every other authenticated tab — no
-// client-role restriction, unlike Powerdialler/Multi Line/Soundboard.
+// client-role restriction, unlike Powerdialler/Multi Line/Soundboard
+// (managing the API keys themselves is gated instead — see
+// api/ai-voice-settings.js).
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
 
-  if (req.method === "GET") {
-    // Lets the panel show "not configured, missing X" instead of
-    // only discovering that after a caller's already recorded
-    // something.
-    return res.status(200).json({ missing: missingAiVoiceEnv() });
-  }
+  try {
+    await ensureSchema();
+    // A key saved in the Settings panel wins over the matching env
+    // var — see aiVoiceCore.js's resolveAiVoiceEnv.
+    const settings = await getAiVoiceSettings();
+    const env = resolveAiVoiceEnv(settings);
 
-  if (req.method === "POST") {
-    try {
-      const missing = missingAiVoiceEnv();
+    if (req.method === "GET") {
+      // Lets the panel show "not configured, missing X" instead of
+      // only discovering that after a caller's already recorded
+      // something.
+      return res.status(200).json({ missing: missingAiVoiceEnv(env) });
+    }
+
+    if (req.method === "POST") {
+      const missing = missingAiVoiceEnv(env);
       if (missing.length) {
         return res.status(500).json({ error: `AI Voice is not configured. Missing: ${missing.join(", ")}` });
       }
@@ -39,7 +49,7 @@ export default async function handler(req, res) {
       }
 
       const audioBuffer = Buffer.from(audioData, "base64");
-      const transcript = await transcribeAudio(audioBuffer, mimeType);
+      const transcript = await transcribeAudio(audioBuffer, mimeType, env);
       if (!transcript.trim()) {
         // Silence, background noise, or a recording too short to
         // transcribe — not an error, just nothing to reply to.
@@ -47,8 +57,11 @@ export default async function handler(req, res) {
       }
 
       const safeHistory = Array.isArray(history) ? history.slice(-AI_VOICE_MAX_HISTORY_TURNS) : [];
-      const reply = await getAiReply({ systemPrompt, history: safeHistory, userText: transcript });
-      const replyAudio = await synthesizeSpeech(reply);
+      const reply = await getAiReply(
+        { systemPrompt: systemPrompt || settings?.systemPrompt, history: safeHistory, userText: transcript },
+        env
+      );
+      const replyAudio = await synthesizeSpeech(reply, env);
 
       return res.status(200).json({
         transcript,
@@ -56,12 +69,12 @@ export default async function handler(req, res) {
         audioData: replyAudio.toString("base64"),
         mimeType: "audio/mpeg",
       });
-    } catch (err) {
-      console.error("[api/ai-voice-turn]", err);
-      return res.status(500).json({ error: err.message || "AI Voice turn failed" });
     }
-  }
 
-  res.setHeader("Allow", "GET, POST");
-  return res.status(405).json({ error: "Method not allowed" });
+    res.setHeader("Allow", "GET, POST");
+    return res.status(405).json({ error: "Method not allowed" });
+  } catch (err) {
+    console.error("[api/ai-voice-turn]", err);
+    return res.status(500).json({ error: err.message || "AI Voice turn failed" });
+  }
 }

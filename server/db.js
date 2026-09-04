@@ -374,6 +374,26 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // ---------- AI Voice tab settings ----------
+    // Single global row (see getAiVoiceSettings/updateAiVoiceSettings
+    // below) — lets the AI Voice tab's own Settings panel hold the
+    // Anthropic/Deepgram/ElevenLabs API keys instead of requiring a
+    // .env edit + redeploy. Stored in the clear, same as
+    // api_keys.raw_key and calendars.google_access_token above —
+    // there's no separate secrets store in this app. Any of these
+    // that's left blank here still falls back to the matching env var
+    // — see server/aiVoiceCore.js's resolveAiVoiceEnv.
+    await query(`
+      CREATE TABLE IF NOT EXISTS ai_voice_settings (
+        id SERIAL PRIMARY KEY,
+        anthropic_api_key TEXT,
+        deepgram_api_key TEXT,
+        elevenlabs_api_key TEXT,
+        elevenlabs_voice_id TEXT,
+        system_prompt TEXT,
+        updated_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
     // ---------- Calendars (Google-connected booking calendars) ----------
     // One row per bookable calendar (a rep/team can have more than
     // one, e.g. "Sales call" vs "Onboarding call"). `availability` is
@@ -1704,6 +1724,62 @@ export async function createSoundboardClip({ label, audioData, mimeType, created
 
 export async function deleteSoundboardClip(id) {
   await query("DELETE FROM soundboard_clips WHERE id = $1", [id]);
+}
+
+// ---------- AI Voice tab settings ----------
+
+function aiVoiceSettingsFromRow(r) {
+  return {
+    anthropicApiKey: r.anthropic_api_key || "",
+    deepgramApiKey: r.deepgram_api_key || "",
+    elevenlabsApiKey: r.elevenlabs_api_key || "",
+    elevenlabsVoiceId: r.elevenlabs_voice_id || "",
+    systemPrompt: r.system_prompt || "",
+    updatedAt: r.updated_at,
+  };
+}
+
+export async function getAiVoiceSettings() {
+  const rows = await query("SELECT * FROM ai_voice_settings ORDER BY id DESC LIMIT 1");
+  return rows[0] ? aiVoiceSettingsFromRow(rows[0]) : null;
+}
+
+// Merges `patch` onto whatever's already saved (only the keys actually
+// present in it are touched — same "only one row ever" shape as
+// regenerateApiKey above, but a merge-then-replace instead of a bare
+// replace so, e.g., saving a new Deepgram key doesn't require
+// resending the Anthropic key too). Send an empty string for a field
+// to clear it back to falling through to its env var.
+export async function updateAiVoiceSettings(patch) {
+  const existing = (await getAiVoiceSettings()) || {
+    anthropicApiKey: "",
+    deepgramApiKey: "",
+    elevenlabsApiKey: "",
+    elevenlabsVoiceId: "",
+    systemPrompt: "",
+  };
+  const merged = {
+    anthropicApiKey: "anthropicApiKey" in patch ? patch.anthropicApiKey : existing.anthropicApiKey,
+    deepgramApiKey: "deepgramApiKey" in patch ? patch.deepgramApiKey : existing.deepgramApiKey,
+    elevenlabsApiKey: "elevenlabsApiKey" in patch ? patch.elevenlabsApiKey : existing.elevenlabsApiKey,
+    elevenlabsVoiceId: "elevenlabsVoiceId" in patch ? patch.elevenlabsVoiceId : existing.elevenlabsVoiceId,
+    systemPrompt: "systemPrompt" in patch ? patch.systemPrompt : existing.systemPrompt,
+  };
+  await query("DELETE FROM ai_voice_settings");
+  const rows = await query(
+    `INSERT INTO ai_voice_settings
+       (anthropic_api_key, deepgram_api_key, elevenlabs_api_key, elevenlabs_voice_id, system_prompt, updated_at)
+     VALUES ($1,$2,$3,$4,$5, now())
+     RETURNING *`,
+    [
+      merged.anthropicApiKey || null,
+      merged.deepgramApiKey || null,
+      merged.elevenlabsApiKey || null,
+      merged.elevenlabsVoiceId || null,
+      merged.systemPrompt || null,
+    ]
+  );
+  return aiVoiceSettingsFromRow(rows[0]);
 }
 
 // ---------- Calendars ----------
