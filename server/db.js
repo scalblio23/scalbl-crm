@@ -125,13 +125,34 @@ export async function ensureSchema() {
     // slots are reserved for roles with the SUPERUSER attribute" —
     // seen in production on the Multi Line dialler, whose 400ms status
     // poll keeps its own function's containers churning fastest).
-    // Skipping straight past the whole chain once its last table
-    // (tag_folders) already exists turns the overwhelming majority of
-    // real invocations — schema already migrated — into a single
-    // lightweight check instead. Whoever adds the NEXT table/column
-    // below must also update this check, or an already-migrated
-    // database will never pick up that migration.
-    const [{ exists }] = await query(`SELECT to_regclass('public.tag_folders') IS NOT NULL AS exists`);
+    // Skipping straight past the whole chain once it's already been
+    // run turns the overwhelming majority of real invocations —
+    // schema already migrated — into a single lightweight check
+    // instead. This used to check only for tag_folders (the table
+    // that was last in this chain when the fast path was written) —
+    // that's exactly what broke production: video_conference_link and
+    // ai_voice_settings were both added *after* tag_folders had
+    // already shipped to prod (via a branch merge that put them
+    // earlier in this file than tag_folders, not later — file order
+    // here reflects how branches got merged, not deployment history),
+    // so a database that already had tag_folders skipped the whole
+    // chain and never picked up either one, surfacing later as
+    // "column video_conference_link does not exist" on an unrelated
+    // action (picking a Google sub-calendar). A single table's
+    // existence can NEVER safely stand in for "the whole chain has
+    // run" in this codebase, because merges routinely land new
+    // migrations ahead of older ones in file order. Check the actual
+    // newest additions instead — whoever adds the NEXT table/column
+    // below must add its own check here too (AND it in), or the same
+    // class of bug repeats.
+    const [{ exists }] = await query(`
+      SELECT to_regclass('public.tag_folders') IS NOT NULL
+        AND to_regclass('public.ai_voice_settings') IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'calendars' AND column_name = 'video_conference_link'
+        ) AS exists
+    `);
     if (!exists) {
     await query(`
       CREATE TABLE IF NOT EXISTS clients (
