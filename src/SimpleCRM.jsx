@@ -2887,14 +2887,21 @@ export default function SimpleCRM() {
   const [reportsFrom, setReportsFrom] = useState(() => isoDaysAgo(30));
   const [reportsTo, setReportsTo] = useState(() => isoToday());
   const [reportsUserFilter, setReportsUserFilter] = useState("All");
+  const [reportsTagFilter, setReportsTagFilter] = useState("All");
 
   const reportsUserNames = [...new Set(callLog.map((e) => e.userName || "Unknown"))].sort();
+  // A client role only ever has their own allowedTags to narrow down
+  // to (their call log is already scoped server-side to just those);
+  // staff can filter by any tag currently in use on a Contact, same
+  // list Contacts/Bulk SMS/Dial lists use.
+  const reportsTagOptions = authUser?.role === "client" ? authUser?.allowedTags || [] : contactTagNames;
   const reportsCallLog = callLog.filter((e) => {
     if (!e.calledAt) return false;
     const d = String(e.calledAt).slice(0, 10);
     if (reportsFrom && d < reportsFrom) return false;
     if (reportsTo && d > reportsTo) return false;
     if (reportsUserFilter !== "All" && (e.userName || "Unknown") !== reportsUserFilter) return false;
+    if (reportsTagFilter !== "All" && (e.tag || "Untagged") !== reportsTagFilter) return false;
     return true;
   });
   const reportsTotalCalls = reportsCallLog.length;
@@ -6442,6 +6449,20 @@ export default function SimpleCRM() {
                   className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
                 />
                 <select
+                  value={reportsTagFilter}
+                  onChange={(e) => setReportsTagFilter(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                >
+                  <option value="All">All tags</option>
+                  {reportsTagOptions.map((tag) => (
+                    <option key={tag} value={tag}>
+                      {tag}
+                    </option>
+                  ))}
+                  {/* Matches reportsByTag's own "Untagged" fallback below — lets you isolate calls with no client tag at all. */}
+                  <option value="Untagged">Untagged</option>
+                </select>
+                <select
                   value={reportsUserFilter}
                   onChange={(e) => setReportsUserFilter(e.target.value)}
                   className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
@@ -6458,6 +6479,7 @@ export default function SimpleCRM() {
                     setReportsFrom(isoDaysAgo(30));
                     setReportsTo(isoToday());
                     setReportsUserFilter("All");
+                    setReportsTagFilter("All");
                   }}
                   className="text-sm text-gray-400 hover:text-gray-700 px-2"
                 >
