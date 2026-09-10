@@ -111,6 +111,7 @@ import calendarBookHandler from "../api/calendar-book.js";
 import calendarCancelHandler from "../api/calendar-cancel.js";
 import automationsHandler from "../api/automations.js";
 import tagFoldersHandler from "../api/tag-folders.js";
+import tagBookingLinksHandler from "../api/tag-booking-links.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
 import {
@@ -1374,6 +1375,7 @@ app.all("/api/calendar-book", calendarBookHandler);
 app.all("/api/calendar-cancel", calendarCancelHandler);
 app.all("/api/automations", automationsHandler);
 app.all("/api/tag-folders", tagFoldersHandler);
+app.all("/api/tag-booking-links", tagBookingLinksHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
 app.listen(PORT, () => {

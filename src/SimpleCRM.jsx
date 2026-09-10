@@ -1289,6 +1289,26 @@ export default function SimpleCRM() {
     if (page === "contacts" && !tagFoldersLoaded) loadTagFolders();
   }, [page, tagFoldersLoaded]);
 
+  // Per-tag booking links — shown on the dialler hotseat and wrap-up
+  // screen for whichever tag the live lead carries, configured in
+  // Settings → "Booking links by tag". A tiny map, so it's loaded once
+  // on login rather than lazily, to be ready before the first call.
+  const [tagBookingLinks, setTagBookingLinks] = useState({}); // { [tagName]: url }
+  useEffect(() => {
+    if (!authUser) return;
+    api
+      .get("/api/tag-booking-links")
+      .then(setTagBookingLinks)
+      .catch(() => {}); // hotseat just shows no link
+  }, [authUser]);
+  const saveTagBookingLink = async (tagName, bookingLink) => {
+    try {
+      setTagBookingLinks(await api.patch("/api/tag-booking-links", { tagName, bookingLink }));
+    } catch (err) {
+      setDbError(err.message || "Could not save the booking link.");
+    }
+  };
+
   // Which folders are expanded in the sidebar — per-browser display
   // preference, same as hiddenContactColumnKeys above, not something
   // worth syncing across the team.
@@ -5056,6 +5076,28 @@ export default function SimpleCRM() {
                       <div className="text-sm text-gray-600 mt-1">
                         {wrapUp.lead.phone} · {wrapUp.lead.client}
                       </div>
+                      {tagBookingLinks[wrapUp.lead.tag] && (
+                        <div className="flex items-center gap-2 mt-2 text-sm">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-gray-400 shrink-0">
+                            Booking link
+                          </span>
+                          <a
+                            href={tagBookingLinks[wrapUp.lead.tag]}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:underline truncate"
+                          >
+                            {tagBookingLinks[wrapUp.lead.tag]}
+                          </a>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(tagBookingLinks[wrapUp.lead.tag])}
+                            title="Copy link"
+                            className="text-gray-400 hover:text-gray-700 shrink-0"
+                          >
+                            <Copy size={13} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <div
@@ -5230,6 +5272,28 @@ export default function SimpleCRM() {
                       {activeLead.notes && (
                         <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2 text-sm text-gray-600">
                           {activeLead.notes}
+                        </div>
+                      )}
+                      {tagBookingLinks[activeLead.tag] && (
+                        <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Booking link</div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <a
+                              href={tagBookingLinks[activeLead.tag]}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sm text-blue-600 hover:underline truncate"
+                            >
+                              {tagBookingLinks[activeLead.tag]}
+                            </a>
+                            <button
+                              onClick={() => navigator.clipboard.writeText(tagBookingLinks[activeLead.tag])}
+                              title="Copy link"
+                              className="text-gray-400 hover:text-gray-700 shrink-0"
+                            >
+                              <Copy size={13} />
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -5875,6 +5939,28 @@ export default function SimpleCRM() {
                       <div className="text-sm text-gray-600 mt-1">
                         {wrapUp.lead.phone} · {wrapUp.lead.client}
                       </div>
+                      {tagBookingLinks[wrapUp.lead.tag] && (
+                        <div className="flex items-center gap-2 mt-2 text-sm">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-gray-400 shrink-0">
+                            Booking link
+                          </span>
+                          <a
+                            href={tagBookingLinks[wrapUp.lead.tag]}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:underline truncate"
+                          >
+                            {tagBookingLinks[wrapUp.lead.tag]}
+                          </a>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(tagBookingLinks[wrapUp.lead.tag])}
+                            title="Copy link"
+                            className="text-gray-400 hover:text-gray-700 shrink-0"
+                          >
+                            <Copy size={13} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <div
@@ -6049,6 +6135,28 @@ export default function SimpleCRM() {
                       {activeLead.notes && (
                         <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2 text-sm text-gray-600">
                           {activeLead.notes}
+                        </div>
+                      )}
+                      {tagBookingLinks[activeLead.tag] && (
+                        <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Booking link</div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <a
+                              href={tagBookingLinks[activeLead.tag]}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sm text-blue-600 hover:underline truncate"
+                            >
+                              {tagBookingLinks[activeLead.tag]}
+                            </a>
+                            <button
+                              onClick={() => navigator.clipboard.writeText(tagBookingLinks[activeLead.tag])}
+                              title="Copy link"
+                              className="text-gray-400 hover:text-gray-700 shrink-0"
+                            >
+                              <Copy size={13} />
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -8449,6 +8557,41 @@ export default function SimpleCRM() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+
+            <div className="px-8 pb-10 max-w-3xl">
+              <div className="border-t border-gray-100 pt-8">
+                <h2 className="text-base font-bold">Booking links by tag</h2>
+                <p className="text-sm text-gray-500 mt-1 max-w-lg">
+                  Attach a booking link to a tag and it shows on the dialler's live-call card and wrap-up screen
+                  for every lead carrying that tag, ready to read out or copy. Saves when you click away; leave
+                  blank for none.
+                </p>
+                {contactTagNames.length === 0 ? (
+                  <div className="mt-4 text-sm text-gray-400">No tags yet — tags come from your contacts.</div>
+                ) : (
+                  <div className="mt-4 space-y-2">
+                    {contactTagNames.map((tag) => (
+                      <div key={tag} className="flex items-center gap-3">
+                        <span className={`text-xs px-2.5 py-1 rounded-full border shrink-0 ${tagColorClasses(tag)}`}>
+                          {tag}
+                        </span>
+                        <input
+                          key={`${tag}:${tagBookingLinks[tag] || ""}`}
+                          type="url"
+                          defaultValue={tagBookingLinks[tag] || ""}
+                          placeholder="https://…"
+                          onBlur={(e) => {
+                            const value = e.target.value.trim();
+                            if (value !== (tagBookingLinks[tag] || "")) saveTagBookingLink(tag, value);
+                          }}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-gray-400"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 

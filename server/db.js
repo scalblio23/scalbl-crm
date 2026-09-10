@@ -148,6 +148,7 @@ export async function ensureSchema() {
     const [{ exists }] = await query(`
       SELECT to_regclass('public.tag_folders') IS NOT NULL
         AND to_regclass('public.ai_voice_settings') IS NOT NULL
+        AND to_regclass('public.tag_booking_links') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'calendars' AND column_name = 'video_conference_link'
@@ -556,6 +557,17 @@ export async function ensureSchema() {
         tag_names JSONB NOT NULL DEFAULT '[]',
         position INTEGER DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // A booking link per tag — shown on the dialler hotseat/wrap-up
+    // for whichever tag the live lead carries (see Settings → "Booking
+    // links by tag"). Keyed by the free-text tag string itself, same
+    // as tag_folders.tag_names, since tags have no table of their own.
+    await query(`
+      CREATE TABLE IF NOT EXISTS tag_booking_links (
+        tag_name TEXT PRIMARY KEY,
+        booking_link TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ DEFAULT now()
       )
     `);
     }
@@ -2293,4 +2305,28 @@ export async function updateTagFolder(id, { name, tagNames }) {
 
 export async function deleteTagFolder(id) {
   await query("DELETE FROM tag_folders WHERE id = $1", [id]);
+}
+
+// ---------- Tag booking links ----------
+
+// Returns { [tagName]: url } — a tiny map, so the whole thing is
+// fetched at once and re-returned after every save.
+export async function getTagBookingLinks() {
+  const rows = await query("SELECT tag_name, booking_link FROM tag_booking_links WHERE booking_link <> ''");
+  return Object.fromEntries(rows.map((r) => [r.tag_name, r.booking_link]));
+}
+
+// An empty link clears the tag's row rather than storing a blank.
+export async function setTagBookingLink(tagName, bookingLink) {
+  const link = String(bookingLink || "").trim();
+  if (!link) {
+    await query("DELETE FROM tag_booking_links WHERE tag_name = $1", [tagName]);
+  } else {
+    await query(
+      `INSERT INTO tag_booking_links (tag_name, booking_link, updated_at) VALUES ($1, $2, now())
+       ON CONFLICT (tag_name) DO UPDATE SET booking_link = EXCLUDED.booking_link, updated_at = now()`,
+      [tagName, link]
+    );
+  }
+  return getTagBookingLinks();
 }
