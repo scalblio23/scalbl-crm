@@ -753,6 +753,7 @@ export default function SimpleCRM() {
   const FIXED_SORT_KEYS = {
     __leadDate: (c) => parseAuDate(c.leadDate),
     __name: (c) => c.name?.toLowerCase() || null,
+    __email: (c) => c.email?.toLowerCase() || null,
     __phone: (c) => c.phone?.toLowerCase() || null,
     __client: (c) => c.client?.toLowerCase() || null,
     __tag: (c) => c.tag?.toLowerCase() || null,
@@ -3368,6 +3369,14 @@ export default function SimpleCRM() {
                     </th>
                     <th className="py-2 font-medium whitespace-nowrap">
                       <button
+                        onClick={() => toggleContactSort("__email")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Email {sortIndicator("__email")}
+                      </button>
+                    </th>
+                    <th className="py-2 font-medium whitespace-nowrap">
+                      <button
                         onClick={() => toggleContactSort("__phone")}
                         className="flex items-center gap-1 hover:text-gray-700"
                       >
@@ -3457,6 +3466,7 @@ export default function SimpleCRM() {
                       </td>
                       <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{c.leadDate || "—"}</td>
                       <td className="px-5 py-2.5 font-medium whitespace-nowrap">{c.name}</td>
+                      <td className="py-2.5 pr-5 text-gray-600 whitespace-nowrap">{c.email || "—"}</td>
                       <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
                       <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.client}</td>
                       <td className="py-2.5 whitespace-nowrap">
@@ -3492,7 +3502,7 @@ export default function SimpleCRM() {
                   {filteredContacts.length === 0 && (
                     <tr>
                       <td
-                        colSpan={visibleContactColumns.length + 10}
+                        colSpan={visibleContactColumns.length + 11}
                         className="px-8 py-10 text-center text-sm text-gray-400"
                       >
                         No contacts
