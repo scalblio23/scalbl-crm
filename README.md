@@ -281,3 +281,78 @@ redeploy — the next schema check seeds the row (`password_hash` starts
   `api/auth-me.js` — the four auth endpoints; everything else under `/api`
   requires a valid session cookie except the Twilio webhooks
   (`/api/voice`, `/api/status`, `/api/sms-inbound`) and `/api/health`.
+
+## Calendars (Google Calendar + booking widget)
+
+Sidebar → **Calendars** → **Add Calendar** → name it → lands in that
+calendar's settings, with five sections: **Integrate** (connect a Google
+account), **Timezone**, **Availability** (weekly hours), **Booking rules**
+(call length, buffer, minimum notice, booking window, max per day), and
+**Share & embed** (the public booking link, an iframe embed snippet, and
+the list of bookings on that calendar).
+
+### 1. Connect Google
+
+"Integrate with Google" in Calendar settings is a normal "Sign in with
+Google" button — the only setup required once, ever, is registering the
+app itself with Google (every app that offers Google sign-in needs this):
+
+1. [Google Cloud Console](https://console.cloud.google.com) → create/select
+   a project → **APIs & Services → Library** → enable **Google Calendar
+   API**.
+2. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   → Application type **Web application**.
+3. Add an **Authorized redirect URI**: `{your domain}/api/calendar-google-callback`
+   (add it once for your deployed domain, and once more for local dev if
+   you're using an ngrok/PUBLIC_URL tunnel — see the Calling section above).
+4. While the OAuth consent screen is unverified, add yourself (and anyone
+   else connecting a calendar) as a **Test user** under **OAuth consent
+   screen**, or publish it.
+5. Put the resulting Client ID/Secret in `GOOGLE_CLIENT_ID` /
+   `GOOGLE_CLIENT_SECRET` (see `.env.example`) — locally and in Vercel.
+
+Once connected, a calendar's bookings are created as real Google Calendar
+events (with the booker as an attendee), and existing events on that
+Google Calendar automatically block off time in the booking widget.
+
+### 2. Set up SendGrid (confirmation emails)
+
+Create an API key at [app.sendgrid.com](https://app.sendgrid.com) → Settings
+→ API Keys (Mail Send access is enough), verify a sender/domain under
+Settings → Sender Authentication, then set `SENDGRID_API_KEY`,
+`SENDGRID_FROM_EMAIL`, and `SENDGRID_FROM_NAME`. Every booking sends a
+confirmation email (with a `.ics` calendar file attached) to the booker and
+a notification email to the calendar's owner.
+
+### 3. SMS confirmations
+
+Uses the same Twilio setup as Calling/SMS above — no separate config. A
+booking with a phone number gets a confirmation text via `sendSms()`
+(`server/twilioCore.js`); a missing phone or unconfigured Twilio just skips
+the text rather than failing the booking.
+
+### How it fits together
+
+- `server/db.js` — `calendars` and `calendar_bookings` tables (a partial
+  unique index prevents two people ever double-booking the same slot).
+- `server/googleCalendar.js` — the OAuth flow, token refresh, and
+  freebusy/create/delete event calls, all plain `fetch` (no `googleapis`
+  dependency).
+- `server/calendarAvailability.js` — turns a calendar's weekly availability
+  + booking rules + existing busy time into actual bookable UTC slots,
+  using the runtime's built-in `Intl` for timezone conversion (no
+  date/timezone library).
+- `server/email.js` — SendGrid + a minimal `.ics` builder.
+- `api/calendars.js`, `api/calendar-google-connect.js`,
+  `api/calendar-google-callback.js`, `api/calendar-google-disconnect.js`,
+  `api/calendar-bookings.js` — the authenticated, CRM-side endpoints.
+- `api/calendar-public.js`, `api/calendar-slots.js`, `api/calendar-book.js`,
+  `api/calendar-cancel.js` — the public endpoints the booking widget uses;
+  no login required.
+- `src/BookingWidget.jsx` — the standalone public page at `/book/<slug>`
+  (see the routing check in `src/main.jsx` and the SPA rewrite in
+  `vercel.json`).
+- `src/components/Dropdown.jsx` — a fully custom-rendered dropdown used
+  throughout the Calendars UI in place of native `<select>`, so the open
+  options list is styled like the rest of the app instead of the browser's
+  own popup.

@@ -15,6 +15,7 @@ import {
   generateMultilineConferenceName,
   placeConferenceLeg,
   endOrCancelCall,
+  unmuteConferenceParticipant,
   publicBaseUrl,
   MULTILINE_RING_SECONDS,
 } from "./twilioCore.js";
@@ -65,7 +66,9 @@ import {
   findApiKeyByHash,
   touchApiKeyLastUsed,
   createMultilineBatch,
+  getMultilineBatchById,
   addMultilineBatchCall,
+  getUnplacedMultilineBatchCalls,
   setMultilineBatchCallSid,
   setMultilineBatchCallFailed,
   updateMultilineBatchCallStatusByRowId,
@@ -80,7 +83,36 @@ import {
   inviteUser,
   updateUser,
   deleteUserById,
+  getPortalInvites,
+  createPortalInvite,
+  revokePortalInvite,
+  getPortalInviteByToken,
+  claimPortalInvite,
+  reapStuckAutomationRuns,
+  getAiVoiceSettings,
+  updateAiVoiceSettings,
 } from "./db.js";
+// Calendars — unlike every route above, these are mounted straight
+// from their /api/*.js handlers rather than reimplemented inline.
+// Each handler is a plain (req, res) function with no Vercel-specific
+// behavior (query/body/status/json all work identically under
+// Express), and the feature's actual logic (Google OAuth, freebusy,
+// SendGrid, Twilio SMS) is substantial enough that keeping one copy
+// of it is worth the small deviation from this file's usual pattern.
+import calendarsHandler from "../api/calendars.js";
+import calendarGoogleConnectHandler from "../api/calendar-google-connect.js";
+import calendarGoogleCallbackHandler from "../api/calendar-google-callback.js";
+import calendarGoogleDisconnectHandler from "../api/calendar-google-disconnect.js";
+import calendarGoogleCalendarsHandler from "../api/calendar-google-calendars.js";
+import calendarBookingsHandler from "../api/calendar-bookings.js";
+import calendarPublicHandler from "../api/calendar-public.js";
+import calendarSlotsHandler from "../api/calendar-slots.js";
+import calendarBookHandler from "../api/calendar-book.js";
+import calendarCancelHandler from "../api/calendar-cancel.js";
+import automationsHandler from "../api/automations.js";
+import tagFoldersHandler from "../api/tag-folders.js";
+import automationsProcessRunsHandler from "../api/automations-process-runs.js";
+import { processDueAutomationRuns } from "./automations.js";
 import {
   getSessionUser,
   requireAuth,
@@ -96,6 +128,16 @@ import {
   forbidClientRole,
   ROLES,
 } from "./auth.js";
+import {
+  missingAiVoiceEnv,
+  resolveAiVoiceEnv,
+  transcribeAudio,
+  getAiReply,
+  synthesizeSpeech,
+  DEFAULT_SYSTEM_PROMPT,
+  AI_VOICE_MAX_AUDIO_BYTES,
+  AI_VOICE_MAX_HISTORY_TURNS,
+} from "./aiVoiceCore.js";
 
 dotenv.config();
 
@@ -122,6 +164,9 @@ const PUBLIC_PATHS = new Set([
   "/api/auth-set-password",
   "/api/auth-logout",
   "/api/auth-me",
+  // A client's self-signup link — see api/portal-invite-claim.js. No
+  // session exists yet at the point this is hit (that's the point).
+  "/api/portal-invite-claim",
   // Auth here is the CRM's single API key, passed in the URL itself
   // (?token=) and checked inside the route below — see
   // api/lead-webhook.js.
@@ -132,6 +177,18 @@ const PUBLIC_PATHS = new Set([
   // /api/sms-inbound above.
   "/api/voice-multiline-leg",
   "/api/multiline-status",
+  // Calendars — the public booking-widget side (see api/calendar-*.js
+  // for how each authenticates itself instead: signed OAuth state,
+  // a calendar's own slug, or a booking's cancel token).
+  "/api/calendar-google-callback",
+  "/api/calendar-public",
+  "/api/calendar-slots",
+  "/api/calendar-book",
+  "/api/calendar-cancel",
+  // Cron-invoked, not user-invoked — authenticated by its own
+  // CRON_SECRET bearer-token check instead of a session (see
+  // api/automations-process-runs.js).
+  "/api/automations-process-runs",
 ]);
 
 app.use(async (req, res, next) => {
@@ -158,9 +215,17 @@ app.use(
     "/api/dial-lists",
     "/api/sms-bulk-send",
     "/api/multiline-start",
+    "/api/multiline-place-legs",
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
+    "/api/portal-invites",
+    "/api/calendars",
+    "/api/calendar-google-connect",
+    "/api/calendar-google-disconnect",
+    "/api/calendar-google-calendars",
+    "/api/calendar-bookings",
+    "/api/automations",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -168,6 +233,11 @@ app.use(
   }
 );
 app.use("/api/contact-columns", (req, res, next) => {
+  if (req.method === "GET") return next();
+  if (forbidClientRole(req.user, res)) return;
+  next();
+});
+app.use("/api/tag-folders", (req, res, next) => {
   if (req.method === "GET") return next();
   if (forbidClientRole(req.user, res)) return;
   next();
@@ -374,6 +444,66 @@ app.delete(
   })
 );
 
+// ---------- Portal invites (client self-signup links) ----------
+// Mirrors api/portal-invites.js + api/portal-invite-claim.js. Reads
+// are blocked for the client role by the forbidClientRole middleware
+// above; POST/DELETE are further gated to owner/super_admin here.
+app.get("/api/portal-invites", dbRoute(async (req, res) => res.json(await getPortalInvites())));
+app.post(
+  "/api/portal-invites",
+  dbRoute(async (req, res) => {
+    if (!canManageUsers(req.user.role)) {
+      return res.status(403).json({ error: "Only an owner or super admin can create invite links." });
+    }
+    const tags = Array.isArray(req.body?.tags) ? req.body.tags.filter(Boolean) : [];
+    if (!tags.length) return res.status(400).json({ error: "Pick at least one tag for this invite." });
+    res.status(201).json(await createPortalInvite({ tags, createdBy: req.user.id }));
+  })
+);
+app.delete(
+  "/api/portal-invites",
+  dbRoute(async (req, res) => {
+    if (!canManageUsers(req.user.role)) {
+      return res.status(403).json({ error: "Only an owner or super admin can revoke invite links." });
+    }
+    const id = Number(req.query.id);
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    await revokePortalInvite(id);
+    res.status(204).end();
+  })
+);
+
+app.get(
+  "/api/portal-invite-claim",
+  dbRoute(async (req, res) => {
+    const token = String(req.query?.token || "").trim();
+    if (!token) return res.status(400).json({ error: "Missing token" });
+    const invite = await getPortalInviteByToken(token);
+    if (!invite) return res.status(404).json({ error: "This invite link is invalid or has been revoked." });
+    res.json({ tags: invite.tags || [] });
+  })
+);
+app.post(
+  "/api/portal-invite-claim",
+  dbRoute(async (req, res) => {
+    const { token, name, email, password } = req.body || {};
+    if (!token || !name || !email || !password) {
+      return res.status(400).json({ error: "Missing name, email or password" });
+    }
+    if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+    const hash = await hashPassword(password);
+    const result = await claimPortalInvite({ token, name: String(name).trim(), email, passwordHash: hash });
+    if (result.error === "invalid") {
+      return res.status(404).json({ error: "This invite link is invalid or has been revoked." });
+    }
+    if (result.error === "exists") {
+      return res.status(409).json({ error: "An account with that email already exists — log in instead." });
+    }
+    res.setHeader("Set-Cookie", createSessionCookie(result.user));
+    res.json({ user: result.user });
+  })
+);
+
 // Everything the app needs on first load, in one request — see
 // api/bootstrap.js for why this matters more than it might look.
 app.get(
@@ -471,6 +601,15 @@ app.post("/api/status", (req, res) => {
 // mirrors route-for-route.
 const MULTILINE_MAX_LINES = 6;
 
+// Reserves a batch and a row per lead (an id to embed in each call's
+// own TwiML/status-callback URLs later) but does NOT dial anyone yet
+// — that's /api/multiline-place-legs below, called once the frontend's
+// own conference leg has actually joined and started the conference.
+// See that route's comment for why the split exists: dialling a lead
+// before the rep's own leg has joined leaves that lead's call sitting
+// in the conference on hold — unable to hear anything — until the rep
+// catches up, which a fast-answering lead can easily notice as "they
+// can't hear me".
 app.post(
   "/api/multiline-start",
   dbRoute(async (req, res) => {
@@ -478,8 +617,7 @@ app.post(
     if (missing.length) {
       return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
     }
-    const base = publicBaseUrl();
-    if (!base) {
+    if (!publicBaseUrl()) {
       return res.status(500).json({
         error:
           "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
@@ -500,29 +638,55 @@ app.post(
 
     const candidates = await mapWithConcurrency(withPhone, withPhone.length, async (contact, i) => {
       const fromNumber = pool[i % pool.length];
-      const row = await addMultilineBatchCall({
-        batchId: batch.id,
-        leadId: contact.id,
-        name: contact.name,
-        phone: contact.phone,
-        fromNumber,
-      });
-      try {
-        const call = await placeConferenceLeg({
-          to: contact.phone,
-          from: fromNumber,
-          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(conferenceName)}`,
-          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batch.id}&leadId=${contact.id}`,
-        });
-        await setMultilineBatchCallSid(row.id, call.sid);
-      } catch (err) {
-        console.error("[multiline-start] leg failed", contact.id, err.message);
-        await setMultilineBatchCallFailed(row.id, err.message);
-      }
+      await addMultilineBatchCall({ batchId: batch.id, leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber });
       return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
     });
 
     res.status(201).json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
+  })
+);
+
+// Actually dials every lead reserved for a batch, via the REST API,
+// into the conference the rep's own browser leg already joined. See
+// the comment above /api/multiline-start for why this is a separate
+// step. Calling this twice for the same batch only dials whatever's
+// still unplaced — cheap to guard, shouldn't happen.
+app.post(
+  "/api/multiline-place-legs",
+  dbRoute(async (req, res) => {
+    const missing = missingTwilioEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const base = publicBaseUrl();
+    if (!base) {
+      return res.status(500).json({
+        error:
+          "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
+      });
+    }
+    const batchId = Number(req.body?.batchId);
+    if (!batchId) return res.status(400).json({ error: "Missing batchId" });
+    const batch = await getMultilineBatchById(batchId);
+    if (!batch) return res.status(404).json({ error: "Batch not found" });
+
+    const rows = await getUnplacedMultilineBatchCalls(batchId);
+    await mapWithConcurrency(rows, rows.length, async (row) => {
+      try {
+        const call = await placeConferenceLeg({
+          to: row.phone,
+          from: row.from_number,
+          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(batch.conference_name)}`,
+          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batchId}&leadId=${row.lead_id}`,
+        });
+        await setMultilineBatchCallSid(row.id, call.sid);
+      } catch (err) {
+        console.error("[multiline-place-legs] leg failed", row.lead_id, err.message);
+        await setMultilineBatchCallFailed(row.id, err.message);
+      }
+    });
+
+    res.status(200).json({ ok: true, placed: rows.length });
   })
 );
 
@@ -552,8 +716,21 @@ app.post("/api/multiline-status", async (req, res) => {
     if (callStatus === "in-progress") {
       const won = await claimMultilineWinner({ batchId, callSid, leadId });
       if (won) {
+        // See api/multiline-status.js for the full reasoning — genuinely
+        // awaited (not fire-and-forget) on purpose.
         const others = await getOtherPendingMultilineBatchCalls(batchId, callSid);
-        Promise.all(others.filter((o) => o.call_sid).map((o) => endOrCancelCall(o.call_sid))).catch(() => {});
+        await Promise.all([
+          unmuteConferenceParticipant({ conferenceName: won.conference_name, callSid }).catch((err) =>
+            console.error("[db] /api/multiline-status failed to unmute the winner", err)
+          ),
+          ...others
+            .filter((o) => o.call_sid)
+            .map((o) =>
+              endOrCancelCall(o.call_sid).catch((err) =>
+                console.error("[db] /api/multiline-status failed to hang up a losing leg", err)
+              )
+            ),
+        ]);
       } else {
         await endOrCancelCall(callSid);
       }
@@ -617,6 +794,118 @@ app.delete(
     if (!id) return res.status(400).json({ error: "Missing id" });
     await deleteSoundboardClip(id);
     res.status(204).end();
+  })
+);
+
+// ---------- AI Voice ----------
+// Turn-based AI voice agent behind the "AI Voice" tab — see
+// server/aiVoiceCore.js for the Deepgram → Claude → ElevenLabs
+// pipeline and api/ai-voice-turn.js for the equivalent Vercel route
+// this mirrors. Session/API-key only, no client-role restriction (the
+// keys themselves are managed separately below, gated more tightly).
+app.get("/api/ai-voice-turn", async (req, res) => {
+  const env = resolveAiVoiceEnv(await getAiVoiceSettings());
+  res.json({ missing: missingAiVoiceEnv(env) });
+});
+app.post("/api/ai-voice-turn", async (req, res) => {
+  try {
+    const settings = await getAiVoiceSettings();
+    const env = resolveAiVoiceEnv(settings);
+    const missing = missingAiVoiceEnv(env);
+    if (missing.length) {
+      return res.status(500).json({ error: `AI Voice is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const { audioData, mimeType, history, systemPrompt } = req.body || {};
+    if (!audioData || !mimeType) return res.status(400).json({ error: "Missing audio data" });
+    if (audioData.length > AI_VOICE_MAX_AUDIO_BYTES * 1.4) {
+      return res.status(400).json({ error: "That recording is too long — keep turns under ~30s." });
+    }
+
+    const audioBuffer = Buffer.from(audioData, "base64");
+    const transcript = await transcribeAudio(audioBuffer, mimeType, env);
+    if (!transcript.trim()) {
+      return res.status(200).json({ transcript: "", reply: "", audioData: null });
+    }
+
+    const safeHistory = Array.isArray(history) ? history.slice(-AI_VOICE_MAX_HISTORY_TURNS) : [];
+    const reply = await getAiReply(
+      { systemPrompt: systemPrompt || settings?.systemPrompt, history: safeHistory, userText: transcript },
+      env
+    );
+    const replyAudio = await synthesizeSpeech(reply, env);
+
+    res.json({
+      transcript,
+      reply,
+      audioData: replyAudio.toString("base64"),
+      mimeType: "audio/mpeg",
+    });
+  } catch (err) {
+    console.error("[ai-voice-turn]", err);
+    res.status(500).json({ error: err.message || "AI Voice turn failed" });
+  }
+});
+
+// The AI Voice tab's own Settings panel — lets the Anthropic/Deepgram/
+// ElevenLabs API keys (and default system prompt) be saved in-app
+// instead of a .env edit + redeploy. Mirrors api/ai-voice-settings.js.
+// Session-only and blocked for the client role, same reasoning as
+// requireKeyManager above — these are billing-relevant credentials.
+async function requireAiVoiceSettingsManager(req, res) {
+  const user = await getSessionUser(req);
+  if (!user) {
+    res.status(401).json({ error: "Log in to manage AI Voice settings." });
+    return null;
+  }
+  if (user.role === "client") {
+    res.status(403).json({ error: "Not available on this account." });
+    return null;
+  }
+  return user;
+}
+function aiVoiceSettingsFallbackFlags() {
+  return {
+    anthropicApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
+    deepgramApiKey: Boolean(process.env.DEEPGRAM_API_KEY),
+    elevenlabsApiKey: Boolean(process.env.ELEVENLABS_API_KEY),
+    elevenlabsVoiceId: Boolean(process.env.ELEVENLABS_VOICE_ID),
+  };
+}
+app.get(
+  "/api/ai-voice-settings",
+  dbRoute(async (req, res) => {
+    const user = await requireAiVoiceSettingsManager(req, res);
+    if (!user) return;
+    const settings = (await getAiVoiceSettings()) || {
+      anthropicApiKey: "",
+      deepgramApiKey: "",
+      elevenlabsApiKey: "",
+      elevenlabsVoiceId: "",
+      systemPrompt: "",
+    };
+    res.json({
+      ...settings,
+      systemPrompt: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+      envFallback: aiVoiceSettingsFallbackFlags(),
+    });
+  })
+);
+app.patch(
+  "/api/ai-voice-settings",
+  dbRoute(async (req, res) => {
+    const user = await requireAiVoiceSettingsManager(req, res);
+    if (!user) return;
+    const body = req.body || {};
+    const patch = {};
+    for (const key of ["anthropicApiKey", "deepgramApiKey", "elevenlabsApiKey", "elevenlabsVoiceId", "systemPrompt"]) {
+      if (key in body) patch[key] = String(body[key] ?? "").trim();
+    }
+    const settings = await updateAiVoiceSettings(patch);
+    res.json({
+      ...settings,
+      systemPrompt: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+      envFallback: aiVoiceSettingsFallbackFlags(),
+    });
   })
 );
 
@@ -1070,6 +1359,23 @@ app.post(
   )
 );
 
+// ---------- Calendars ----------
+// See the import comment above — these are the actual /api/*.js
+// handlers, mounted directly rather than reimplemented here.
+app.all("/api/calendars", calendarsHandler);
+app.all("/api/calendar-google-connect", calendarGoogleConnectHandler);
+app.all("/api/calendar-google-callback", calendarGoogleCallbackHandler);
+app.all("/api/calendar-google-disconnect", calendarGoogleDisconnectHandler);
+app.all("/api/calendar-google-calendars", calendarGoogleCalendarsHandler);
+app.all("/api/calendar-bookings", calendarBookingsHandler);
+app.all("/api/calendar-public", calendarPublicHandler);
+app.all("/api/calendar-slots", calendarSlotsHandler);
+app.all("/api/calendar-book", calendarBookHandler);
+app.all("/api/calendar-cancel", calendarCancelHandler);
+app.all("/api/automations", automationsHandler);
+app.all("/api/tag-folders", tagFoldersHandler);
+app.all("/api/automations-process-runs", automationsProcessRunsHandler);
+
 app.listen(PORT, () => {
   const missing = missingTwilioEnv();
   console.log(`Local backend listening on http://localhost:${PORT}`);
@@ -1081,4 +1387,20 @@ app.listen(PORT, () => {
   if (!isDbConfigured()) {
     console.warn(`⚠ POSTGRES_URL not set yet — database routes will fail until you add it to .env`);
   }
+  const missingAiVoice = missingAiVoiceEnv();
+  if (missingAiVoice.length) {
+    console.warn(`⚠ AI Voice env vars not set yet, that tab will show "not configured" until you add: ${missingAiVoice.join(", ")}`);
+  }
 });
+
+// Local dev has no Vercel Cron of its own — this is what advances
+// "wait" steps here instead. The deployed site relies on vercel.json's
+// `crons` entry hitting /api/automations-process-runs on a schedule;
+// this poller only runs in this long-lived local process.
+if (isDbConfigured()) {
+  setInterval(() => {
+    reapStuckAutomationRuns()
+      .then(() => processDueAutomationRuns())
+      .catch((err) => console.error("[automations] local poller failed", err));
+  }, 15000);
+}

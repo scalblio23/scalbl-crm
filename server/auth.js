@@ -29,9 +29,12 @@ const FULL_ACCESS_TABS = [
   "log",
   "clients",
   "reports",
+  "portal",
   "settings",
 ];
-const CLIENT_TABS = ["conversation", "contacts", "reports"];
+// Portal is the client-facing summary screen — a client role sees their
+// own scoped view, everyone else browses it via the client picker.
+const CLIENT_TABS = ["conversation", "contacts", "reports", "portal"];
 
 export function tabsForRole(role) {
   return role === "client" ? CLIENT_TABS : FULL_ACCESS_TABS;
