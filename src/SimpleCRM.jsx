@@ -3341,6 +3341,74 @@ export default function SimpleCRM() {
     }
   };
 
+  // ----- Manual dial (floating phone button, every page) -----
+  // Dial any number by hand without it having to be a contact. Goes
+  // through the same placeCall() as every other call, so it picks up
+  // the same caller ID rotation across TWILIO_CALLER_IDS — but keeps
+  // its own state rather than borrowing activeLeadId/startCall, since
+  // those assume a lead in dialQueue and would open a wrap-up screen
+  // if a Powerdialler session happened to be paused underneath.
+  const [showManualDial, setShowManualDial] = useState(false);
+  const [manualDialNumber, setManualDialNumber] = useState("");
+  const [manualCall, setManualCall] = useState(null); // { phone, callerId, status, startedAt } | null
+  const [manualCallError, setManualCallError] = useState("");
+  const [manualCallElapsedMs, setManualCallElapsedMs] = useState(0);
+  const manualCallEndedRef = useRef(false);
+
+  useEffect(() => {
+    if (!manualCall?.startedAt || manualCall.status !== "in-progress") return;
+    const t = setInterval(() => setManualCallElapsedMs(Date.now() - manualCall.startedAt), 1000);
+    return () => clearInterval(t);
+  }, [manualCall]);
+
+  const startManualCall = async (e) => {
+    e?.preventDefault?.();
+    const phone = manualDialNumber.trim();
+    // `calling` is the one flag every dial path already checks, so
+    // setting it here is what stops the diallers (and this button)
+    // from putting a second call on the same Twilio device.
+    if (!phone || calling || manualCall) return;
+    setManualCallError("");
+    setManualCallElapsedMs(0);
+    setManualCall({ phone, callerId: "", status: "connecting", startedAt: null });
+    setCalling(true);
+    manualCallEndedRef.current = false;
+    try {
+      const { call, callerId } = await placeCall(phone);
+      const startedAt = Date.now();
+      setManualCall((m) => (m ? { ...m, callerId, startedAt } : m));
+
+      const onEnded = (err) => {
+        if (manualCallEndedRef.current) return;
+        manualCallEndedRef.current = true;
+        setCalling(false);
+        setManualCall(null);
+        if (err) {
+          setManualCallError(err.message || "The call failed.");
+          return;
+        }
+        // Log it so the Reports tab's per-user counts stay complete —
+        // no lead to attach it to, so it's a call-log row of its own.
+        const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
+        api
+          .post("/api/call-log", { leadId: null, name: "Manual dial", phone, status: "Manual dial", durationSeconds })
+          .then((saved) => {
+            if (saved?.id) setCallLog((log) => [saved, ...log]);
+          })
+          .catch(() => {});
+      };
+
+      call.on("accept", () => setManualCall((m) => (m ? { ...m, status: "in-progress" } : m)));
+      call.on("disconnect", () => onEnded());
+      call.on("cancel", () => onEnded());
+      call.on("error", (err) => onEnded(err));
+    } catch (err) {
+      setCalling(false);
+      setManualCall(null);
+      setManualCallError(err.message || "Could not start the call — check your Twilio setup.");
+    }
+  };
+
   const endCall = () => {
     // Just hang up — the call's own 'disconnect' event (registered in
     // startCall/startMultilineCall) does the actual state reset,
@@ -8503,6 +8571,79 @@ export default function SimpleCRM() {
 
         {page === "ai-voice" && <AIVoicePanel />}
       </main>
+
+      {/* Manual dial — floating softphone button, available on every
+          page. Hidden from client-portal users, who can't dial. */}
+      {authUser?.role !== "client" && (
+        <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-2">
+          {showManualDial && (
+            <div className="w-72 bg-white border border-gray-200 rounded-xl shadow-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-sm font-semibold">Manual dial</span>
+                <button onClick={() => setShowManualDial(false)} className="text-gray-300 hover:text-gray-600">
+                  <X size={14} />
+                </button>
+              </div>
+              {manualCall ? (
+                <div>
+                  <div
+                    className={`flex items-center gap-2 text-xs font-medium ${
+                      manualCall.status === "connecting" ? "text-amber-700" : "text-green-700"
+                    }`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        manualCall.status === "connecting" ? "bg-amber-500" : "bg-green-600"
+                      }`}
+                    />
+                    {manualCall.status === "connecting" ? "Connecting…" : "Live call"}
+                    {manualCall.status === "in-progress" && ` · ${formatCallDuration(manualCallElapsedMs)}`}
+                  </div>
+                  <div className="text-lg font-bold mt-1">{manualCall.phone}</div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {manualCall.callerId ? `Calling from ${manualCall.callerId}` : "Picking a number…"}
+                  </div>
+                  <button
+                    onClick={hangUp}
+                    className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg bg-red-600 text-white text-sm font-medium py-2 hover:bg-red-700"
+                  >
+                    <PhoneOff size={14} /> End call
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={startManualCall}>
+                  <input
+                    autoFocus
+                    type="tel"
+                    value={manualDialNumber}
+                    onChange={(e) => setManualDialNumber(e.target.value)}
+                    placeholder="0412 345 678"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!manualDialNumber.trim() || calling}
+                    className="mt-2 w-full flex items-center justify-center gap-2 rounded-lg bg-gray-900 text-white text-sm font-medium py-2 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <PhoneCall size={14} /> Call
+                  </button>
+                  {calling && <div className="mt-2 text-xs text-gray-400">Finish the current call first.</div>}
+                  {manualCallError && <div className="mt-2 text-xs text-red-600">{manualCallError}</div>}
+                </form>
+              )}
+            </div>
+          )}
+          <button
+            onClick={() => setShowManualDial((v) => !v)}
+            title="Manual dial"
+            className={`w-12 h-12 rounded-full shadow-lg flex items-center justify-center text-white ${
+              manualCall ? "bg-green-600 hover:bg-green-700" : "bg-gray-900 hover:bg-gray-800"
+            }`}
+          >
+            <Phone size={20} />
+          </button>
+        </div>
+      )}
 
       {/* Soundboard — record a new quick-play clip */}
       {showSoundboardRecorder && (
