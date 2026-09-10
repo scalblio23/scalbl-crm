@@ -11,6 +11,7 @@ import {
   buildVoiceTwiml,
   buildConferenceTwiml,
   getCallerIdPool,
+  recordingOptions,
   sendSms,
   generateMultilineConferenceName,
   placeConferenceLeg,
@@ -112,6 +113,8 @@ import calendarCancelHandler from "../api/calendar-cancel.js";
 import automationsHandler from "../api/automations.js";
 import tagFoldersHandler from "../api/tag-folders.js";
 import tagBookingLinksHandler from "../api/tag-booking-links.js";
+import recordingStatusHandler from "../api/recording-status.js";
+import recordingAudioHandler from "../api/recording-audio.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
 import {
@@ -178,6 +181,8 @@ const PUBLIC_PATHS = new Set([
   // /api/sms-inbound above.
   "/api/voice-multiline-leg",
   "/api/multiline-status",
+  // Twilio's finished-recording callback — see api/recording-status.js.
+  "/api/recording-status",
   // Calendars — the public booking-widget side (see api/calendar-*.js
   // for how each authenticates itself instead: signed OAuth state,
   // a calendar's own slug, or a booking's cancel token).
@@ -565,7 +570,7 @@ app.post("/api/voice", (req, res) => {
   // than dialing out. See "Multi-line dialling" below.
   const conferenceName = req.body?.Conference;
   if (conferenceName) {
-    return res.send(buildConferenceTwiml({ conferenceName, isRep: true }));
+    return res.send(buildConferenceTwiml({ conferenceName, isRep: true, recording: recordingOptions({ conferenceName }) }));
   }
 
   const pool = getCallerIdPool();
@@ -577,7 +582,9 @@ app.post("/api/voice", (req, res) => {
   // invalid is a plain, instant default, not a second rotation pick.
   const requested = req.body?.callerId;
   const callerId = requested && pool.includes(requested) ? requested : pool[0];
-  res.send(buildVoiceTwiml(req.body.To, callerId));
+  res.send(
+    buildVoiceTwiml(req.body.To, callerId, { recording: recordingOptions({ leadId: req.body?.leadId, to: req.body.To }) })
+  );
 });
 
 // Call status callback — set this as the TwiML App / <Dial> status
@@ -1376,6 +1383,8 @@ app.all("/api/calendar-cancel", calendarCancelHandler);
 app.all("/api/automations", automationsHandler);
 app.all("/api/tag-folders", tagFoldersHandler);
 app.all("/api/tag-booking-links", tagBookingLinksHandler);
+app.all("/api/recording-status", recordingStatusHandler);
+app.all("/api/recording-audio", recordingAudioHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
 app.listen(PORT, () => {

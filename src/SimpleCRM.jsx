@@ -1301,6 +1301,18 @@ export default function SimpleCRM() {
       .then(setTagBookingLinks)
       .catch(() => {}); // hotseat just shows no link
   }, [authUser]);
+  // Call recordings land in a lead's conversation via Twilio's
+  // callback a little after the call ends (see api/recording-status.js)
+  // — and inbound SMS arrive server-side too — so re-fetch the threads
+  // each time the Conversation tab is opened, not just at login.
+  useEffect(() => {
+    if (page !== "conversation" || !authUser) return;
+    api
+      .get("/api/conversations")
+      .then(setConversations)
+      .catch(() => {}); // keep whatever's already loaded
+  }, [page, authUser]);
+
   const saveTagBookingLink = async (tagName, bookingLink) => {
     try {
       setTagBookingLinks(await api.patch("/api/tag-booking-links", { tagName, bookingLink }));
@@ -3305,7 +3317,7 @@ export default function SimpleCRM() {
     setLastAdHocCall(null); // starting any call retires the previous one's redial card
     callEndedRef.current = false;
     try {
-      const { call, callerId } = await placeCall(lead.phone);
+      const { call, callerId } = await placeCall(lead.phone, "rep", { leadId: lead.id });
       activeCallRef.current = call;
       callStartRef.current = Date.now();
       setActiveCallerId(callerId);
@@ -4258,7 +4270,24 @@ export default function SimpleCRM() {
                   <div className="px-6 py-4 border-b border-gray-100 font-semibold">{activeConversation.name}</div>
                   <div className="flex-1 p-6 space-y-3 overflow-y-auto bg-gray-50/50">
                     {(activeConversation.messages || []).map((m) =>
-                      m.type === "call" ? (
+                      m.type === "recording" ? (
+                        <div key={m.id} className="flex justify-center">
+                          <div className="flex flex-col items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-4 py-2.5 rounded-2xl">
+                            <span className="flex items-center gap-1.5">
+                              <Mic size={12} /> {m.text}
+                            </span>
+                            {m.recordingSid && (
+                              <audio
+                                controls
+                                preload="none"
+                                crossOrigin="use-credentials"
+                                src={`${import.meta.env.VITE_CALL_SERVER_URL || ""}/api/recording-audio?sid=${m.recordingSid}`}
+                                className="h-8 max-w-full"
+                              />
+                            )}
+                          </div>
+                        </div>
+                      ) : m.type === "call" ? (
                         <div key={m.id} className="flex justify-center">
                           <div className="flex items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-3 py-1.5 rounded-full">
                             <PhoneCall size={12} /> {m.text}

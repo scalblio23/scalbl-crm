@@ -75,11 +75,23 @@ export function mintAccessToken(identity, env = process.env) {
 // rotation — rather than read from env here, since picking it may
 // require a database round-trip this function shouldn't need to know
 // about.
-export function buildVoiceTwiml(to, callerId) {
+export function buildVoiceTwiml(to, callerId, { recording = null } = {}) {
   const twiml = new twilio.twiml.VoiceResponse();
 
   if (to) {
-    const dial = twiml.dial({ callerId });
+    // `recording` (see recordingOptions below) is null when calls
+    // aren't being recorded — the <Dial> is then exactly as before.
+    const dial = twiml.dial({
+      callerId,
+      ...(recording
+        ? {
+            record: "record-from-answer-dual",
+            recordingStatusCallback: recording.statusCallback,
+            recordingStatusCallbackEvent: "completed",
+            recordingStatusCallbackMethod: "POST",
+          }
+        : {}),
+    });
     if (/^client:/.test(to)) {
       dial.client(to.replace(/^client:/, ""));
     } else {
@@ -153,12 +165,64 @@ export function publicBaseUrl(env = process.env) {
   return "";
 }
 
-export function buildConferenceTwiml({ conferenceName, isRep }) {
+// ---------- Call recording ----------
+// Every outbound call is recorded by default, and Twilio reports each
+// finished recording to /api/recording-status (see that file), which
+// drops it into the lead's conversation as a playable message. Set
+// TWILIO_RECORD_CALLS=false to switch recording off entirely. Needs a
+// public base URL for the callback (same requirement as multi-line
+// dialling); with none — local dev without PUBLIC_URL — calls simply
+// aren't recorded, rather than recorded with nowhere to report to.
+// The ids passed in are baked into the callback URL so the recording
+// can be attributed: leadId for a contact call, `to` (the dialled
+// number) as a fallback for a manual dial, conferenceName for Multi
+// Line. Returns null when not recording.
+export function recordingOptions({ leadId, to, conferenceName } = {}, env = process.env) {
+  if (String(env.TWILIO_RECORD_CALLS || "true").toLowerCase() === "false") return null;
+  const base = publicBaseUrl(env);
+  if (!base) return null;
+  const params = new URLSearchParams();
+  if (leadId) params.set("leadId", String(leadId));
+  if (to) params.set("to", String(to));
+  if (conferenceName) params.set("conf", String(conferenceName));
+  const qs = params.toString();
+  return { statusCallback: `${base}/api/recording-status${qs ? `?${qs}` : ""}` };
+}
+
+// Fetches a recording's MP3 from Twilio, authenticated with the same
+// API Key that mints Voice tokens — the browser never talks to Twilio
+// directly for media (see api/recording-audio.js, which streams this
+// through behind the app's own login). `range` is the browser's Range
+// header, forwarded so seeking in the player works.
+export async function fetchRecordingMedia(recordingSid, { range } = {}, env = process.env) {
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Recordings/${encodeURIComponent(
+    recordingSid
+  )}.mp3`;
+  const auth = Buffer.from(`${env.TWILIO_API_KEY_SID}:${env.TWILIO_API_KEY_SECRET}`).toString("base64");
+  const headers = { Authorization: `Basic ${auth}` };
+  if (range) headers.Range = range;
+  return fetch(url, { headers });
+}
+
+export function buildConferenceTwiml({ conferenceName, isRep, recording = null }) {
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.dial().conference(
     {
       startConferenceOnEnter: isRep,
       endConferenceOnExit: isRep,
+      // Recording is declared on the rep's leg only (it's what starts
+      // the conference) — see recordingOptions below. The finished
+      // recording is attributed to the batch's winning lead by
+      // api/recording-status.js, since which lead that is isn't known
+      // until someone answers.
+      ...(recording && isRep
+        ? {
+            record: "record-from-start",
+            recordingStatusCallback: recording.statusCallback,
+            recordingStatusCallbackEvent: "completed",
+            recordingStatusCallbackMethod: "POST",
+          }
+        : {}),
       // A lead leg joins muted — it can hear the conference but isn't
       // heard by the rep — until api/multiline-status.js confirms it
       // as the winner and explicitly unmutes it. Without this, every

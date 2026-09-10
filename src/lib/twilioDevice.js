@@ -125,10 +125,14 @@ function toE164(rawPhone) {
 // — `call` is the live Twilio Call object (attach 'accept' /
 // 'disconnect' / 'cancel' / 'error' listeners to it to drive UI
 // state), `callerId` is the number it's calling from.
-export async function placeCall(phoneNumber, identity = "rep") {
+export async function placeCall(phoneNumber, identity = "rep", { leadId } = {}) {
   const dev = await getDevice(identity);
   const callerId = nextCallerId();
-  const call = await dev.connect({ params: { To: toE164(phoneNumber), callerId } });
+  // leadId rides along as a custom param so the backend can label the
+  // call's recording with the right contact (see api/voice.js).
+  const call = await dev.connect({
+    params: { To: toE164(phoneNumber), callerId, ...(leadId ? { leadId: String(leadId) } : {}) },
+  });
   return { call, callerId };
 }
 

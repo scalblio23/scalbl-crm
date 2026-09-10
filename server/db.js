@@ -151,6 +151,10 @@ export async function ensureSchema() {
         AND to_regclass('public.tag_booking_links') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'messages' AND column_name = 'recording_sid'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
           WHERE table_name = 'calendars' AND column_name = 'video_conference_link'
         ) AS exists
     `);
@@ -570,6 +574,11 @@ export async function ensureSchema() {
         updated_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // Call recordings — a message of type 'recording' carries the
+    // Twilio Recording SID its player streams (see
+    // api/recording-status.js / api/recording-audio.js). Null on every
+    // other message type.
+    await query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS recording_sid TEXT`);
     }
     await seedIfEmpty();
     await seedUsersIfMissing();
@@ -1253,7 +1262,14 @@ export async function getConversations(allowedTags) {
     unread: c.unread,
     messages: messages
       .filter((m) => m.conversation_id === c.id)
-      .map((m) => ({ id: m.id, type: m.type, text: m.text, time: m.time_label, outgoing: m.outgoing })),
+      .map((m) => ({
+        id: m.id,
+        type: m.type,
+        text: m.text,
+        time: m.time_label,
+        outgoing: m.outgoing,
+        recordingSid: m.recording_sid || null,
+      })),
   }));
 }
 
@@ -1293,6 +1309,76 @@ export async function logMessage({ leadId, name, text, time, type = "text", outg
 // logMessage kept for backwards-compat call sites.
 export async function logCall({ leadId, name, text, time, type = "call" }) {
   return logMessage({ leadId, name, text, time, type, outgoing: true });
+}
+
+// ---------- Call recordings ----------
+
+// Twilio can deliver a recording callback more than once — this is
+// what keeps a retry from posting the same recording twice.
+export async function hasRecordingMessage(recordingSid) {
+  const rows = await query("SELECT 1 FROM messages WHERE recording_sid = $1 LIMIT 1", [recordingSid]);
+  return rows.length > 0;
+}
+
+// Drops a finished call recording into a lead's conversation. Kept
+// separate from logMessage (rather than adding a column to its shared
+// INSERT) so SMS/call logging never depends on the recording_sid
+// column existing. Doesn't flag the conversation unread — it's the
+// rep's own call, not something new from the lead.
+export async function logRecordingMessage({ leadId, name, text, time, recordingSid }) {
+  const existingRows = await query("SELECT id FROM conversations WHERE lead_id = $1", [leadId]);
+  let conversationId = existingRows[0]?.id;
+  if (!conversationId) {
+    const rows = await query(
+      "INSERT INTO conversations (lead_id, name, preview, time_label, unread) VALUES ($1,$2,$3,$4,false) RETURNING id",
+      [leadId, name, text, time]
+    );
+    conversationId = rows[0].id;
+  } else {
+    await query("UPDATE conversations SET preview = $2, time_label = $3, updated_at = now() WHERE id = $1", [
+      conversationId,
+      text,
+      time,
+    ]);
+  }
+  await query(
+    "INSERT INTO messages (conversation_id, type, text, time_label, outgoing, recording_sid) VALUES ($1,'recording',$2,$3,true,$4)",
+    [conversationId, text, time, recordingSid]
+  );
+  return conversationId;
+}
+
+// Which lead a Multi Line conference recording belongs to — the
+// batch's winner, once one leg answered. Null if nobody did (the
+// recording is just ringing, not worth keeping in a conversation).
+export async function getMultilineWinnerByConferenceName(conferenceName) {
+  const rows = await query(
+    `SELECT b.winner_lead_id, c.name
+       FROM multiline_batches b
+       LEFT JOIN multiline_batch_calls c ON c.batch_id = b.id AND c.lead_id = b.winner_lead_id
+      WHERE b.conference_name = $1
+      LIMIT 1`,
+    [conferenceName]
+  );
+  const r = rows[0];
+  if (!r || !r.winner_lead_id) return null;
+  return { leadId: r.winner_lead_id, name: r.name };
+}
+
+// The tag of the lead a recording belongs to — so a client-portal
+// user (whose access is scoped by tag) can only stream recordings of
+// their own leads. `found` false = no such recording in any thread.
+export async function getRecordingLeadTag(recordingSid) {
+  const rows = await query(
+    `SELECT ct.tag
+       FROM messages m
+       JOIN conversations c ON c.id = m.conversation_id
+       LEFT JOIN contacts ct ON ct.id = c.lead_id
+      WHERE m.recording_sid = $1
+      LIMIT 1`,
+    [recordingSid]
+  );
+  return rows[0] ? { found: true, tag: rows[0].tag ?? null } : { found: false, tag: null };
 }
 
 export async function deleteConversations(ids) {
