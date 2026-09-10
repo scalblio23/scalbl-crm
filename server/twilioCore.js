@@ -85,7 +85,7 @@ export function buildVoiceTwiml(to, callerId, { recording = null } = {}) {
       callerId,
       ...(recording
         ? {
-            record: "record-from-answer-dual",
+            record: "record-from-answer",
             recordingStatusCallback: recording.statusCallback,
             recordingStatusCallbackEvent: "completed",
             recordingStatusCallbackMethod: "POST",
