@@ -5,6 +5,7 @@
 // never drift apart.
 import twilio from "twilio";
 import crypto from "crypto";
+import { Readable } from "stream";
 
 const REQUIRED_ENV_KEYS = [
   "TWILIO_ACCOUNT_SID",
@@ -75,11 +76,18 @@ export function mintAccessToken(identity, env = process.env) {
 // rotation — rather than read from env here, since picking it may
 // require a database round-trip this function shouldn't need to know
 // about.
-export function buildVoiceTwiml(to, callerId) {
+export function buildVoiceTwiml(to, callerId, env = process.env) {
   const twiml = new twilio.twiml.VoiceResponse();
 
   if (to) {
-    const dial = twiml.dial({ callerId });
+    const dial = twiml.dial({
+      callerId,
+      // Records both sides of the call (dual-channel, from the moment
+      // the lead answers) so it can be downloaded from the Call log —
+      // see findRecordingForCall below. Twilio attaches the recording
+      // to the parent (browser) leg's CallSid.
+      ...(isCallRecordingEnabled(env) ? { record: "record-from-answer-dual" } : {}),
+    });
     if (/^client:/.test(to)) {
       dial.client(to.replace(/^client:/, ""));
     } else {
@@ -153,17 +161,85 @@ export function publicBaseUrl(env = process.env) {
   return "";
 }
 
-export function buildConferenceTwiml({ conferenceName, isRep }) {
+export function buildConferenceTwiml({ conferenceName, isRep }, env = process.env) {
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.dial().conference(
     {
       startConferenceOnEnter: isRep,
       endConferenceOnExit: isRep,
       beep: false,
+      // Only the rep's leg asks for the recording — it's the one that
+      // starts the conference, and one participant asking is enough
+      // to record the whole conference. (A conference can only be
+      // recorded "from start", so the recording includes the hold
+      // music while lines are still ringing.)
+      ...(isRep && isCallRecordingEnabled(env) ? { record: "record-from-start" } : {}),
     },
     conferenceName
   );
   return twiml.toString();
+}
+
+// ---------- Call recording ----------
+// Every call is recorded unless TWILIO_RECORD_CALLS is explicitly set
+// to "false"/"0"/"off" — an opt-out rather than opt-in, since the
+// point of the Call log's download button is that recordings exist.
+// Whether recording a call is lawful (one-party vs all-party consent
+// rules differ by state/country) is on whoever operates this CRM.
+export function isCallRecordingEnabled(env = process.env) {
+  const raw = String(env.TWILIO_RECORD_CALLS ?? "").trim().toLowerCase();
+  return !["false", "0", "off", "no"].includes(raw);
+}
+
+// Finds the Twilio recording for one logged call. Single-line calls
+// are recorded via <Dial record> and land on the browser leg's
+// CallSid; multi-line calls are recorded per conference, so if
+// nothing's found by CallSid the conference is looked up by its
+// (unique, random) friendly name instead. Returns null when no
+// recording exists (yet) — Twilio takes a few seconds after hang-up
+// to make one available, so "null" right after a call just means
+// "try again shortly", not "never recorded".
+export async function findRecordingForCall({ callSid, conferenceName }, env = process.env) {
+  const client = restClient(env);
+  const pick = (list) => {
+    const ready = list.filter((r) => r.status === "completed");
+    if (!ready.length) return null;
+    // Newest first — a re-recorded conference or a retried leg should
+    // surface the latest, complete audio.
+    ready.sort((a, b) => new Date(b.dateCreated) - new Date(a.dateCreated));
+    return ready[0];
+  };
+
+  let recording = null;
+  if (callSid) recording = pick(await client.recordings.list({ callSid, limit: 20 }));
+  if (!recording && conferenceName) {
+    const conferences = await client.conferences.list({ friendlyName: conferenceName, limit: 1 });
+    if (conferences[0]) {
+      recording = pick(await client.recordings.list({ conferenceSid: conferences[0].sid, limit: 20 }));
+    }
+  }
+  if (!recording) return null;
+  return { sid: recording.sid, durationSeconds: Number(recording.duration) || null };
+}
+
+// Streams one recording's audio (as MP3) from Twilio. Twilio's media
+// URLs need account credentials, which must never reach the browser
+// — so the backend fetches the file and pipes it through. Returns a
+// Node readable stream plus the content length when Twilio reports
+// one, or throws if Twilio refuses.
+export async function fetchRecordingAudio(recordingSid, env = process.env) {
+  const sid = String(recordingSid);
+  if (!/^RE[0-9a-f]{32}$/i.test(sid)) throw new Error("Invalid recording id");
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Recordings/${sid}.mp3`;
+  const auth = Buffer.from(`${env.TWILIO_API_KEY_SID}:${env.TWILIO_API_KEY_SECRET}`).toString("base64");
+  const upstream = await fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+  if (!upstream.ok || !upstream.body) {
+    throw new Error(`Twilio returned ${upstream.status} for the recording`);
+  }
+  return {
+    stream: Readable.fromWeb(upstream.body),
+    contentLength: upstream.headers.get("content-length"),
+  };
 }
 
 // How long a lead's line is allowed to ring before Twilio gives up on

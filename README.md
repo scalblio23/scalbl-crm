@@ -153,6 +153,36 @@ already sends and mixes a clip's audio into that same stream on demand. Clips
 are shared across the whole team (stored as base64 in `soundboard_clips`),
 not per-rep.
 
+### Call recordings
+
+Every call the dialler places is recorded by Twilio — single-line calls
+via `<Dial record>` (both sides, from the moment the lead answers), and
+multi-line calls per conference (from the moment the conference starts, so
+the hold music while lines are still ringing is included). Each entry in
+the **Call log** tab has a **Download** button that pulls that call's
+recording down as an MP3.
+
+Under the hood, the browser logs the call's Twilio identifiers (the
+browser leg's `CallSid`, and the conference name for multi-line calls)
+alongside the call. `GET /api/call-recording?id=<call log id>` then looks
+the recording up on Twilio the first time (caching its recording SID on
+the entry), and streams the audio back through the backend — Twilio's
+media URLs need account credentials, so the browser is never pointed at
+them directly. Client-role accounts can only download recordings for calls
+they can see in the log.
+
+Twilio takes a little while after a call ends to finish processing its
+recording — clicking Download too soon shows a "not available yet, try
+again shortly" message rather than an empty file. Calls logged before this
+feature existed have no recording and show "—" instead of a button.
+
+Recordings are stored on the Twilio account (and billed by Twilio for
+storage); to delete them, use the Twilio Console (Monitor → Logs → Call
+recordings). Set `TWILIO_RECORD_CALLS=false` to turn recording off
+entirely — whether recording is lawful where you operate (one-party vs
+all-party consent rules differ by state/country) is on whoever runs this
+CRM to stay within.
+
 ## SMS (Twilio)
 
 Uses the same Twilio account and credentials as calling — no separate setup.

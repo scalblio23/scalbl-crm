@@ -47,6 +47,7 @@ import {
   Play,
   Mic,
   Square,
+  Download,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -2055,6 +2056,25 @@ export default function SimpleCRM() {
   const [wrapUp, setWrapUp] = useState(null); // { lead, customStage, notes, secondsLeft }
   const [wrapUpStatusMenuOpen, setWrapUpStatusMenuOpen] = useState(false);
   const [callLog, setCallLog] = useState([]);
+  // Call log ids whose recording download is in flight, and the last
+  // download error (shown under the Call log heading).
+  const [recordingBusyIds, setRecordingBusyIds] = useState(() => new Set());
+  const [recordingError, setRecordingError] = useState("");
+  const downloadRecording = async (entry) => {
+    setRecordingError("");
+    setRecordingBusyIds((ids) => new Set(ids).add(entry.id));
+    try {
+      await api.download(`/api/call-recording?id=${entry.id}`, `recording-${entry.id}.mp3`);
+    } catch (err) {
+      setRecordingError(`${entry.name || "This call"}: ${err.message || "Could not download the recording."}`);
+    } finally {
+      setRecordingBusyIds((ids) => {
+        const next = new Set(ids);
+        next.delete(entry.id);
+        return next;
+      });
+    }
+  };
 
   // ---------- Reports ----------
   const isoToday = () => new Date().toISOString().slice(0, 10);
@@ -2260,11 +2280,18 @@ export default function SimpleCRM() {
     }
   };
 
+  // Only the ids that actually exist get sent — an entry with neither
+  // is one the backend knows has no recording to look for.
+  const recordingFields = (recording) => ({
+    ...(recording?.callSid ? { callSid: recording.callSid } : {}),
+    ...(recording?.conferenceName ? { conferenceName: recording.conferenceName } : {}),
+  });
+
   // Logs a completed call straight to the call log — used for ad hoc
   // calls placed outside a dialler session, where no wrap-up screen
   // opens to capture it. Keeps the Reports tab's call counts/durations
   // complete instead of only covering session calls.
-  const logCallDirect = (lead, durationMs) => {
+  const logCallDirect = (lead, durationMs, recording) => {
     const durationSeconds = Math.round((durationMs || 0) / 1000);
     const status = lead.fields?.stage || lead.status;
     const tempLogId = `${lead.id}-${Date.now()}`;
@@ -2294,6 +2321,7 @@ export default function SimpleCRM() {
         status,
         notes: lead.notes,
         durationSeconds,
+        ...recordingFields(recording),
       })
       .then((saved) => {
         if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
@@ -2307,10 +2335,14 @@ export default function SimpleCRM() {
   // the table has no wrap-up to force, so it's logged directly — but
   // still remembered (lastAdHocCall) so "Call again"/"Call again with
   // a different number" can offer an immediate redial on it too.
-  const handleCallEnded = (lead, durationMs) => {
+  // `recording` is { callSid, conferenceName } — the Twilio ids the
+  // backend needs to find this call's recording later (see
+  // api/call-recording.js); logged alongside the call so the Call log
+  // can offer it for download.
+  const handleCallEnded = (lead, durationMs, recording) => {
     if (!lead) return;
     if (!sessionRef.current) {
-      logCallDirect(lead, durationMs);
+      logCallDirect(lead, durationMs, recording);
       setLastAdHocCall({ lead, durationMs });
       return;
     }
@@ -2327,6 +2359,7 @@ export default function SimpleCRM() {
       customStage: draft ? draft.customStage : lead.fields?.stage || "",
       notes: draft ? draft.notes : lead.notes || "",
       durationMs,
+      recording,
       secondsLeft: WRAP_UP_SECONDS,
     });
   };
@@ -2336,7 +2369,7 @@ export default function SimpleCRM() {
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, customStage, notes, durationMs } = wrapUp;
+    const { lead, customStage, notes, durationMs, recording } = wrapUp;
     // customStage edits the imported STAGE column (contacts.fields.stage)
     // — the real per-lead pipeline state — rather than the app's fixed
     // status field, which every imported lead defaults to "New Lead".
@@ -2390,6 +2423,7 @@ export default function SimpleCRM() {
         status,
         notes,
         durationSeconds,
+        ...recordingFields(recording),
       })
       .then((saved) => {
         if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
@@ -2469,7 +2503,9 @@ export default function SimpleCRM() {
         }
 
         logCallToConversation(lead, durationMs);
-        handleCallEnded(lead, durationMs);
+        // The browser leg's CallSid is what Twilio files the <Dial>
+        // recording under — see server/twilioCore.js.
+        handleCallEnded(lead, durationMs, { callSid: call.parameters?.CallSid });
       };
 
       call.on("accept", () => setCallStatus("in-progress"));
@@ -2630,7 +2666,13 @@ export default function SimpleCRM() {
         if (!winner) return; // rep hung up (or nothing answered) before anyone was bridged — nothing to log
 
         logCallToConversation(winner, durationMs);
-        handleCallEnded(winner, durationMs);
+        // Conference recordings are filed under the conference rather
+        // than any one leg, so the backend looks it up by name if
+        // nothing turns up on the rep's own CallSid.
+        handleCallEnded(winner, durationMs, {
+          callSid: call.parameters?.CallSid,
+          conferenceName: started.conferenceName,
+        });
       };
 
       call.on("disconnect", () => onCallEnded());
@@ -5237,6 +5279,15 @@ export default function SimpleCRM() {
               <div className="text-sm text-gray-400 mt-0.5">
                 {callLog.length} call{callLog.length === 1 ? "" : "s"} logged
               </div>
+              {recordingError && (
+                <div className="mt-3 flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                  <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                  <span className="flex-1">{recordingError}</span>
+                  <button onClick={() => setRecordingError("")} className="text-red-400 hover:text-red-600">
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
             </div>
             <table className="w-full text-sm">
               <thead>
@@ -5249,6 +5300,7 @@ export default function SimpleCRM() {
                   <th className="py-3 font-medium">Rep</th>
                   <th className="py-3 font-medium">Duration</th>
                   <th className="py-3 font-medium">Called</th>
+                  <th className="py-3 pr-8 font-medium">Recording</th>
                 </tr>
               </thead>
               <tbody>
@@ -5276,11 +5328,30 @@ export default function SimpleCRM() {
                     <td className="py-3.5 text-gray-400">
                       {new Date(entry.calledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
                     </td>
+                    <td className="py-3.5 pr-8">
+                      {entry.hasRecording && Number.isInteger(entry.id) ? (
+                        <button
+                          onClick={() => downloadRecording(entry)}
+                          disabled={recordingBusyIds.has(entry.id)}
+                          title="Download this call's recording (MP3)"
+                          className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 border border-gray-200 hover:border-gray-300 rounded-md px-2.5 py-1 disabled:opacity-60 whitespace-nowrap"
+                        >
+                          {recordingBusyIds.has(entry.id) ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Download size={13} />
+                          )}
+                          Download
+                        </button>
+                      ) : (
+                        <span className="text-gray-300 text-xs">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
                 {callLog.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="px-8 py-10 text-center text-sm text-gray-400">
+                    <td colSpan={9} className="px-8 py-10 text-center text-sm text-gray-400">
                       No calls logged yet — run the Power Dialler to start logging calls.
                     </td>
                   </tr>

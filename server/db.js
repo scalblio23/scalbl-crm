@@ -191,6 +191,13 @@ export async function ensureSchema() {
     await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS user_name TEXT`);
     await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS duration_seconds INTEGER`);
     await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS tag TEXT`);
+    // Call recordings — the Twilio identifiers needed to find a call's
+    // recording later (see api/call-recording.js): the browser leg's
+    // CallSid for single-line calls, the conference name for multi-line
+    // ones, and the recording SID once it's been looked up once.
+    await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS call_sid TEXT`);
+    await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS conference_name TEXT`);
+    await query(`ALTER TABLE call_log ADD COLUMN IF NOT EXISTS recording_sid TEXT`);
     await query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -1088,6 +1095,13 @@ function callLogFromRow(r) {
     userName: r.user_name,
     durationSeconds: r.duration_seconds,
     calledAt: r.called_at,
+    callSid: r.call_sid,
+    conferenceName: r.conference_name,
+    recordingSid: r.recording_sid,
+    // Whether there's any chance a recording exists for this call —
+    // entries logged before recording was added have neither id, and
+    // the Call log hides its download button for them.
+    hasRecording: Boolean(r.recording_sid || r.call_sid || r.conference_name),
   };
 }
 
@@ -1100,8 +1114,8 @@ export async function getCallLog(allowedTags) {
 
 export async function addCallLogEntry(entry) {
   const rows = await query(
-    `INSERT INTO call_log (lead_id, name, phone, client, tag, status, notes, user_id, user_name, duration_seconds)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    `INSERT INTO call_log (lead_id, name, phone, client, tag, status, notes, user_id, user_name, duration_seconds, call_sid, conference_name)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
     [
       entry.leadId,
       entry.name,
@@ -1113,9 +1127,22 @@ export async function addCallLogEntry(entry) {
       entry.userId ?? null,
       entry.userName ?? null,
       entry.durationSeconds ?? null,
+      entry.callSid ? String(entry.callSid) : null,
+      entry.conferenceName ? String(entry.conferenceName) : null,
     ]
   );
   return callLogFromRow(rows[0]);
+}
+
+export async function getCallLogEntry(id) {
+  const rows = await query("SELECT * FROM call_log WHERE id = $1", [id]);
+  return rows[0] ? callLogFromRow(rows[0]) : null;
+}
+
+// Caches the Twilio recording SID on the entry once it's been found,
+// so later downloads skip the Twilio lookup entirely.
+export async function setCallLogRecordingSid(id, recordingSid) {
+  await query("UPDATE call_log SET recording_sid = $2 WHERE id = $1", [id, recordingSid]);
 }
 
 // ---------- Users ----------

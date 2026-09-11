@@ -18,6 +18,7 @@ import {
   publicBaseUrl,
   MULTILINE_RING_SECONDS,
 } from "./twilioCore.js";
+import { handleCallRecordingDownload } from "./callRecording.js";
 import {
   isDbConfigured,
   ensureSchema,
@@ -1057,6 +1058,20 @@ app.post(
   })
 );
 app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog(scopeTagsForUser(req.user)))));
+// Streams a logged call's Twilio recording as an MP3 download — see
+// server/callRecording.js (shared with api/call-recording.js).
+app.get("/api/call-recording", async (req, res) => {
+  try {
+    await ensureSchema();
+    await handleCallRecordingDownload(req, res, req.user);
+  } catch (err) {
+    console.error("[call-recording]", err);
+    // Once the audio has started streaming there's no JSON body to
+    // send any more — just cut the download short.
+    if (!res.headersSent) res.status(500).json({ error: err.message || "Could not fetch the recording" });
+    else res.destroy(err);
+  }
+});
 app.post(
   "/api/call-log",
   dbRoute(async (req, res) =>
