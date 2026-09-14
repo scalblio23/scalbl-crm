@@ -945,6 +945,11 @@ async function migrateLegacyStageToStatus() {
   );
 }
 
+// The closer's verdict on a lead — separate from the setter's four-value
+// pipeline `status` on purpose. A lead is Booked (status) and then, once
+// the closer has run the appointment, Won or Lost (deal_outcome).
+export const DEAL_OUTCOMES = ["Pending", "Won", "Lost"];
+
 function contactFromRow(r) {
   return {
     id: r.id,
@@ -959,6 +964,8 @@ function contactFromRow(r) {
     leadDate: r.lead_date,
     tag: r.tag,
     createdAt: r.created_at,
+    closerNotes: r.closer_notes || "",
+    dealOutcome: DEAL_OUTCOMES.includes(r.deal_outcome) ? r.deal_outcome : "Pending",
   };
 }
 
@@ -1043,6 +1050,16 @@ export async function updateContact(id, patch) {
   } else if (legacyStatus !== null) {
     status = normalizeLeadStatus(legacyStatus);
   }
+  let dealOutcome = null;
+  if (patch.dealOutcome !== undefined && patch.dealOutcome !== null) {
+    const match = DEAL_OUTCOMES.find((o) => o.toLowerCase() === String(patch.dealOutcome).trim().toLowerCase());
+    if (!match) {
+      const err = new Error(`Invalid deal outcome "${patch.dealOutcome}". Must be one of: ${DEAL_OUTCOMES.join(", ")}`);
+      err.statusCode = 400;
+      throw err;
+    }
+    dealOutcome = match;
+  }
   const rows = await query(
     `UPDATE contacts SET
        status = COALESCE($2, status),
@@ -1051,7 +1068,9 @@ export async function updateContact(id, patch) {
        fields = fields || $5::jsonb,
        lead_date = COALESCE($6, lead_date),
        tag = COALESCE($7, tag),
-       phone = COALESCE($8, phone)
+       phone = COALESCE($8, phone),
+       closer_notes = COALESCE($9, closer_notes),
+       deal_outcome = COALESCE($10, deal_outcome)
      WHERE id = $1
      RETURNING *`,
     [
@@ -1063,6 +1082,8 @@ export async function updateContact(id, patch) {
       patch.leadDate ?? null,
       patch.tag ?? null,
       patch.phone ?? null,
+      patch.closerNotes ?? null,
+      dealOutcome,
     ]
   );
   return rows[0] ? contactFromRow(rows[0]) : null;

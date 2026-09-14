@@ -245,6 +245,16 @@ const statusSolidClass = (status) => statusColors[status] || "bg-gray-400 text-w
 // Small solid chip — used wherever a status shows up outside a table
 // cell (board cards, call log, conversation outcomes, filter menus).
 const STATUS_CHIP = "rounded-md px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide whitespace-nowrap";
+// The closer's verdict on a lead, shown as a tab strip along the bottom
+// of each board card. Separate from `status` (the setter's four-value
+// pipeline): a lead is Booked, then — after the appointment — Won or
+// Lost. Distinct hues from the status blocks so the two never blur.
+const DEAL_OUTCOMES = ["Pending", "Won", "Lost"];
+const dealOutcomeActiveClass = {
+  Pending: "bg-gray-700 text-white",
+  Won: "bg-emerald-600 text-white",
+  Lost: "bg-rose-600 text-white",
+};
 // Pseudo-column so the Powerdialler's status filter can reuse the
 // same exclude-checklist UI as every custom select column.
 const DIAL_STATUS_FILTER_COL = {
@@ -679,6 +689,32 @@ export default function SimpleCRM() {
   // back, and real conversations look like they'd disappeared, for
   // however long the initial fetch took).
   const [contacts, setContacts] = useState([]);
+  const [callLog, setCallLog] = useState([]);
+  // How many times each lead has been called — one number derived from
+  // the call log, shown on the left of every lead in the Contacts list,
+  // on every board card and in the dialler tables. Universal: it's the
+  // same count everywhere, whatever tag the lead sits under.
+  const callCountByLeadId = useMemo(() => {
+    const counts = {};
+    for (const e of callLog) {
+      if (e.leadId === null || e.leadId === undefined) continue;
+      counts[e.leadId] = (counts[e.leadId] || 0) + 1;
+    }
+    return counts;
+  }, [callLog]);
+  const renderCallCount = (contact) => {
+    const n = callCountByLeadId[contact.id] || 0;
+    return (
+      <span
+        title={`Called ${n} time${n === 1 ? "" : "s"}`}
+        className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold tabular-nums whitespace-nowrap ${
+          n ? "bg-gray-100 text-gray-700" : "bg-gray-50 text-gray-300"
+        }`}
+      >
+        <Phone size={10} /> {n}
+      </span>
+    );
+  };
   const [clients, setClients] = useState([]);
   const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
   const [contactColumns, setContactColumns] = useState([]); // dynamic custom columns for the contact table
@@ -1581,6 +1617,7 @@ export default function SimpleCRM() {
   };
 
   const FIXED_SORT_KEYS = {
+    __calls: (c) => callCountByLeadId[c.id] || 0,
     __leadDate: (c) => parseAuDate(c.leadDate),
     __name: (c) => c.name?.toLowerCase() || null,
     __email: (c) => c.email?.toLowerCase() || null,
@@ -1694,7 +1731,7 @@ export default function SimpleCRM() {
                 {shown.map((c) => (
                   <div
                     key={c.id}
-                    draggable
+                    draggable={editingCloserNotesId !== c.id}
                     onDragStart={(e) => {
                       setDraggingContactId(c.id);
                       e.dataTransfer.effectAllowed = "move";
@@ -1715,6 +1752,7 @@ export default function SimpleCRM() {
                         onChange={() => toggleContactSelected(c.id)}
                         className="mt-0.5 w-3.5 h-3.5 rounded border-gray-300 shrink-0"
                       />
+                      {renderCallCount(c)}
                       <div className="min-w-0 flex-1">
                         <div className="text-sm font-medium text-gray-900 truncate">{c.name}</div>
                         <div className="text-xs text-gray-500 truncate">{c.phone}</div>
@@ -1738,6 +1776,66 @@ export default function SimpleCRM() {
                         {c.leadDate ? `Lead ${c.leadDate}` : c.lastContact ? `Last contact ${c.lastContact}` : ""}
                       </span>
                       {renderStatusPicker(c, { variant: "chip", align: "right" })}
+                    </div>
+                    {/* Closer notes — the closer's own notes on the lead, kept apart from the setter's call notes above */}
+                    <div className="mt-2.5 border-t border-gray-100 pt-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Closer notes</span>
+                        {editingCloserNotesId !== c.id && (
+                          <button
+                            type="button"
+                            onClick={() => startEditCloserNotes(c)}
+                            className="text-gray-300 hover:text-gray-600"
+                            title="Edit closer notes"
+                          >
+                            <Pencil size={11} />
+                          </button>
+                        )}
+                      </div>
+                      {editingCloserNotesId === c.id ? (
+                        <textarea
+                          autoFocus
+                          value={closerNotesDraft}
+                          onChange={(e) => setCloserNotesDraft(e.target.value)}
+                          onBlur={() => commitCloserNotes(c)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") setEditingCloserNotesId(null);
+                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) commitCloserNotes(c);
+                          }}
+                          rows={3}
+                          placeholder="What did the closer find out?"
+                          className="mt-1 w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs outline-none focus:border-gray-500 resize-none"
+                        />
+                      ) : (
+                        <button type="button" onClick={() => startEditCloserNotes(c)} className="mt-0.5 w-full text-left text-xs">
+                          {c.closerNotes ? (
+                            <span className="text-gray-600 line-clamp-3 whitespace-pre-line">{c.closerNotes}</span>
+                          ) : (
+                            <span className="text-gray-300 italic">Add closer notes…</span>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                    {/* Deal outcome — Won / Lost / Pending tab strip along the bottom edge of the card */}
+                    <div className="mt-2.5 -mx-3 -mb-3 grid grid-cols-3 border-t border-gray-100 rounded-b-lg overflow-hidden">
+                      {DEAL_OUTCOMES.map((o) => {
+                        const active = (c.dealOutcome || "Pending") === o;
+                        return (
+                          <button
+                            key={o}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              updateContactDealOutcome(c.id, o);
+                            }}
+                            className={`py-1.5 text-[11px] font-bold uppercase tracking-wide transition ${
+                              active ? dealOutcomeActiveClass[o] : "bg-gray-50 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                            }`}
+                          >
+                            {o}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
@@ -2536,6 +2634,40 @@ export default function SimpleCRM() {
       setDbError(err.message || "Could not update the lead's status.");
     }
   };
+  // Closer notes / deal outcome — the closer's side of a lead, edited
+  // straight on the board card. Same optimistic-then-PATCH pattern as
+  // status; a failure rolls the card back and shows the banner.
+  const [editingCloserNotesId, setEditingCloserNotesId] = useState(null);
+  const [closerNotesDraft, setCloserNotesDraft] = useState("");
+  const startEditCloserNotes = (contact) => {
+    setCloserNotesDraft(contact.closerNotes || "");
+    setEditingCloserNotesId(contact.id);
+  };
+  const commitCloserNotes = async (contact) => {
+    const text = closerNotesDraft;
+    setEditingCloserNotesId(null);
+    if (text === (contact.closerNotes || "")) return;
+    setContacts((cs) => cs.map((c) => (c.id === contact.id ? { ...c, closerNotes: text } : c)));
+    try {
+      await api.patch("/api/contacts", { id: contact.id, closerNotes: text });
+    } catch (err) {
+      setContacts((cs) => cs.map((c) => (c.id === contact.id ? { ...c, closerNotes: contact.closerNotes || "" } : c)));
+      setDbError(err.message || "Could not save the closer notes.");
+    }
+  };
+  const updateContactDealOutcome = async (contactId, dealOutcome) => {
+    if (!DEAL_OUTCOMES.includes(dealOutcome)) return;
+    const lead = contacts.find((c) => c.id === contactId);
+    if (!lead || (lead.dealOutcome || "Pending") === dealOutcome) return;
+    setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, dealOutcome } : c)));
+    try {
+      await api.patch("/api/contacts", { id: contactId, dealOutcome });
+    } catch (err) {
+      setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, dealOutcome: lead.dealOutcome } : c)));
+      setDbError(err.message || "Could not update the deal outcome.");
+    }
+  };
+
   const setStatusForSelectedContacts = async (status) => {
     const ids = selectedContactIds.filter((id) => contacts.find((c) => c.id === id)?.status !== status);
     setShowBulkStatusMenu(false);
@@ -3177,7 +3309,6 @@ export default function SimpleCRM() {
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
   const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, durationMs, secondsLeft }
-  const [callLog, setCallLog] = useState([]);
 
   // ---------- Reports ----------
   const isoToday = () => new Date().toISOString().slice(0, 10);
@@ -4910,6 +5041,11 @@ export default function SimpleCRM() {
                         className="w-4 h-4 rounded border-gray-300"
                       />
                     </th>
+                    <th className="px-3 py-2 font-medium whitespace-nowrap">
+                      <button onClick={() => toggleContactSort("__calls")} className="flex items-center gap-1 hover:text-gray-700">
+                        Calls {sortIndicator("__calls")}
+                      </button>
+                    </th>
                     <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
                         onClick={() => toggleContactSort("__leadDate")}
@@ -5015,6 +5151,7 @@ export default function SimpleCRM() {
                           className="w-4 h-4 rounded border-gray-300"
                         />
                       </td>
+                      <td className="px-3 py-2.5">{renderCallCount(c)}</td>
                       <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{c.leadDate || "—"}</td>
                       <td className="px-5 py-2.5 font-medium whitespace-nowrap">{c.name}</td>
                       <td className="py-2.5 pr-5 text-gray-600 whitespace-nowrap">{c.email || "—"}</td>
@@ -5042,7 +5179,7 @@ export default function SimpleCRM() {
                   {filteredContacts.length === 0 && (
                     <tr>
                       <td
-                        colSpan={visibleContactColumns.length + 10}
+                        colSpan={visibleContactColumns.length + 11}
                         className="px-8 py-10 text-center text-sm text-gray-400"
                       >
                         No contacts
@@ -5734,6 +5871,7 @@ export default function SimpleCRM() {
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 py-3 font-medium w-8" />
                       <th className="px-5 py-3 font-semibold text-gray-700 whitespace-nowrap">Status</th>
+                      <th className="px-3 py-3 font-medium whitespace-nowrap">Calls</th>
                       <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
                       <th className="px-5 py-3 font-medium">Name</th>
                       <th className="px-5 py-3 font-medium">Email</th>
@@ -5751,6 +5889,7 @@ export default function SimpleCRM() {
                     <tr className="border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 pb-3" />
                       <th className="px-5 pb-3 font-normal min-w-[160px]">{renderDialColumnFilter(DIAL_STATUS_FILTER_COL)}</th>
+                      <th className="px-3 pb-3" />
                       <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.leadDate}
@@ -5830,6 +5969,7 @@ export default function SimpleCRM() {
                           />
                         </td>
                         <td className="p-0 h-px min-w-[160px] align-middle">{renderStatusPicker(lead)}</td>
+                        <td className="px-3 py-3.5">{renderCallCount(lead)}</td>
                         <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{lead.leadDate || "—"}</td>
                         <td className="px-5 py-3.5 font-medium">{lead.name}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
@@ -5909,7 +6049,7 @@ export default function SimpleCRM() {
                     {filteredDialQueue.length === 0 && (
                       <tr>
                         <td
-                          colSpan={10 + visibleDialColumns.length}
+                          colSpan={11 + visibleDialColumns.length}
                           className="px-5 py-10 text-center text-sm text-gray-400"
                         >
                           No leads match the current filters
@@ -6542,6 +6682,7 @@ export default function SimpleCRM() {
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 py-3 font-medium w-8" />
                       <th className="px-5 py-3 font-semibold text-gray-700 whitespace-nowrap">Status</th>
+                      <th className="px-3 py-3 font-medium whitespace-nowrap">Calls</th>
                       <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
                       <th className="px-5 py-3 font-medium">Name</th>
                       <th className="px-5 py-3 font-medium">Email</th>
@@ -6559,6 +6700,7 @@ export default function SimpleCRM() {
                     <tr className="border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 pb-3" />
                       <th className="px-5 pb-3 font-normal min-w-[160px]">{renderDialColumnFilter(DIAL_STATUS_FILTER_COL)}</th>
+                      <th className="px-3 pb-3" />
                       <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.leadDate}
@@ -6638,6 +6780,7 @@ export default function SimpleCRM() {
                           />
                         </td>
                         <td className="p-0 h-px min-w-[160px] align-middle">{renderStatusPicker(lead)}</td>
+                        <td className="px-3 py-3.5">{renderCallCount(lead)}</td>
                         <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{lead.leadDate || "—"}</td>
                         <td className="px-5 py-3.5 font-medium">{lead.name}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
@@ -6717,7 +6860,7 @@ export default function SimpleCRM() {
                     {filteredDialQueue.length === 0 && (
                       <tr>
                         <td
-                          colSpan={10 + visibleDialColumns.length}
+                          colSpan={11 + visibleDialColumns.length}
                           className="px-5 py-10 text-center text-sm text-gray-400"
                         >
                           No leads match the current filters
