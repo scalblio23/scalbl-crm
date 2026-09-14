@@ -182,7 +182,7 @@ function dbRoute(fn) {
       await fn(req, res);
     } catch (err) {
       console.error("[db]", err);
-      res.status(500).json({ error: err.message || "Database error" });
+      res.status(err.statusCode || 500).json({ error: err.message || "Database error" });
     }
   };
 }

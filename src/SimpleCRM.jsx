@@ -28,6 +28,7 @@ import {
   ClipboardList,
   Pencil,
   LayoutGrid,
+  SquareKanban,
   Table2,
   Upload,
   Loader2,
@@ -70,7 +71,7 @@ const initialContacts = [
     email: "david.chen@outlook.com",
     phone: "0433 221 908",
     client: "Lux Solar",
-    status: "Contacted",
+    status: "New Lead",
     lastContact: "Yesterday",
     notes: "Asked to be called back after 5pm.",
     createdAt: "2026-08-24T15:40:00",
@@ -114,7 +115,7 @@ const initialContacts = [
     email: "tom.nguyen@gmail.com",
     phone: "0466 903 415",
     client: "Stoprent Properties",
-    status: "Contacted",
+    status: "New Lead",
     lastContact: "Today",
     notes: "Asking about deposit requirements.",
     createdAt: "2026-08-25T11:05:00",
@@ -186,11 +187,39 @@ const initialClients = [
 
 const initialConversations = [];
 
+// The ONE pipeline status every lead has, whatever tag/client it sits
+// under — mirrors LEAD_STATUSES in server/leadStatus.js, which is what
+// the database actually enforces. Contacts table + kanban board, the
+// Powerdialler/Multi Line tables and filters, the wrap-up screen, the
+// call log and Reports all read and write this single field. (There
+// used to be a second, imported "STAGE" custom column alongside it;
+// the wrap-up wrote that while the dialler filtered on this, which is
+// how leads marked Booked kept getting re-called.)
+const LEAD_STATUSES = ["New Lead", "No Answer", "Booked", "Not Interested"];
+// Statuses that take a lead out of the dial queue for good.
+const CLOSED_LEAD_STATUSES = ["Booked", "Not Interested"];
+const isClosedLeadStatus = (status) => CLOSED_LEAD_STATUSES.includes(status);
 const statusColors = {
   "New Lead": "bg-blue-50 text-blue-700 border-blue-200",
-  Contacted: "bg-amber-50 text-amber-700 border-amber-200",
+  "No Answer": "bg-amber-50 text-amber-700 border-amber-200",
   Booked: "bg-green-50 text-green-700 border-green-200",
-  "No Answer": "bg-gray-50 text-gray-500 border-gray-200",
+  "Not Interested": "bg-red-50 text-red-700 border-red-200",
+};
+// Stronger accents for the kanban column headers.
+const statusAccentColors = {
+  "New Lead": "bg-blue-500",
+  "No Answer": "bg-amber-500",
+  Booked: "bg-green-500",
+  "Not Interested": "bg-red-500",
+};
+const statusPillClass = (status) => statusColors[status] || "bg-gray-50 text-gray-500 border-gray-200";
+// Pseudo-column so the Powerdialler's status filter can reuse the
+// same exclude-checklist UI as every custom select column.
+const DIAL_STATUS_FILTER_COL = {
+  key: "__status",
+  label: "Status",
+  type: "select",
+  options: LEAD_STATUSES.map((value) => ({ value })),
 };
 
 // ---------- Dynamic columns (shared by the Client table and the
@@ -404,14 +433,23 @@ export default function SimpleCRM() {
   const [clients, setClients] = useState([]);
   const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
   const [contactColumns, setContactColumns] = useState([]); // dynamic custom columns for the contact table
-  // STAGE is a custom column like any other, but it's the one piece of
-  // pipeline state every list of leads needs to show regardless of
-  // which client/tag is being viewed — so it's pulled out and shown
-  // as its own fixed column (Contacts + Powerdialler tables) instead
-  // of being folded into the "imported criteria" columns, which only
-  // render when data narrows them into view and can end up scrolled
-  // out of sight.
-  const stageColumnDef = contactColumns.find((c) => c.key === "stage");
+
+  // Contacts page: table or kanban board (one column per status).
+  // Display-only preference, remembered per browser.
+  const [contactsView, setContactsView] = useState(() => {
+    try {
+      return localStorage.getItem("scalbl:contactsView") === "board" ? "board" : "list";
+    } catch {
+      return "list";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("scalbl:contactsView", contactsView);
+    } catch {
+      // ignore — private browsing / storage disabled
+    }
+  }, [contactsView]);
 
   // Which custom Contacts columns the user has chosen to hide from the
   // table — a display-only preference, kept per-browser since it's not
@@ -546,15 +584,17 @@ export default function SimpleCRM() {
     phone: "",
     client: "All",
     notes: "",
-    status: "All",
   };
   const [dialFilters, setDialFilters] = useState(emptyDialFilters);
-  // Per-custom-column filters, so leads can be filtered/excluded by
-  // any imported criteria too, not just the fixed columns above.
-  // Select/checkbox columns (e.g. Stage) get an exclude-checklist —
-  // check "Booked" and "Not Interested" to hide those leads from the
-  // dial queue. Everything else gets a plain substring text filter.
-  const [dialFieldExcludes, setDialFieldExcludes] = useState({}); // { [columnKey]: string[] of values to hide }
+  // Per-column exclude/text filters for the dial queue. Select/checkbox
+  // columns get an exclude-checklist, everything else a plain substring
+  // filter. The lead's Status uses the same checklist under the
+  // "__status" key — and starts out hiding Booked + Not Interested,
+  // because a lead that's been booked (or has said no) must never be
+  // sitting in the dial queue by default. Untick them to review
+  // closed leads deliberately.
+  const defaultDialFieldExcludes = { __status: CLOSED_LEAD_STATUSES };
+  const [dialFieldExcludes, setDialFieldExcludes] = useState(defaultDialFieldExcludes); // { [columnKey]: string[] of values to hide }
   const [dialFieldTextFilters, setDialFieldTextFilters] = useState({}); // { [columnKey]: string }
   const toggleDialFieldExclude = (key, value) =>
     setDialFieldExcludes((f) => {
@@ -587,8 +627,17 @@ export default function SimpleCRM() {
         {openDialExcludeMenu === col.key && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setOpenDialExcludeMenu(null)} />
-            <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-2 w-48 max-h-56 overflow-y-auto normal-case">
+            <div
+              className={`absolute top-full mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-2 w-52 max-h-64 overflow-y-auto normal-case ${
+                col.key === "__status" ? "right-0" : "left-0"
+              }`}
+            >
               <div className="text-xs font-semibold text-gray-400 px-1 pb-1">Hide leads where {col.label} is…</div>
+              {col.key === "__status" && (
+                <div className="text-[11px] text-gray-400 px-1 pb-1.5 leading-snug">
+                  Booked and Not Interested leads are hidden by default so they aren't re-called.
+                </div>
+              )}
               {(col.type === "checkbox" ? ["Yes", "No"] : col.options || []).map((opt) => {
                 const value = typeof opt === "string" ? opt : opt.value;
                 const checked = (dialFieldExcludes[col.key] || []).includes(value);
@@ -658,8 +707,8 @@ export default function SimpleCRM() {
       key: "__status",
       label: "Status",
       kind: "select",
-      options: Object.keys(statusColors),
-      optionColor: (v) => statusColors[v],
+      options: LEAD_STATUSES,
+      optionColor: (v) => statusPillClass(v),
       get: (c) => c.status,
     },
     { key: "__leadDate", label: "Date", kind: "text", get: (c) => c.leadDate },
@@ -803,6 +852,139 @@ export default function SimpleCRM() {
   useEffect(() => {
     setContactsPage(0);
   }, [contactFilters, search, contactSort.key, contactSort.dir]);
+  // ----- Contacts kanban board (one column per status) -----
+  // Same filtered + sorted set as the table (tag sidebar, filter bar
+  // and search all apply), bucketed by status. Columns render at most
+  // KANBAN_COLUMN_CAP cards until "Show more" — a column of a few
+  // thousand New Leads would otherwise be the same freeze the table's
+  // pagination exists to avoid.
+  const KANBAN_COLUMN_CAP = 50;
+  const [kanbanLimits, setKanbanLimits] = useState({}); // { [status]: cards to show }
+  const [draggingContactId, setDraggingContactId] = useState(null);
+  const [dragOverStatus, setDragOverStatus] = useState(null);
+  const boardColumns = LEAD_STATUSES.map((status) => ({
+    status,
+    contacts: sortedContacts.filter((c) => (LEAD_STATUSES.includes(c.status) ? c.status : "New Lead") === status),
+  }));
+  const dropContactOnStatus = (status) => {
+    if (draggingContactId !== null) updateContactStatus(draggingContactId, status);
+    setDraggingContactId(null);
+    setDragOverStatus(null);
+  };
+  const renderContactsBoard = () => (
+    <div className="p-6">
+      <div className="flex items-center justify-between mb-3 text-xs text-gray-400">
+        <span>
+          {sortedContacts.length} lead{sortedContacts.length === 1 ? "" : "s"}
+          {contactFilters.length > 0 || search ? " matching your filters" : ""} · drag a card between columns to change its status
+        </span>
+      </div>
+      <div className="flex gap-4 items-start overflow-x-auto pb-2">
+        {boardColumns.map(({ status, contacts: column }) => {
+          const limit = kanbanLimits[status] || KANBAN_COLUMN_CAP;
+          const shown = column.slice(0, limit);
+          const hidden = column.length - shown.length;
+          const isOver = draggingContactId !== null && dragOverStatus === status;
+          return (
+            <div
+              key={status}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                if (dragOverStatus !== status) setDragOverStatus(status);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget)) setDragOverStatus((cur) => (cur === status ? null : cur));
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                dropContactOnStatus(status);
+              }}
+              className={`flex-1 min-w-[260px] max-w-[360px] rounded-xl border flex flex-col transition-colors ${
+                isOver ? "border-gray-500 bg-gray-100" : "border-gray-200 bg-gray-50/60"
+              }`}
+            >
+              <div className="px-3 py-2.5 flex items-center justify-between border-b border-gray-200/70">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${statusAccentColors[status]}`} />
+                  <span className="text-sm font-semibold text-gray-800 truncate">{status}</span>
+                </div>
+                <span className="text-xs font-medium text-gray-500 bg-white border border-gray-200 rounded-full px-2 py-0.5">
+                  {column.length}
+                </span>
+              </div>
+              <div className="p-2 space-y-2 overflow-y-auto max-h-[calc(100vh-280px)]">
+                {shown.map((c) => (
+                  <div
+                    key={c.id}
+                    draggable
+                    onDragStart={(e) => {
+                      setDraggingContactId(c.id);
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", String(c.id));
+                    }}
+                    onDragEnd={() => {
+                      setDraggingContactId(null);
+                      setDragOverStatus(null);
+                    }}
+                    className={`bg-white border rounded-lg p-3 shadow-sm cursor-grab active:cursor-grabbing ${
+                      draggingContactId === c.id ? "opacity-40" : ""
+                    } ${selectedContactIds.includes(c.id) ? "border-gray-500" : "border-gray-200 hover:border-gray-300"}`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedContactIds.includes(c.id)}
+                        onChange={() => toggleContactSelected(c.id)}
+                        className="mt-0.5 w-3.5 h-3.5 rounded border-gray-300 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 truncate">{c.name}</div>
+                        <div className="text-xs text-gray-500 truncate">{c.phone}</div>
+                      </div>
+                    </div>
+                    {(c.tag || c.client) && (
+                      <div className="mt-2 flex items-center gap-1.5 min-w-0">
+                        {c.tag && (
+                          <span className={`text-[11px] px-2 py-0.5 rounded-full border truncate ${tagColorClasses(c.tag)}`}>
+                            {c.tag}
+                          </span>
+                        )}
+                        {c.client && c.client !== c.tag && (
+                          <span className="text-[11px] text-gray-400 truncate">{c.client}</span>
+                        )}
+                      </div>
+                    )}
+                    {c.notes && <div className="mt-2 text-xs text-gray-500 line-clamp-2">{c.notes}</div>}
+                    <div className="mt-2.5 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-gray-400 truncate">
+                        {c.leadDate ? `Lead ${c.leadDate}` : c.lastContact ? `Last contact ${c.lastContact}` : ""}
+                      </span>
+                      {renderStatusPicker(c, { align: "right", size: "sm" })}
+                    </div>
+                  </div>
+                ))}
+                {column.length === 0 && (
+                  <div className="text-xs text-gray-400 text-center py-8 border border-dashed border-gray-200 rounded-lg">
+                    {isOver ? "Drop to move here" : `No ${status.toLowerCase()} leads`}
+                  </div>
+                )}
+                {hidden > 0 && (
+                  <button
+                    onClick={() => setKanbanLimits((l) => ({ ...l, [status]: limit + KANBAN_COLUMN_CAP }))}
+                    className="w-full text-xs font-medium text-gray-500 hover:text-gray-800 border border-gray-200 bg-white rounded-lg py-2"
+                  >
+                    Show {Math.min(KANBAN_COLUMN_CAP, hidden)} more ({hidden} hidden)
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   const totalContactsPages = Math.max(1, Math.ceil(sortedContacts.length / CONTACTS_PAGE_SIZE));
   const pagedContacts = sortedContacts.slice(
     contactsPage * CONTACTS_PAGE_SIZE,
@@ -818,7 +1000,6 @@ export default function SimpleCRM() {
   const hasFieldValue = (v) => v !== null && v !== undefined && v !== "" && v !== false;
   const visibleContactColumns = contactColumns.filter(
     (col) =>
-      col.key !== "stage" && // shown as its own fixed column instead — see stageColumnDef
       !hiddenContactColumnKeys.has(col.key) &&
       filteredContacts.some((c) => hasFieldValue(c.fields?.[col.key]))
   );
@@ -1487,6 +1668,88 @@ export default function SimpleCRM() {
     }
   };
 
+  // The single place a lead's status changes from the Contacts page —
+  // inline pill dropdown in the table, drag/drop or the card's menu on
+  // the board, and the bulk "Set status" action. Optimistic update,
+  // persisted with the same PATCH the dialler's wrap-up uses, and
+  // logged into the lead's conversation thread as an outcome.
+  const updateContactStatus = async (contactId, status) => {
+    if (!LEAD_STATUSES.includes(status)) return;
+    const lead = contacts.find((c) => c.id === contactId);
+    if (!lead || lead.status === status) return;
+    setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status } : c)));
+    try {
+      await api.patch("/api/contacts", { id: contactId, status });
+      logStatusToConversation(lead, status);
+    } catch (err) {
+      setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status: lead.status } : c)));
+      setDbError(err.message || "Could not update the lead's status.");
+    }
+  };
+  const setStatusForSelectedContacts = async (status) => {
+    const ids = selectedContactIds.filter((id) => contacts.find((c) => c.id === id)?.status !== status);
+    setShowBulkStatusMenu(false);
+    for (const id of ids) {
+      // Sequential on purpose — a handful of PATCHes, and one failure
+      // shouldn't leave the rest half-applied without a banner.
+      // eslint-disable-next-line no-await-in-loop
+      await updateContactStatus(id, status);
+    }
+  };
+  const [showBulkStatusMenu, setShowBulkStatusMenu] = useState(false);
+  const [openStatusCellId, setOpenStatusCellId] = useState(null); // contact id whose status pill menu is open
+
+  // Status pill that opens a four-option menu — used in the Contacts
+  // table and on each board card.
+  const renderStatusPicker = (contact, { align = "left", size = "md" } = {}) => {
+    const isOpen = openStatusCellId === contact.id;
+    const pill = size === "sm" ? "text-[11px] px-2 py-0.5" : "text-xs px-2.5 py-1";
+    return (
+      <div className="relative inline-block">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpenStatusCellId((cur) => (cur === contact.id ? null : contact.id));
+          }}
+          className={`inline-flex items-center gap-1 rounded-full border whitespace-nowrap ${pill} ${statusPillClass(contact.status)}`}
+          title="Change status"
+        >
+          {contact.status || "New Lead"}
+          <ChevronDown size={11} className="opacity-60" />
+        </button>
+        {isOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setOpenStatusCellId(null)} />
+            <div
+              className={`absolute top-full mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-1.5 w-40 ${
+                align === "right" ? "right-0" : "left-0"
+              }`}
+            >
+              {LEAD_STATUSES.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setOpenStatusCellId(null);
+                    updateContactStatus(contact.id, s);
+                  }}
+                  className={`w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 flex items-center justify-between gap-2 ${
+                    s === contact.status ? "bg-gray-50" : ""
+                  }`}
+                >
+                  <span className={`text-xs px-2 py-0.5 rounded-full border whitespace-nowrap ${statusPillClass(s)}`}>{s}</span>
+                  {s === contact.status && <CheckCircle2 size={12} className="text-gray-400" />}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   const startEditContactCell = (contactId, key, currentValue) => {
     setEditingContactCell(`${contactId}:${key}`);
     setContactEditValue(currentValue === null || currentValue === undefined ? "" : String(currentValue));
@@ -1697,21 +1960,22 @@ export default function SimpleCRM() {
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
   );
   const dialClientOptions = ["All", ...clients.map((cl) => cl.name)];
-  const dialStatusOptions = ["All", ...Object.keys(statusColors)];
   // Custom columns worth showing/filtering in the Powerdialler table —
   // whatever actually has a value somewhere in the queue. Computed
   // from the full queue (not the currently-filtered set) so the
   // column list stays put as filters change instead of flickering.
-  const visibleDialColumns = contactColumns.filter(
-    (col) => col.key !== "stage" && dialQueue.some((l) => hasFieldValue(l.fields?.[col.key]))
+  const visibleDialColumns = contactColumns.filter((col) =>
+    dialQueue.some((l) => hasFieldValue(l.fields?.[col.key]))
   );
-  // Stage gets its own fixed header/filter cell (rendered separately,
-  // right after Client) rather than living in visibleDialColumns, but
-  // it still needs to participate in the same exclude/text filtering
-  // as every other criteria column below.
-  const dialFilterableColumns = stageColumnDef ? [stageColumnDef, ...visibleDialColumns] : visibleDialColumns;
+  const dialStatusExcludes = dialFieldExcludes.__status || [];
+  // "Active" means different from the default — hiding closed leads is
+  // the baseline, not a filter someone applied.
+  const dialStatusExcludesAtDefault =
+    dialStatusExcludes.length === CLOSED_LEAD_STATUSES.length &&
+    CLOSED_LEAD_STATUSES.every((s) => dialStatusExcludes.includes(s));
   const dialFieldFiltersActive =
-    Object.values(dialFieldExcludes).some((vals) => vals && vals.length > 0) ||
+    !dialStatusExcludesAtDefault ||
+    Object.entries(dialFieldExcludes).some(([key, vals]) => key !== "__status" && vals && vals.length > 0) ||
     Object.values(dialFieldTextFilters).some((v) => v);
   const dialFiltersActive =
     Object.entries(dialFilters).some(([key, value]) => value !== emptyDialFilters[key]) || dialFieldFiltersActive;
@@ -1719,7 +1983,7 @@ export default function SimpleCRM() {
     setDialFilters((f) => ({ ...f, [key]: value }));
   const clearAllDialFilters = () => {
     setDialFilters(emptyDialFilters);
-    setDialFieldExcludes({});
+    setDialFieldExcludes(defaultDialFieldExcludes);
     setDialFieldTextFilters({});
   };
   const filteredDialQueueBase = dialQueue.filter(
@@ -1730,8 +1994,8 @@ export default function SimpleCRM() {
       l.phone.toLowerCase().includes(dialFilters.phone.toLowerCase()) &&
       (dialFilters.client === "All" || l.client === dialFilters.client) &&
       l.notes.toLowerCase().includes(dialFilters.notes.toLowerCase()) &&
-      (dialFilters.status === "All" || l.status === dialFilters.status) &&
-      dialFilterableColumns.every((col) => {
+      !dialStatusExcludes.includes(l.status) &&
+      visibleDialColumns.every((col) => {
         const val = l.fields?.[col.key];
         if (col.type === "select" || col.type === "checkbox") {
           const excluded = dialFieldExcludes[col.key] || [];
@@ -1958,13 +2222,14 @@ export default function SimpleCRM() {
     logSystemMessageToConversation(lead, { type: "call", text: summary });
   };
 
-  // Logs the wrap-up's chosen STAGE as its own message — separate from
-  // the "Outgoing call" line above, since the outcome isn't known
-  // until wrap-up finishes, a beat after the call itself ends. This is
-  // what makes a "Booked" outcome show up in the Conversation tab.
-  const logStageToConversation = (lead, stage) => {
-    if (!stage) return;
-    logSystemMessageToConversation(lead, { type: "outcome", text: stage, preview: `Outcome: ${stage}` });
+  // Logs a status change as its own message — from the wrap-up screen
+  // (separate from the "Outgoing call" line above, since the outcome
+  // isn't known until wrap-up finishes), or from the Contacts table /
+  // kanban board. This is what makes a "Booked" outcome show up in
+  // the Conversation tab.
+  const logStatusToConversation = (lead, status) => {
+    if (!status) return;
+    logSystemMessageToConversation(lead, { type: "outcome", text: status, preview: `Outcome: ${status}` });
   };
 
   // ----- Power Dialler session (auto-dial through a list) -----
@@ -2052,7 +2317,7 @@ export default function SimpleCRM() {
   };
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
-  const [wrapUp, setWrapUp] = useState(null); // { lead, customStage, notes, secondsLeft }
+  const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, durationMs, secondsLeft }
   const [wrapUpStatusMenuOpen, setWrapUpStatusMenuOpen] = useState(false);
   const [callLog, setCallLog] = useState([]);
 
@@ -2175,11 +2440,9 @@ export default function SimpleCRM() {
     .filter((e) => e.status === "Booked")
     .sort((a, b) => new Date(b.calledAt) - new Date(a.calledAt));
 
-  // Call log "status"/"outcome" is written from the imported STAGE
-  // column's value (see finishWrapUp) — colored the same way STAGE
-  // pills are everywhere else, rather than the app's built-in
-  // statusColors (which only covers manually-created contacts).
-  const callOutcomeColor = (value) => (value ? selectOptionColor(stageColumnDef || {}, value) : "");
+  // Call log "status"/"outcome" is the lead's status as of wrap-up —
+  // the same four values, coloured the same way, as everywhere else.
+  const callOutcomeColor = (value) => (value ? statusPillClass(value) : "");
 
   // Kept in sync with `session` so the long-lived Twilio call event
   // handlers below (registered once per call, not re-created each
@@ -2197,9 +2460,16 @@ export default function SimpleCRM() {
 
   // A list's leadIds already only ever contains leads still worth
   // calling (removeLeadFromLists drops one the moment its call
-  // actually completes) — this just filters out any that no longer
-  // exist as contacts at all.
-  const remainingInList = (leadIds) => leadIds.filter((id) => dialQueue.some((l) => l.id === id));
+  // actually completes) — this filters out any that no longer exist
+  // as contacts at all, plus any whose status has since been set to
+  // Booked / Not Interested from anywhere else (the Contacts table,
+  // the board, another rep's wrap-up), so a stale Powerlist can never
+  // re-dial a lead that's already closed.
+  const remainingInList = (leadIds) =>
+    leadIds.filter((id) => {
+      const lead = dialQueue.find((l) => l.id === id);
+      return Boolean(lead) && !isClosedLeadStatus(lead.status);
+    });
 
   const saveSelectedAsList = async () => {
     if (!newListName.trim() || selectedLeadIds.length === 0) return;
@@ -2266,7 +2536,7 @@ export default function SimpleCRM() {
   // complete instead of only covering session calls.
   const logCallDirect = (lead, durationMs) => {
     const durationSeconds = Math.round((durationMs || 0) / 1000);
-    const status = lead.fields?.stage || lead.status;
+    const status = lead.status;
     const tempLogId = `${lead.id}-${Date.now()}`;
     setCallLog((log) => [
       {
@@ -2315,47 +2585,35 @@ export default function SimpleCRM() {
       return;
     }
     // A redial via "Call again" carries the wrap-up screen's in-
-    // progress stage/notes forward (see callLeadAgain) rather than
+    // progress status/notes forward (see callLeadAgain) rather than
     // losing what was already typed — everything else about this
     // call's outcome still starts fresh.
     const draft = lead.__wrapUpDraft;
-    // customStage edits the imported STAGE column (contacts.fields.stage)
-    // — the real per-lead pipeline state — rather than the app's fixed
-    // status field, which every imported lead defaults to "New Lead".
     setWrapUp({
       lead,
-      customStage: draft ? draft.customStage : lead.fields?.stage || "",
+      status: draft ? draft.status : lead.status || "New Lead",
       notes: draft ? draft.notes : lead.notes || "",
       durationMs,
       secondsLeft: WRAP_UP_SECONDS,
     });
   };
 
-  // Saves the wrap-up's stage/notes onto the lead, logs the call, and
+  // Saves the wrap-up's status/notes onto the lead, logs the call, and
   // advances the session to the next lead — auto-triggered by the
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, customStage, notes, durationMs } = wrapUp;
-    // customStage edits the imported STAGE column (contacts.fields.stage)
-    // — the real per-lead pipeline state — rather than the app's fixed
-    // status field, which every imported lead defaults to "New Lead".
-    const status = customStage;
+    const { lead, notes, durationMs } = wrapUp;
+    const status = LEAD_STATUSES.includes(wrapUp.status) ? wrapUp.status : lead.status || "New Lead";
     const durationSeconds = Math.round((durationMs || 0) / 1000);
 
-    // Only log an outcome message when the stage actually changed in
-    // this session — re-confirming the same stage isn't news.
-    if (customStage && customStage !== (lead.fields?.stage || "")) {
-      logStageToConversation(lead, customStage);
+    // Only log an outcome message when the status actually changed in
+    // this session — re-confirming the same status isn't news.
+    if (status !== lead.status) {
+      logStatusToConversation(lead, status);
     }
 
-    setContacts((cs) =>
-      cs.map((c) =>
-        c.id === lead.id
-          ? { ...c, notes, lastContact: "Today", fields: { ...c.fields, stage: customStage } }
-          : c
-      )
-    );
+    setContacts((cs) => cs.map((c) => (c.id === lead.id ? { ...c, notes, lastContact: "Today", status } : c)));
     const tempLogId = `${lead.id}-${Date.now()}`;
     setCallLog((log) => [
       {
@@ -2378,7 +2636,7 @@ export default function SimpleCRM() {
     // Persist to the database — fire-and-forget, surfaced as a banner
     // on failure rather than blocking the session from moving on.
     api
-      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", fields: { stage: customStage } })
+      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", status })
       .catch((err) => setDbError(err.message || "Could not save the updated lead."));
     api
       .post("/api/call-log", {
@@ -3044,8 +3302,7 @@ export default function SimpleCRM() {
                       ) : m.type === "outcome" ? (
                         <div key={m.id} className="flex justify-center">
                           <div
-                            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border font-medium ${selectOptionColor(
-                              stageColumnDef || {},
+                            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border font-medium ${statusPillClass(
                               m.text
                             )}`}
                           >
@@ -3222,6 +3479,32 @@ export default function SimpleCRM() {
                 </div>
               </div>
               <div className="flex gap-3">
+                {selectedContactIds.length > 0 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowBulkStatusMenu((v) => !v)}
+                      className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
+                    >
+                      Set status for {selectedContactIds.length} <ChevronDown size={14} className="text-gray-400" />
+                    </button>
+                    {showBulkStatusMenu && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setShowBulkStatusMenu(false)} />
+                        <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-1.5 w-44">
+                          {LEAD_STATUSES.map((st) => (
+                            <button
+                              key={st}
+                              onClick={() => setStatusForSelectedContacts(st)}
+                              className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
+                            >
+                              <span className={`text-xs px-2 py-0.5 rounded-full border whitespace-nowrap ${statusPillClass(st)}`}>{st}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
                 {selectedContactIds.length > 0 && authUser?.role !== "client" && (
                   <button
                     onClick={() => setShowAddToPowerlist(true)}
@@ -3238,6 +3521,25 @@ export default function SimpleCRM() {
                     <Trash2 size={15} /> Delete {selectedContactIds.length} selected
                   </button>
                 )}
+                <div className="flex border border-gray-200 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setContactsView("list")}
+                    className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium ${
+                      contactsView === "list" ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    <Table2 size={15} /> List
+                  </button>
+                  <button
+                    onClick={() => setContactsView("board")}
+                    className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium ${
+                      contactsView === "board" ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    <SquareKanban size={15} /> Board
+                  </button>
+                </div>
+                {contactsView === "list" && (
                 <div className="relative">
                   <button
                     onClick={() => {
@@ -3292,7 +3594,7 @@ export default function SimpleCRM() {
                                 <span className="truncate">{col.label}</span>
                               </label>
                             ))}
-                          {contactColumns.filter((col) => col.key !== "stage" && col.label.toLowerCase().includes(columnSettingsSearch.toLowerCase())).length === 0 && (
+                          {contactColumns.filter((col) => col.label.toLowerCase().includes(columnSettingsSearch.toLowerCase())).length === 0 && (
                             <div className="text-xs text-gray-400 px-1.5 py-2">No columns match "{columnSettingsSearch}"</div>
                           )}
                         </div>
@@ -3300,6 +3602,7 @@ export default function SimpleCRM() {
                     </>
                   )}
                 </div>
+                )}
                 <div className="relative">
                   <Search size={15} className="absolute left-3 top-2.5 text-gray-400" />
                   <input
@@ -3338,6 +3641,9 @@ export default function SimpleCRM() {
                 </button>
               </div>
             </div>
+            {contactsView === "board" && renderContactsBoard()}
+            {contactsView === "list" && (
+              <>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -3388,14 +3694,6 @@ export default function SimpleCRM() {
                         className="flex items-center gap-1 hover:text-gray-700"
                       >
                         Tag {sortIndicator("__tag")}
-                      </button>
-                    </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
-                      <button
-                        onClick={() => toggleContactSort("stage")}
-                        className="flex items-center gap-1 hover:text-gray-700"
-                      >
-                        Stage {sortIndicator("stage")}
                       </button>
                     </th>
                     <th className="py-2 font-medium whitespace-nowrap">
@@ -3468,18 +3766,7 @@ export default function SimpleCRM() {
                           <span className="text-gray-300 text-xs">—</span>
                         )}
                       </td>
-                      <td className="py-2.5 whitespace-nowrap">
-                        {stageColumnDef ? (
-                          renderContactCell(c, stageColumnDef)
-                        ) : (
-                          <span className="text-gray-300 text-xs">—</span>
-                        )}
-                      </td>
-                      <td className="py-2.5 whitespace-nowrap">
-                        <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[c.status]}`}>
-                          {c.status}
-                        </span>
-                      </td>
+                      <td className="py-2.5 whitespace-nowrap">{renderStatusPicker(c)}</td>
                       <td className="py-2.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
                       {visibleContactColumns.map((col) => (
                         <td key={col.id} className="px-3 py-2.5 min-w-[130px] max-w-[220px]">
@@ -3492,7 +3779,7 @@ export default function SimpleCRM() {
                   {filteredContacts.length === 0 && (
                     <tr>
                       <td
-                        colSpan={visibleContactColumns.length + 10}
+                        colSpan={visibleContactColumns.length + 9}
                         className="px-8 py-10 text-center text-sm text-gray-400"
                       >
                         No contacts
@@ -3531,6 +3818,8 @@ export default function SimpleCRM() {
                   </button>
                 </div>
               </div>
+            )}
+              </>
             )}
           </div>
         )}
@@ -3868,59 +4157,44 @@ export default function SimpleCRM() {
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
-                      <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
-                      {(() => {
-                        const stageCol = contactColumns.find((c) => c.key === "stage");
-                        const options = stageCol?.options || [];
-                        return (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
-                              className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
-                            >
-                              {wrapUp.customStage ? (
-                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(stageCol || {}, wrapUp.customStage)}`}>
-                                  {wrapUp.customStage}
-                                </span>
-                              ) : (
-                                <span className="text-gray-300 text-xs">—</span>
-                              )}
-                              <ChevronDown size={14} className="text-gray-400" />
-                            </button>
-                            {wrapUpStatusMenuOpen && (
-                              <>
-                                <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
-                                <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full max-h-64 overflow-y-auto">
-                                  <button
-                                    onClick={() => {
-                                      setWrapUp((w) => (w ? { ...w, customStage: "" } : w));
-                                      setWrapUpStatusMenuOpen(false);
-                                    }}
-                                    className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 text-xs text-gray-400"
-                                  >
-                                    —
-                                  </button>
-                                  {options.map((o) => (
-                                    <button
-                                      key={o.value}
-                                      onClick={() => {
-                                        setWrapUp((w) => (w ? { ...w, customStage: o.value } : w));
-                                        setWrapUpStatusMenuOpen(false);
-                                      }}
-                                      className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
-                                    >
-                                      <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${SELECT_COLORS[o.color] || SELECT_COLORS.gray}`}>
-                                        {o.value}
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              </>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">Status</label>
+                      <button
+                        type="button"
+                        onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
+                        className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
+                      >
+                        <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${statusPillClass(wrapUp.status)}`}>
+                          {wrapUp.status || "New Lead"}
+                        </span>
+                        <ChevronDown size={14} className="text-gray-400" />
+                      </button>
+                      {wrapUpStatusMenuOpen && (
+                        <>
+                          <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
+                          <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full">
+                            {LEAD_STATUSES.map((st) => (
+                              <button
+                                key={st}
+                                onClick={() => {
+                                  setWrapUp((w) => (w ? { ...w, status: st } : w));
+                                  setWrapUpStatusMenuOpen(false);
+                                }}
+                                className={`w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 flex items-center justify-between ${
+                                  wrapUp.status === st ? "bg-gray-50" : ""
+                                }`}
+                              >
+                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${statusPillClass(st)}`}>{st}</span>
+                                {wrapUp.status === st && <CheckCircle2 size={13} className="text-gray-400" />}
+                              </button>
+                            ))}
+                            {isClosedLeadStatus(wrapUp.status) && (
+                              <div className="text-[11px] text-gray-400 px-2 pt-1.5 leading-snug">
+                                {wrapUp.status} leads leave the dial queue and won't be called again.
+                              </div>
                             )}
-                          </>
-                        );
-                      })()}
+                          </div>
+                        </>
+                      )}
                     </div>
                     <div>
                       <label className="text-xs font-medium text-gray-500 block mb-1">Notes</label>
@@ -3938,7 +4212,7 @@ export default function SimpleCRM() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() =>
-                          callLeadAgain(wrapUp.lead, { customStage: wrapUp.customStage, notes: wrapUp.notes })
+                          callLeadAgain(wrapUp.lead, { status: wrapUp.status, notes: wrapUp.notes })
                         }
                         className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
                       >
@@ -3947,7 +4221,7 @@ export default function SimpleCRM() {
                       <button
                         onClick={() =>
                           callLeadAgainWithDifferentNumber(wrapUp.lead, {
-                            customStage: wrapUp.customStage,
+                            status: wrapUp.status,
                             notes: wrapUp.notes,
                           })
                         }
@@ -4163,7 +4437,6 @@ export default function SimpleCRM() {
                       <th className="px-5 py-3 font-medium">Email</th>
                       <th className="px-5 py-3 font-medium">Phone</th>
                       <th className="px-5 py-3 font-medium">Client</th>
-                      <th className="px-5 py-3 font-medium whitespace-nowrap">Stage</th>
                       <th className="px-5 py-3 font-medium">Notes</th>
                       <th className="px-5 py-3 font-medium">Status</th>
                       {visibleDialColumns.map((col) => (
@@ -4222,9 +4495,6 @@ export default function SimpleCRM() {
                         </select>
                       </th>
                       <th className="px-5 pb-3 font-normal">
-                        {stageColumnDef && renderDialColumnFilter(stageColumnDef)}
-                      </th>
-                      <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.notes}
                           onChange={(e) => updateDialFilter("notes", e.target.value)}
@@ -4232,19 +4502,7 @@ export default function SimpleCRM() {
                           className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
                         />
                       </th>
-                      <th className="px-5 pb-3 font-normal">
-                        <select
-                          value={dialFilters.status}
-                          onChange={(e) => updateDialFilter("status", e.target.value)}
-                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
-                        >
-                          {dialStatusOptions.map((name) => (
-                            <option key={name} value={name}>
-                              {name}
-                            </option>
-                          ))}
-                        </select>
-                      </th>
+                      <th className="px-5 pb-3 font-normal min-w-[150px]">{renderDialColumnFilter(DIAL_STATUS_FILTER_COL)}</th>
                       {visibleDialColumns.map((col) => (
                         <th key={col.id} className="px-5 pb-3 font-normal">
                           {renderDialColumnFilter(col)}
@@ -4275,25 +4533,11 @@ export default function SimpleCRM() {
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.phone}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.client}</td>
-                        <td className="px-5 py-3.5">
-                          {lead.fields?.stage ? (
-                            <span
-                              className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(
-                                stageColumnDef || {},
-                                lead.fields.stage
-                              )}`}
-                            >
-                              {lead.fields.stage}
-                            </span>
-                          ) : (
-                            <span className="text-gray-300 text-xs">—</span>
-                          )}
-                        </td>
                         <td className="px-5 py-3.5 text-gray-500 max-w-xs truncate" title={lead.notes}>
                           {lead.notes}
                         </td>
                         <td className="px-5 py-3.5">
-                          <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[lead.status]}`}>
+                          <span className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${statusPillClass(lead.status)}`}>
                             {lead.status}
                           </span>
                         </td>
@@ -4368,7 +4612,7 @@ export default function SimpleCRM() {
                     {filteredDialQueue.length === 0 && (
                       <tr>
                         <td
-                          colSpan={11 + visibleDialColumns.length}
+                          colSpan={10 + visibleDialColumns.length}
                           className="px-5 py-10 text-center text-sm text-gray-400"
                         >
                           No leads match the current filters
@@ -4687,59 +4931,44 @@ export default function SimpleCRM() {
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
-                      <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
-                      {(() => {
-                        const stageCol = contactColumns.find((c) => c.key === "stage");
-                        const options = stageCol?.options || [];
-                        return (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
-                              className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
-                            >
-                              {wrapUp.customStage ? (
-                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(stageCol || {}, wrapUp.customStage)}`}>
-                                  {wrapUp.customStage}
-                                </span>
-                              ) : (
-                                <span className="text-gray-300 text-xs">—</span>
-                              )}
-                              <ChevronDown size={14} className="text-gray-400" />
-                            </button>
-                            {wrapUpStatusMenuOpen && (
-                              <>
-                                <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
-                                <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full max-h-64 overflow-y-auto">
-                                  <button
-                                    onClick={() => {
-                                      setWrapUp((w) => (w ? { ...w, customStage: "" } : w));
-                                      setWrapUpStatusMenuOpen(false);
-                                    }}
-                                    className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 text-xs text-gray-400"
-                                  >
-                                    —
-                                  </button>
-                                  {options.map((o) => (
-                                    <button
-                                      key={o.value}
-                                      onClick={() => {
-                                        setWrapUp((w) => (w ? { ...w, customStage: o.value } : w));
-                                        setWrapUpStatusMenuOpen(false);
-                                      }}
-                                      className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
-                                    >
-                                      <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${SELECT_COLORS[o.color] || SELECT_COLORS.gray}`}>
-                                        {o.value}
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              </>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">Status</label>
+                      <button
+                        type="button"
+                        onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
+                        className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
+                      >
+                        <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${statusPillClass(wrapUp.status)}`}>
+                          {wrapUp.status || "New Lead"}
+                        </span>
+                        <ChevronDown size={14} className="text-gray-400" />
+                      </button>
+                      {wrapUpStatusMenuOpen && (
+                        <>
+                          <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
+                          <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full">
+                            {LEAD_STATUSES.map((st) => (
+                              <button
+                                key={st}
+                                onClick={() => {
+                                  setWrapUp((w) => (w ? { ...w, status: st } : w));
+                                  setWrapUpStatusMenuOpen(false);
+                                }}
+                                className={`w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 flex items-center justify-between ${
+                                  wrapUp.status === st ? "bg-gray-50" : ""
+                                }`}
+                              >
+                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${statusPillClass(st)}`}>{st}</span>
+                                {wrapUp.status === st && <CheckCircle2 size={13} className="text-gray-400" />}
+                              </button>
+                            ))}
+                            {isClosedLeadStatus(wrapUp.status) && (
+                              <div className="text-[11px] text-gray-400 px-2 pt-1.5 leading-snug">
+                                {wrapUp.status} leads leave the dial queue and won't be called again.
+                              </div>
                             )}
-                          </>
-                        );
-                      })()}
+                          </div>
+                        </>
+                      )}
                     </div>
                     <div>
                       <label className="text-xs font-medium text-gray-500 block mb-1">Notes</label>
@@ -4757,7 +4986,7 @@ export default function SimpleCRM() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() =>
-                          callLeadAgain(wrapUp.lead, { customStage: wrapUp.customStage, notes: wrapUp.notes })
+                          callLeadAgain(wrapUp.lead, { status: wrapUp.status, notes: wrapUp.notes })
                         }
                         className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
                       >
@@ -4766,7 +4995,7 @@ export default function SimpleCRM() {
                       <button
                         onClick={() =>
                           callLeadAgainWithDifferentNumber(wrapUp.lead, {
-                            customStage: wrapUp.customStage,
+                            status: wrapUp.status,
                             notes: wrapUp.notes,
                           })
                         }
@@ -4982,7 +5211,6 @@ export default function SimpleCRM() {
                       <th className="px-5 py-3 font-medium">Email</th>
                       <th className="px-5 py-3 font-medium">Phone</th>
                       <th className="px-5 py-3 font-medium">Client</th>
-                      <th className="px-5 py-3 font-medium whitespace-nowrap">Stage</th>
                       <th className="px-5 py-3 font-medium">Notes</th>
                       <th className="px-5 py-3 font-medium">Status</th>
                       {visibleDialColumns.map((col) => (
@@ -5041,9 +5269,6 @@ export default function SimpleCRM() {
                         </select>
                       </th>
                       <th className="px-5 pb-3 font-normal">
-                        {stageColumnDef && renderDialColumnFilter(stageColumnDef)}
-                      </th>
-                      <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.notes}
                           onChange={(e) => updateDialFilter("notes", e.target.value)}
@@ -5051,19 +5276,7 @@ export default function SimpleCRM() {
                           className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
                         />
                       </th>
-                      <th className="px-5 pb-3 font-normal">
-                        <select
-                          value={dialFilters.status}
-                          onChange={(e) => updateDialFilter("status", e.target.value)}
-                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
-                        >
-                          {dialStatusOptions.map((name) => (
-                            <option key={name} value={name}>
-                              {name}
-                            </option>
-                          ))}
-                        </select>
-                      </th>
+                      <th className="px-5 pb-3 font-normal min-w-[150px]">{renderDialColumnFilter(DIAL_STATUS_FILTER_COL)}</th>
                       {visibleDialColumns.map((col) => (
                         <th key={col.id} className="px-5 pb-3 font-normal">
                           {renderDialColumnFilter(col)}
@@ -5094,25 +5307,11 @@ export default function SimpleCRM() {
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.phone}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.client}</td>
-                        <td className="px-5 py-3.5">
-                          {lead.fields?.stage ? (
-                            <span
-                              className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(
-                                stageColumnDef || {},
-                                lead.fields.stage
-                              )}`}
-                            >
-                              {lead.fields.stage}
-                            </span>
-                          ) : (
-                            <span className="text-gray-300 text-xs">—</span>
-                          )}
-                        </td>
                         <td className="px-5 py-3.5 text-gray-500 max-w-xs truncate" title={lead.notes}>
                           {lead.notes}
                         </td>
                         <td className="px-5 py-3.5">
-                          <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[lead.status]}`}>
+                          <span className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${statusPillClass(lead.status)}`}>
                             {lead.status}
                           </span>
                         </td>
@@ -5187,7 +5386,7 @@ export default function SimpleCRM() {
                     {filteredDialQueue.length === 0 && (
                       <tr>
                         <td
-                          colSpan={11 + visibleDialColumns.length}
+                          colSpan={10 + visibleDialColumns.length}
                           className="px-5 py-10 text-center text-sm text-gray-400"
                         >
                           No leads match the current filters
@@ -6471,7 +6670,7 @@ export default function SimpleCRM() {
                         onChange={(e) => updateContactForm("status", e.target.value)}
                         className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
                       >
-                        {Object.keys(statusColors).map((s) => (
+                        {LEAD_STATUSES.map((s) => (
                           <option key={s} value={s}>
                             {s}
                           </option>

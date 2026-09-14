@@ -8,6 +8,13 @@ import pg from "pg";
 import crypto from "crypto";
 import { CLIENT_COLUMNS, IMPORTED_CLIENTS } from "./clientImportData.js";
 import { CONTACT_COLUMNS, IMPORTED_CONTACTS } from "./contactImportData.js";
+import {
+  LEAD_STATUSES,
+  LEGACY_STATUS_FIELD_KEYS,
+  normalizeLeadStatus,
+  resolveLeadStatus,
+  extractLegacyStatusFromFields,
+} from "./leadStatus.js";
 
 const { Pool } = pg;
 
@@ -136,6 +143,7 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    await migrateLegacyStageToStatus();
     await query(`
       CREATE TABLE IF NOT EXISTS conversations (
         id SERIAL PRIMARY KEY,
@@ -405,7 +413,7 @@ const SEED_CONTACTS = [
     email: "david.chen@outlook.com",
     phone: "0433 221 908",
     client: "Lux Solar",
-    status: "Contacted",
+    status: "New Lead",
     lastContact: "Yesterday",
     notes: "Asked to be called back after 5pm.",
   },
@@ -441,7 +449,7 @@ const SEED_CONTACTS = [
     email: "tom.nguyen@gmail.com",
     phone: "0466 903 415",
     client: "Stoprent Properties",
-    status: "Contacted",
+    status: "New Lead",
     lastContact: "Today",
     notes: "Asking about deposit requirements.",
   },
@@ -587,6 +595,60 @@ export async function importClientData() {
   return { clients: IMPORTED_CLIENTS.length, columns: CLIENT_COLUMNS.length };
 }
 
+// One-time fold of the legacy two-field pipeline state into the single
+// `status` column. Runs on every schema init but is a no-op once the
+// data is clean (one cheap count + one lookup), so it's safe to keep
+// around. For each lead the imported STAGE custom column wins (it's
+// where the dialler's wrap-up used to write), then the imported
+// STATUS custom column, then whatever the fixed column already said;
+// anything unrecognisable becomes New Lead. The legacy columns are
+// then stripped from every row's `fields` and deleted from
+// contact_columns so nothing can read or write them again.
+async function migrateLegacyStageToStatus() {
+  const dirtyWhere = `status IS NULL OR NOT (status = ANY($1::text[])) OR fields ?| $2::text[]`;
+  const [{ n }] = await query(`SELECT count(*)::int AS n FROM contacts WHERE ${dirtyWhere}`, [
+    LEAD_STATUSES,
+    LEGACY_STATUS_FIELD_KEYS,
+  ]);
+  const legacyColumns = await query("SELECT key FROM contact_columns WHERE key = ANY($1::text[])", [
+    LEGACY_STATUS_FIELD_KEYS,
+  ]);
+  if (!n && !legacyColumns.length) return;
+
+  const rows = await query(`SELECT id, status, fields FROM contacts WHERE ${dirtyWhere}`, [
+    LEAD_STATUSES,
+    LEGACY_STATUS_FIELD_KEYS,
+  ]);
+  const tally = {};
+  const BATCH = 500;
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const batch = rows.slice(i, i + BATCH);
+    const values = [];
+    const params = [LEGACY_STATUS_FIELD_KEYS];
+    for (const r of batch) {
+      const f = r.fields || {};
+      const status = resolveLeadStatus(f.stage, f.status, f.lead_status, f.outcome, r.status);
+      tally[status] = (tally[status] || 0) + 1;
+      params.push(r.id, status);
+      values.push(`($${params.length - 1}::int, $${params.length}::text)`);
+    }
+    await query(
+      `UPDATE contacts AS c SET status = v.status, fields = COALESCE(c.fields, '{}'::jsonb) - $1::text[]
+       FROM (VALUES ${values.join(",")}) AS v(id, status)
+       WHERE c.id = v.id`,
+      params
+    );
+  }
+  if (legacyColumns.length) {
+    await query("DELETE FROM contact_columns WHERE key = ANY($1::text[])", [LEGACY_STATUS_FIELD_KEYS]);
+  }
+  console.log(
+    `[db] folded legacy stage/status fields into contacts.status for ${rows.length} lead(s)`,
+    tally,
+    legacyColumns.length ? `— dropped column(s): ${legacyColumns.map((c) => c.key).join(", ")}` : ""
+  );
+}
+
 function contactFromRow(r) {
   return {
     id: r.id,
@@ -621,7 +683,38 @@ export async function getContactById(id) {
   return rows[0] ? contactFromRow(rows[0]) : null;
 }
 
-export async function createContact(c) {
+// Every write path funnels a record's status through here so the
+// contacts table only ever holds one of LEAD_STATUSES. A status-like
+// key smuggled in via `fields` (the old "stage" custom column, a
+// webhook mapping "Status" as an extra question, …) is folded into
+// the real status instead of being stored as a shadow copy. An
+// explicit `status` wins over such a field — except for the sheet
+// import (preferFieldStatus), whose records all carry a placeholder
+// "New Lead" status and keep the real outcome in `fields.stage`.
+function normalizeIncomingContact(c, { preferFieldStatus = false } = {}) {
+  const { fields, legacyStatus } = extractLegacyStatusFromFields(c.fields, slugifyColumnKey);
+  const status = preferFieldStatus
+    ? resolveLeadStatus(legacyStatus, c.status)
+    : resolveLeadStatus(c.status, legacyStatus);
+  return { ...c, fields, status };
+}
+
+// Strict version for edits: an explicit status must be one of the
+// four (case/whitespace-insensitively), otherwise the request is
+// rejected rather than silently turned into "New Lead" — that would
+// quietly put a lead back into the dial queue.
+function coerceLeadStatusOrThrow(raw) {
+  const s = normalizeLeadStatus(raw);
+  if (!s) {
+    const err = new Error(`Invalid status "${raw}". Must be one of: ${LEAD_STATUSES.join(", ")}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return s;
+}
+
+export async function createContact(input) {
+  const c = normalizeIncomingContact(input);
   const rows = await query(
     "INSERT INTO contacts (name, email, phone, client, status, last_contact, notes, fields, lead_date, tag) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
     [
@@ -629,7 +722,7 @@ export async function createContact(c) {
       c.email || "",
       c.phone,
       c.client || "",
-      c.status || "New Lead",
+      c.status,
       c.lastContact || "Today",
       c.notes || "",
       JSON.stringify(c.fields || {}),
@@ -643,6 +736,17 @@ export async function createContact(c) {
 // `fields` is shallow-merged onto the existing JSONB blob, same as
 // updateClient, so patching one custom column doesn't clobber others.
 export async function updateContact(id, patch) {
+  // A client still running the old UI patches the outcome as
+  // `fields: { stage: "Booked" }` — honour it as a status change (so a
+  // rep mid-session on a stale tab can't reopen the two-field split),
+  // then drop the key so it never lands back in `fields`.
+  const { fields, legacyStatus } = extractLegacyStatusFromFields(patch.fields, slugifyColumnKey);
+  let status = null;
+  if (patch.status !== undefined && patch.status !== null && String(patch.status).trim() !== "") {
+    status = coerceLeadStatusOrThrow(patch.status);
+  } else if (legacyStatus !== null) {
+    status = normalizeLeadStatus(legacyStatus);
+  }
   const rows = await query(
     `UPDATE contacts SET
        status = COALESCE($2, status),
@@ -656,10 +760,10 @@ export async function updateContact(id, patch) {
      RETURNING *`,
     [
       id,
-      patch.status ?? null,
+      status,
       patch.notes ?? null,
       patch.lastContact ?? null,
-      JSON.stringify(patch.fields || {}),
+      JSON.stringify(fields || {}),
       patch.leadDate ?? null,
       patch.tag ?? null,
       patch.phone ?? null,
@@ -699,6 +803,16 @@ export async function getContactColumns() {
 export async function createContactColumn({ label, type, options }) {
   if (!COLUMN_TYPES.includes(type)) throw new Error(`Unknown column type: ${type}`);
   const key = slugifyColumnKey(label);
+  // The pipeline status is the fixed `status` field, full stop — a
+  // second "Stage"/"Status" column is exactly how leads ended up
+  // marked Booked in one place and still dialled from another.
+  if (LEGACY_STATUS_FIELD_KEYS.includes(key)) {
+    const err = new Error(
+      `"${label}" can't be a custom column — use the built-in Status field (${LEAD_STATUSES.join(" / ")}) instead.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
   const [{ next_position }] = await query(
     "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM contact_columns"
   );
@@ -771,7 +885,8 @@ function inferColumnType(values) {
 // inferring a type for genuinely new ones from the values seen in
 // this batch. Runs as plain sequential inserts, which is fine for a
 // one-off admin import rather than a hot request path.
-export async function importContactsBulk(records) {
+export async function importContactsBulk(rawRecords) {
+  const records = rawRecords.map((r) => normalizeIncomingContact(r));
   const existingColumns = await getContactColumns();
   const columnByKey = new Map(existingColumns.map((c) => [c.key, c]));
 
@@ -820,7 +935,7 @@ export async function importContactsBulk(records) {
         r.email || "",
         r.phone || "",
         r.client || "",
-        r.status || "New Lead",
+        r.status,
         r.lastContact || "",
         r.notes || "",
         JSON.stringify(fields),
@@ -839,10 +954,11 @@ export async function importContactsBulk(records) {
 // the first batch of contacts, which was enough on its own to blow
 // past Vercel's timeout before a single lead got inserted.
 async function seedContactColumnsForImport() {
-  if (!CONTACT_COLUMNS.length) return;
+  const columns = CONTACT_COLUMNS.filter((c) => !LEGACY_STATUS_FIELD_KEYS.includes(c.key));
+  if (!columns.length) return;
   const placeholders = [];
   const params = [];
-  CONTACT_COLUMNS.forEach((c, i) => {
+  columns.forEach((c, i) => {
     const base = i * 5;
     placeholders.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5})`);
     params.push(c.key, c.label, c.type, JSON.stringify(c.options || []), i);
@@ -855,7 +971,11 @@ async function seedContactColumnsForImport() {
 
 // Inserts a batch of already-shaped contact rows in chunks of 300 —
 // one query per row would be needlessly slow for a few thousand rows.
-async function insertContactRows(rows) {
+async function insertContactRows(rawRows) {
+  // The imported sheet rows still carry their tab's own STAGE/STATUS
+  // under `fields` — folded into the one real status here, so the
+  // import lands every lead on the same four statuses directly.
+  const rows = rawRows.map((r) => normalizeIncomingContact(r, { preferFieldStatus: true }));
   const COLS_PER_ROW = 10;
   const BATCH_SIZE = 300;
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
@@ -871,7 +991,7 @@ async function insertContactRows(rows) {
         c.email || "",
         c.phone || "",
         c.client || "",
-        c.status || "New Lead",
+        c.status,
         c.lastContact || "",
         c.notes || "",
         JSON.stringify(c.fields || {}),
@@ -1108,7 +1228,7 @@ export async function addCallLogEntry(entry) {
       entry.phone,
       entry.client,
       entry.tag ?? null,
-      entry.status,
+      normalizeLeadStatus(entry.status) || entry.status || null,
       entry.notes,
       entry.userId ?? null,
       entry.userName ?? null,
