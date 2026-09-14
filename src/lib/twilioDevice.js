@@ -58,6 +58,25 @@ async function getDevice(identity) {
       .then(({ token, callerIds }) => {
         callerIdPool = Array.isArray(callerIds) ? callerIds : [];
         device = new Device(token, { logLevel: "warn" });
+        // Self-heals a device left in a bad state — previously, once
+        // `device` was set here it was reused for the rest of the tab's
+        // life no matter what, so a Device-level error or the SDK
+        // unregistering it (an expired token, the signaling connection
+        // dying mid-conference, …) meant every call attempt afterward
+        // kept reusing the same broken instance until the page was
+        // reloaded. Clearing both module vars here just means the next
+        // getDevice() call re-fetches a token and registers a fresh
+        // Device instead — the actual fix for "the dialler goes stale
+        // after one batch" when that batch happened to end abnormally.
+        device.on("error", (err) => {
+          console.error("[twilioDevice] Device error — will re-register on the next call", err);
+          device = null;
+          deviceReady = null;
+        });
+        device.on("unregistered", () => {
+          device = null;
+          deviceReady = null;
+        });
         return device.register().then(async () => {
           // Adds the soundboard's mixing pipeline to every call this
           // device places from here on — see soundboardProcessor.js.
@@ -106,10 +125,14 @@ function toE164(rawPhone) {
 // — `call` is the live Twilio Call object (attach 'accept' /
 // 'disconnect' / 'cancel' / 'error' listeners to it to drive UI
 // state), `callerId` is the number it's calling from.
-export async function placeCall(phoneNumber, identity = "rep") {
+export async function placeCall(phoneNumber, identity = "rep", { leadId } = {}) {
   const dev = await getDevice(identity);
   const callerId = nextCallerId();
-  const call = await dev.connect({ params: { To: toE164(phoneNumber), callerId } });
+  // leadId rides along as a custom param so the backend can label the
+  // call's recording with the right contact (see api/voice.js).
+  const call = await dev.connect({
+    params: { To: toE164(phoneNumber), callerId, ...(leadId ? { leadId: String(leadId) } : {}) },
+  });
   return { call, callerId };
 }
 
