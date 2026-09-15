@@ -29,6 +29,7 @@ const FULL_ACCESS_TABS = [
   "log",
   "clients",
   "reports",
+  "working-hours",
   "settings",
 ];
 const CLIENT_TABS = ["conversation", "contacts", "reports"];

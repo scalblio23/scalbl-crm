@@ -39,6 +39,7 @@ import {
   Filter,
   ChevronDown,
   BarChart3,
+  Clock,
   CheckCircle2,
   Copy,
   RefreshCw,
@@ -291,6 +292,122 @@ function formatCallDuration(ms) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+// ---------- Working Hours ----------
+// Turns the call log into hours actually worked, without trusting a
+// rep's first-to-last call span at face value. Three rules:
+//
+//   1. A rep's calls for a day are split into "dialling blocks". Any
+//      silence longer than WORK_HOURS_GAP_MINUTES (measured from the end
+//      of one call to the start of the next) ends the block, and the
+//      silence itself is never counted.
+//   2. A block runs from its first dial to the end of its last call, so
+//      a lone call an hour after knocking off is a block of one call
+//      worth zero minutes — it can't stretch the day.
+//   3. A block is credited at most WORK_HOURS_MAX_MINUTES_PER_CALL per
+//      dial (6 min/call = a full hour needs 10+ dials). A slow trickle
+//      of calls spaced just under the gap limit therefore earns minutes
+//      for the calls made, not for the clock time between them.
+//
+// Days are bucketed on Adelaide time (ACST/ACDT) regardless of where
+// the person viewing the tab is, so the numbers match the reps' day.
+const WORK_HOURS_TIMEZONE = "Australia/Adelaide";
+const WORK_HOURS_GAP_MINUTES = 20;
+const WORK_HOURS_MAX_MINUTES_PER_CALL = 6;
+
+const workHoursTzFormatter = new Intl.DateTimeFormat("en-AU", {
+  timeZone: WORK_HOURS_TIMEZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+function workHoursParts(ms) {
+  const p = {};
+  for (const { type, value } of workHoursTzFormatter.formatToParts(new Date(ms))) p[type] = value;
+  return { day: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
+}
+function workHoursTime(ms) {
+  return workHoursParts(ms).time;
+}
+function formatWorkMinutes(minutes) {
+  const total = Math.max(0, Math.round(minutes));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+function formatWorkDay(day) {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-AU", {
+    timeZone: "UTC",
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+}
+
+// One row per rep per (Adelaide) day: raw first-to-last span, the
+// dialling blocks inside it, the gaps between blocks, and the credited
+// minutes after the per-call cap. Pure — memoised by the caller.
+function computeWorkingHours(entries, { gapMinutes, maxMinutesPerCall }) {
+  const gapMs = gapMinutes * 60 * 1000;
+  const groups = new Map();
+  for (const e of entries) {
+    if (!e.calledAt) continue;
+    const start = new Date(e.calledAt).getTime();
+    if (Number.isNaN(start)) continue;
+    const rep = e.userName || "Unknown";
+    const { day } = workHoursParts(start);
+    const key = `${rep}|${day}`;
+    if (!groups.has(key)) groups.set(key, { rep, day, calls: [] });
+    groups.get(key).calls.push({ start, end: start + Math.max(0, e.durationSeconds || 0) * 1000 });
+  }
+
+  const rows = [];
+  for (const g of groups.values()) {
+    g.calls.sort((a, b) => a.start - b.start);
+    const blocks = [];
+    const gaps = [];
+    let cur = null;
+    for (const c of g.calls) {
+      if (cur && c.start - cur.end > gapMs) {
+        gaps.push({ start: cur.end, end: c.start, minutes: (c.start - cur.end) / 60000 });
+        blocks.push(cur);
+        cur = null;
+      }
+      if (!cur) cur = { start: c.start, end: c.end, calls: 0 };
+      cur.calls += 1;
+      cur.end = Math.max(cur.end, c.end);
+    }
+    if (cur) blocks.push(cur);
+    for (const b of blocks) {
+      b.rawMinutes = (b.end - b.start) / 60000;
+      b.creditedMinutes = Math.min(b.rawMinutes, b.calls * maxMinutesPerCall);
+      b.capped = b.rawMinutes - b.creditedMinutes >= 1;
+    }
+    const first = g.calls[0];
+    const last = g.calls[g.calls.length - 1];
+    const dayEnd = Math.max(...g.calls.map((c) => c.end));
+    rows.push({
+      key: `${g.rep}|${g.day}`,
+      rep: g.rep,
+      day: g.day,
+      calls: g.calls.length,
+      firstCall: first.start,
+      lastCall: last.start,
+      spanMinutes: (dayEnd - first.start) / 60000,
+      creditedMinutes: blocks.reduce((s, b) => s + b.creditedMinutes, 0),
+      blocks,
+      gaps,
+      capped: blocks.some((b) => b.capped),
+    });
+  }
+  rows.sort((a, b) => b.day.localeCompare(a.day) || a.rep.localeCompare(b.rep));
+  return rows;
+}
+
 // One multi-line dial candidate's status → a friendly label/color for
 // the "Dialling N lines" panel. Mirrors the statuses a Twilio call
 // leg actually reports (see api/multiline-status.js).
@@ -324,6 +441,7 @@ const navItems = [
   { key: "bulk-sms", label: "Bulk SMS", icon: Send },
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
+  { key: "working-hours", label: "Working Hours", icon: Clock },
   { key: "clients", label: "Clients", icon: Briefcase },
   { key: "settings", label: "Settings", icon: Settings },
 ];
@@ -2174,6 +2292,51 @@ export default function SimpleCRM() {
   const reportsBookedList = reportsCallLog
     .filter((e) => e.status === "Booked")
     .sort((a, b) => new Date(b.calledAt) - new Date(a.calledAt));
+
+  // ---------- Working Hours ----------
+  // See computeWorkingHours (module scope) for the rules. Rows are
+  // derived once from the full call log and then filtered, so changing
+  // the date range or rep is instant.
+  const [workHoursFrom, setWorkHoursFrom] = useState(() => isoDaysAgo(6));
+  const [workHoursTo, setWorkHoursTo] = useState(() => isoToday());
+  const [workHoursRepFilter, setWorkHoursRepFilter] = useState("All");
+  const workHoursAllRows = useMemo(
+    () =>
+      computeWorkingHours(callLog, {
+        gapMinutes: WORK_HOURS_GAP_MINUTES,
+        maxMinutesPerCall: WORK_HOURS_MAX_MINUTES_PER_CALL,
+      }),
+    [callLog]
+  );
+  const workHoursRows = workHoursAllRows.filter((r) => {
+    if (workHoursFrom && r.day < workHoursFrom) return false;
+    if (workHoursTo && r.day > workHoursTo) return false;
+    if (workHoursRepFilter !== "All" && r.rep !== workHoursRepFilter) return false;
+    return true;
+  });
+  const workHoursByRep = useMemo(() => {
+    const map = new Map();
+    for (const r of workHoursRows) {
+      if (!map.has(r.rep)) {
+        map.set(r.rep, { rep: r.rep, days: 0, calls: 0, creditedMinutes: 0, spanMinutes: 0, gaps: 0, lastCall: 0 });
+      }
+      const s = map.get(r.rep);
+      s.days += 1;
+      s.calls += r.calls;
+      s.creditedMinutes += r.creditedMinutes;
+      s.spanMinutes += r.spanMinutes;
+      s.gaps += r.gaps.length;
+      s.lastCall = Math.max(s.lastCall, r.lastCall);
+    }
+    return [...map.values()].sort((a, b) => b.creditedMinutes - a.creditedMinutes);
+  }, [workHoursRows]);
+  const workHoursTotalCredited = workHoursRows.reduce((s, r) => s + r.creditedMinutes, 0);
+  const workHoursTotalSpan = workHoursRows.reduce((s, r) => s + r.spanMinutes, 0);
+  const workHoursTotalCalls = workHoursRows.reduce((s, r) => s + r.calls, 0);
+  const workHoursTotalGaps = workHoursRows.reduce((s, r) => s + r.gaps.length, 0);
+  // Reps who have logged calls at some point but not in the selected
+  // range — the "no calls today" list a manager actually wants to see.
+  const workHoursIdleReps = reportsUserNames.filter((name) => !workHoursByRep.some((s) => s.rep === name));
 
   // Call log "status"/"outcome" is written from the imported STAGE
   // column's value (see finishWrapUp) — colored the same way STAGE
@@ -5647,6 +5810,280 @@ export default function SimpleCRM() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Working Hours */}
+        {page === "working-hours" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
+              <div>
+                <h1 className="text-xl font-bold">Working Hours</h1>
+                <div className="text-sm text-gray-400 mt-0.5">
+                  Hours worked, measured from dialling activity (Adelaide time)
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="date"
+                  value={workHoursFrom}
+                  onChange={(e) => setWorkHoursFrom(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <span className="text-sm text-gray-400">to</span>
+                <input
+                  type="date"
+                  value={workHoursTo}
+                  onChange={(e) => setWorkHoursTo(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <select
+                  value={workHoursRepFilter}
+                  onChange={(e) => setWorkHoursRepFilter(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                >
+                  <option value="All">All reps</option>
+                  {reportsUserNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => {
+                    setWorkHoursFrom(isoToday());
+                    setWorkHoursTo(isoToday());
+                  }}
+                  className="text-sm text-gray-400 hover:text-gray-700 px-2"
+                >
+                  Today
+                </button>
+                <button
+                  onClick={() => {
+                    setWorkHoursFrom(isoDaysAgo(6));
+                    setWorkHoursTo(isoToday());
+                    setWorkHoursRepFilter("All");
+                  }}
+                  className="text-sm text-gray-400 hover:text-gray-700 px-2"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            <div className="p-8 space-y-8">
+              {/* Big-number KPIs */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="border border-green-200 bg-green-50/40 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-green-700 uppercase tracking-wide">Hours credited</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums text-green-800">
+                    {formatWorkMinutes(workHoursTotalCredited)}
+                  </div>
+                </div>
+                <div className="border border-gray-200 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">First-to-last span</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums">{formatWorkMinutes(workHoursTotalSpan)}</div>
+                  <div className="text-xs text-gray-400 mt-1">
+                    {formatWorkMinutes(workHoursTotalSpan - workHoursTotalCredited)} not credited
+                  </div>
+                </div>
+                <div className="border border-gray-200 rounded-2xl p-5">
+                  <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Calls</div>
+                  <div className="text-4xl font-bold mt-2 tabular-nums">{workHoursTotalCalls}</div>
+                  <div className="text-xs text-gray-400 mt-1">
+                    {workHoursTotalCredited > 0
+                      ? `${(workHoursTotalCalls / (workHoursTotalCredited / 60)).toFixed(0)} per credited hour`
+                      : "—"}
+                  </div>
+                </div>
+                <div
+                  className={`border rounded-2xl p-5 ${
+                    workHoursTotalGaps > 0 ? "border-amber-200 bg-amber-50/40" : "border-gray-200"
+                  }`}
+                >
+                  <div
+                    className={`text-xs font-medium uppercase tracking-wide ${
+                      workHoursTotalGaps > 0 ? "text-amber-700" : "text-gray-400"
+                    }`}
+                  >
+                    Gaps flagged
+                  </div>
+                  <div
+                    className={`text-4xl font-bold mt-2 tabular-nums ${workHoursTotalGaps > 0 ? "text-amber-800" : ""}`}
+                  >
+                    {workHoursTotalGaps}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1">silences over {WORK_HOURS_GAP_MINUTES} min mid-day</div>
+                </div>
+              </div>
+
+              {/* Per-rep rollup for the selected range */}
+              <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm flex items-center justify-between">
+                  <span>Hours per rep</span>
+                  {workHoursIdleReps.length > 0 && (
+                    <span className="text-xs font-normal text-gray-400">
+                      No calls in range: {workHoursIdleReps.join(", ")}
+                    </span>
+                  )}
+                </div>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                      <th className="px-5 py-2.5 font-medium">Rep</th>
+                      <th className="px-5 py-2.5 font-medium text-right">Days</th>
+                      <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                      <th className="px-5 py-2.5 font-medium text-right">Credited</th>
+                      <th className="px-5 py-2.5 font-medium text-right">Avg / day</th>
+                      <th className="px-5 py-2.5 font-medium text-right">Span</th>
+                      <th className="px-5 py-2.5 font-medium text-right">Gaps</th>
+                      <th className="px-5 py-2.5 font-medium text-right">Last call</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {workHoursByRep.map((s) => (
+                      <tr key={s.rep} className="border-b border-gray-50 last:border-0">
+                        <td className="px-5 py-3 font-medium">{s.rep}</td>
+                        <td className="px-5 py-3 text-right tabular-nums">{s.days}</td>
+                        <td className="px-5 py-3 text-right tabular-nums">{s.calls}</td>
+                        <td className="px-5 py-3 text-right tabular-nums font-semibold text-green-800">
+                          {formatWorkMinutes(s.creditedMinutes)}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums">
+                          {formatWorkMinutes(s.creditedMinutes / s.days)}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums text-gray-400">
+                          {formatWorkMinutes(s.spanMinutes)}
+                        </td>
+                        <td className={`px-5 py-3 text-right tabular-nums ${s.gaps > 0 ? "text-amber-700" : ""}`}>
+                          {s.gaps}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums text-gray-500">
+                          {formatWorkDay(workHoursParts(s.lastCall).day)} {workHoursTime(s.lastCall)}
+                        </td>
+                      </tr>
+                    ))}
+                    {workHoursByRep.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="px-5 py-8 text-center text-sm text-gray-400">
+                          No calls in this range.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Day-by-day detail — the evidence behind the rollup */}
+              <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Day by day</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                        <th className="px-5 py-2.5 font-medium">Date</th>
+                        <th className="px-5 py-2.5 font-medium">Rep</th>
+                        <th className="px-5 py-2.5 font-medium">First → last</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Span</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Credited</th>
+                        <th className="px-5 py-2.5 font-medium">Dialling blocks</th>
+                        <th className="px-5 py-2.5 font-medium">Gaps</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {workHoursRows.map((r) => (
+                        <tr key={r.key} className="border-b border-gray-50 last:border-0 align-top">
+                          <td className="px-5 py-3 whitespace-nowrap">{formatWorkDay(r.day)}</td>
+                          <td className="px-5 py-3 font-medium whitespace-nowrap">{r.rep}</td>
+                          <td className="px-5 py-3 tabular-nums whitespace-nowrap">
+                            {workHoursTime(r.firstCall)} → {workHoursTime(r.lastCall)}
+                          </td>
+                          <td className="px-5 py-3 text-right tabular-nums text-gray-400">
+                            {formatWorkMinutes(r.spanMinutes)}
+                          </td>
+                          <td className="px-5 py-3 text-right tabular-nums">{r.calls}</td>
+                          <td className="px-5 py-3 text-right tabular-nums font-semibold text-green-800 whitespace-nowrap">
+                            {formatWorkMinutes(r.creditedMinutes)}
+                            {r.capped && (
+                              <span
+                                className="ml-1.5 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5"
+                                title={`Some blocks were dialled slower than ${Math.round(60 / WORK_HOURS_MAX_MINUTES_PER_CALL)} calls/hour, so they were credited per call instead of by the clock.`}
+                              >
+                                capped
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-5 py-3">
+                            <div className="flex flex-wrap gap-1">
+                              {r.blocks.map((b, i) => (
+                                <span
+                                  key={i}
+                                  className={`text-xs tabular-nums rounded px-1.5 py-0.5 border ${
+                                    b.calls === 1
+                                      ? "bg-gray-50 border-gray-200 text-gray-400"
+                                      : "bg-green-50 border-green-200 text-green-800"
+                                  }`}
+                                  title={`${b.calls} call${b.calls === 1 ? "" : "s"} · ${formatWorkMinutes(b.rawMinutes)} on the clock · ${formatWorkMinutes(b.creditedMinutes)} credited`}
+                                >
+                                  {workHoursTime(b.start)}–{workHoursTime(b.end)} · {b.calls}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-5 py-3">
+                            <div className="flex flex-wrap gap-1">
+                              {r.gaps.map((g, i) => (
+                                <span
+                                  key={i}
+                                  className="text-xs tabular-nums rounded px-1.5 py-0.5 border bg-amber-50 border-amber-200 text-amber-800"
+                                >
+                                  {workHoursTime(g.start)}–{workHoursTime(g.end)} ({formatWorkMinutes(g.minutes)})
+                                </span>
+                              ))}
+                              {r.gaps.length === 0 && <span className="text-xs text-gray-300">—</span>}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {workHoursRows.length === 0 && (
+                        <tr>
+                          <td colSpan={8} className="px-5 py-8 text-center text-sm text-gray-400">
+                            No calls in this range.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* The rules, spelled out where the numbers are read */}
+              <div className="border border-gray-200 rounded-2xl p-5 text-sm text-gray-600 space-y-1.5">
+                <div className="font-semibold text-gray-800">How hours are counted</div>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>
+                    Each rep's day is split into <span className="font-medium">dialling blocks</span>. A silence of
+                    more than {WORK_HOURS_GAP_MINUTES} minutes between calls ends the block, and the silence itself is
+                    never counted.
+                  </li>
+                  <li>
+                    A block runs from its first dial to the end of its last call. A single call on its own is a block
+                    worth 0 minutes, so a call "out of the blue" an hour later can't stretch the day.
+                  </li>
+                  <li>
+                    A block earns at most {WORK_HOURS_MAX_MINUTES_PER_CALL} minutes per call (
+                    {Math.round(60 / WORK_HOURS_MAX_MINUTES_PER_CALL)}+ calls an hour for full credit). Slow trickle
+                    dialling is credited for the calls made, not the clock time between them, and is marked{" "}
+                    <span className="text-amber-700 font-medium">capped</span>.
+                  </li>
+                  <li>
+                    <span className="font-medium">Span</span> is the plain first-to-last-call time, shown alongside so
+                    you can see exactly what was taken off and why.
+                  </li>
+                </ul>
               </div>
             </div>
           </div>
