@@ -316,6 +316,10 @@ function multilineStatusColor(status) {
 }
 
 // ---------- Sidebar ----------
+// Roles that get every tab and every lead. Anything else (including a
+// missing/unknown role) is treated as a tag-scoped client.
+const FULL_ACCESS_ROLES = ["owner", "super_admin", "admin"];
+
 const navItems = [
   { key: "conversation", label: "Conversation", icon: MessageSquare },
   { key: "contacts", label: "Contacts", icon: Users },
@@ -377,7 +381,16 @@ export default function SimpleCRM() {
     try {
       const path = authMode === "setup" ? "/api/auth-set-password" : "/api/auth-login";
       const { user } = await api.post(path, { email, password });
-      setAuthUser(user);
+      // Role/allowedTags come from /api/auth-me (fresh DB lookup), not
+      // the login body — never trust a login response that could omit
+      // the role and silently unlock every tab for a client.
+      let resolved = null;
+      try {
+        resolved = (await api.get("/api/auth-me")).user;
+      } catch {
+        // fall through to the login body below
+      }
+      setAuthUser(resolved || { ...user, role: user.role || "client", allowedTags: user.allowedTags || [] });
     } catch (err) {
       setAuthError(err.message || "Something went wrong.");
     } finally {
@@ -1184,11 +1197,14 @@ export default function SimpleCRM() {
   // sees their own leads, so Powerdialler/Log/Clients/Settings (which
   // are either full-roster tools or nothing-to-do-with-leads config)
   // are hidden rather than just data-scoped.
+  // FAIL CLOSED: a signed-in user with no role (an API response that
+  // omitted it, an old cached shape) is treated as a client — a
+  // missing field must narrow access, never widen it.
+  const isClientRole = Boolean(authUser) && (authUser.role === "client" || !FULL_ACCESS_ROLES.includes(authUser.role));
   const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports"];
-  const visibleNavItems =
-    authUser?.role === "client" ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
+  const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
   useEffect(() => {
-    if (authUser?.role === "client" && !CLIENT_NAV_KEYS.includes(page)) setPage("conversation");
+    if (isClientRole && !CLIENT_NAV_KEYS.includes(page)) setPage("conversation");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser, page]);
   const [teamUsers, setTeamUsers] = useState([]);
@@ -2085,7 +2101,7 @@ export default function SimpleCRM() {
   // Booked — the one number a Client-role user gets in place of the
   // internal talk-time metrics they don't see.
   const reportsBookedCalls = reportsCallLog.filter((e) => e.status === "Booked").length;
-  const reportsIsClientView = authUser?.role === "client";
+  const reportsIsClientView = isClientRole;
 
   // Groups call log entries by a key (rep, client, or tag) and rolls
   // up call count + duration for each — the source for every
@@ -2962,7 +2978,7 @@ export default function SimpleCRM() {
               <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
                 <span className="font-semibold">Conversations</span>
                 <div className="flex items-center gap-3">
-                  {selectedConvoIds.length > 0 && authUser?.role !== "client" && (
+                  {selectedConvoIds.length > 0 && !isClientRole && (
                     <button
                       onClick={deleteSelectedConvos}
                       className="flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-800"
@@ -3223,7 +3239,7 @@ export default function SimpleCRM() {
                 </div>
               </div>
               <div className="flex gap-3">
-                {selectedContactIds.length > 0 && authUser?.role !== "client" && (
+                {selectedContactIds.length > 0 && !isClientRole && (
                   <button
                     onClick={() => setShowAddToPowerlist(true)}
                     className="flex items-center gap-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 text-sm px-4 py-2 rounded-lg font-medium"
@@ -3231,7 +3247,7 @@ export default function SimpleCRM() {
                     <ListChecks size={15} /> Add to Powerlist
                   </button>
                 )}
-                {selectedContactIds.length > 0 && authUser?.role !== "client" && (
+                {selectedContactIds.length > 0 && !isClientRole && (
                   <button
                     onClick={deleteSelectedContacts}
                     className="flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
@@ -3310,7 +3326,7 @@ export default function SimpleCRM() {
                     className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-64"
                   />
                 </div>
-                {authUser?.role !== "client" && (
+                {!isClientRole && (
                   <button
                     onClick={handleImportContacts}
                     disabled={importingContacts}
@@ -6422,7 +6438,7 @@ export default function SimpleCRM() {
               </div>
               <div>
                 <label className="text-sm font-medium block mb-1.5">Tag</label>
-                {authUser?.role === "client" ? (
+                {isClientRole ? (
                   // A client account can only ever add leads under one
                   // of their own tags — the server enforces this too,
                   // but picking from a list avoids a confusing 403 from

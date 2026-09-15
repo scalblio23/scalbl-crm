@@ -161,6 +161,7 @@ app.use(
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
+    "/api/users", // team roster (names/emails) is internal-only
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -317,8 +318,8 @@ app.delete(
 );
 
 // ---------- Users (roster + role management) ----------
-// GET is open to anyone signed in (so an admin can see who has
-// access); POST/PATCH/DELETE are gated by canManageUsers/canDeleteUser
+// GET is open to any internal user (so an admin can see who has
+// access; clients are blocked above); POST/PATCH/DELETE are gated by canManageUsers/canDeleteUser
 // — see api/users.js for the full reasoning, mirrored here.
 app.get("/api/users", dbRoute(async (req, res) => res.json(await getUsers())));
 app.post(
@@ -632,6 +633,15 @@ app.post(
     }
     const { leadId, name, phone, text } = req.body || {};
     if (!phone || !text) return res.status(400).json({ error: "Missing phone or text" });
+    // A client may only text leads under their own tags — never an
+    // arbitrary number. Mirrors api/sms-send.js.
+    const allowedTags = scopeTagsForUser(req.user);
+    if (allowedTags) {
+      const lead = leadId ? await getContactById(leadId) : null;
+      if (!lead || !allowedTags.includes(lead.tag)) {
+        return res.status(403).json({ error: "You can only message your own leads." });
+      }
+    }
     await sendSms({ to: phone, body: text });
     const timeLabel = new Date().toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
     const conversationId = await logMessage({

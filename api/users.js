@@ -1,13 +1,16 @@
 import { ensureSchema, getUsers, getUserById, inviteUser, updateUser, deleteUserById } from "../server/db.js";
-import { requireAuth, canManageUsers, canDeleteUser, ROLES } from "../server/auth.js";
+import { requireAuth, canManageUsers, canDeleteUser, forbidClientRole, ROLES } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
+  // The roster (every team member's name + email) is internal — a
+  // tag-scoped client has no business reading or changing it.
+  if (forbidClientRole(user, res)) return;
   try {
     await ensureSchema();
 
-    // Anyone signed in can see the roster (so an admin knows who has
+    // Any internal user can see the roster (so an admin knows who has
     // access) — only owner/super_admin can change it.
     if (req.method === "GET") {
       return res.status(200).json(await getUsers());
