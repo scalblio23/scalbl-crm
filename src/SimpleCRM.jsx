@@ -28,6 +28,7 @@ import {
   ClipboardList,
   Pencil,
   LayoutGrid,
+  SquareKanban,
   Table2,
   Upload,
   Loader2,
@@ -47,9 +48,39 @@ import {
   Play,
   Mic,
   Square,
+  Globe,
+  Megaphone,
+  Image,
+  Eye,
+  MousePointerClick,
+  DollarSign,
+  TrendingUp,
+  Link2,
+  Calendar,
+  Clock,
+  Video,
+  MapPin,
+  Zap,
+  Tag,
+  Folder,
+  FolderPlus,
+  Bot,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
+import Dropdown from "./components/Dropdown";
+import AddStepMenu from "./components/AddStepMenu";
+import AIVoicePanel from "./components/AIVoicePanel";
+import {
+  timezoneOptions,
+  detectBrowserTimezone,
+  timeOfDayOptions,
+  EVENT_LENGTH_OPTIONS,
+  BUFFER_OPTIONS,
+  MIN_NOTICE_OPTIONS,
+  BOOKING_WINDOW_OPTIONS,
+  WEEKDAYS,
+} from "./lib/calendarOptions";
 
 // ---------- Sample data ----------
 const initialContacts = [
@@ -70,7 +101,7 @@ const initialContacts = [
     email: "david.chen@outlook.com",
     phone: "0433 221 908",
     client: "Lux Solar",
-    status: "Contacted",
+    status: "New Lead",
     lastContact: "Yesterday",
     notes: "Asked to be called back after 5pm.",
     createdAt: "2026-08-24T15:40:00",
@@ -114,7 +145,7 @@ const initialContacts = [
     email: "tom.nguyen@gmail.com",
     phone: "0466 903 415",
     client: "Stoprent Properties",
-    status: "Contacted",
+    status: "New Lead",
     lastContact: "Today",
     notes: "Asking about deposit requirements.",
     createdAt: "2026-08-25T11:05:00",
@@ -186,12 +217,157 @@ const initialClients = [
 
 const initialConversations = [];
 
+// The ONE pipeline status every lead has, whatever tag/client it sits
+// under — mirrors LEAD_STATUSES in server/leadStatus.js, which is what
+// the database actually enforces. Contacts table + kanban board, the
+// Powerdialler/Multi Line tables and filters, the wrap-up screen, the
+// call log and Reports all read and write this single field. (There
+// used to be a second, imported "STAGE" custom column alongside it;
+// the wrap-up wrote that while the dialler filtered on this, which is
+// how leads marked Booked kept getting re-called.)
+const LEAD_STATUSES = ["New Lead", "No Answer", "Booked", "Not Interested"];
+// Statuses that take a lead out of the dial queue for good.
+const CLOSED_LEAD_STATUSES = ["Booked", "Not Interested"];
+const isClosedLeadStatus = (status) => CLOSED_LEAD_STATUSES.includes(status);
+// Status is the ONE thing in the app drawn as a solid, full-bleed block
+// of colour (monday.com style): the whole table cell is painted, white
+// bold text on top. Nothing else — tags, custom select columns, call
+// outcomes in other shapes — ever gets this treatment, so a lead's
+// status is unmistakable at a glance and can't be confused with any
+// other column.
 const statusColors = {
-  "New Lead": "bg-blue-50 text-blue-700 border-blue-200",
-  Contacted: "bg-amber-50 text-amber-700 border-amber-200",
-  Booked: "bg-green-50 text-green-700 border-green-200",
-  "No Answer": "bg-gray-50 text-gray-500 border-gray-200",
+  "New Lead": "bg-blue-600 text-white",
+  "No Answer": "bg-amber-500 text-white",
+  Booked: "bg-green-600 text-white",
+  "Not Interested": "bg-red-600 text-white",
 };
+const statusSolidClass = (status) => statusColors[status] || "bg-gray-400 text-white";
+// Small solid chip — used wherever a status shows up outside a table
+// cell (board cards, call log, conversation outcomes, filter menus).
+const STATUS_CHIP = "rounded-md px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide whitespace-nowrap";
+// The closer's verdict on a lead, shown as a tab strip along the bottom
+// of each board card. Separate from `status` (the setter's four-value
+// pipeline): a lead is Booked, then — after the appointment — Won or
+// Lost. Distinct hues from the status blocks so the two never blur.
+const DEAL_OUTCOMES = ["Pending", "Won", "Lost"];
+const dealOutcomeActiveClass = {
+  Pending: "bg-gray-700 text-white",
+  Won: "bg-emerald-600 text-white",
+  Lost: "bg-rose-600 text-white",
+};
+// Pseudo-column so the Powerdialler's status filter can reuse the
+// same exclude-checklist UI as every custom select column.
+const DIAL_STATUS_FILTER_COL = {
+  key: "__status",
+  label: "Status",
+  type: "select",
+  options: LEAD_STATUSES.map((value) => ({ value })),
+};
+
+// ---------- Activity stream (dial attempts by time of day) ----------
+// Shared by Reports (internal, full roster) and the client Portal
+// (scoped to one tag) — same 30-min bucketing + gap detection either
+// way, just fed a different slice of the call log. Pulled out to a
+// pure function so both call sites stay byte-for-byte identical.
+const ACTIVITY_BUCKET_MINUTES = 30;
+function buildActivityStream(callLogItems) {
+  const bucketsPerHour = 60 / ACTIVITY_BUCKET_MINUTES;
+  const totalBuckets = 24 * bucketsPerHour;
+  const counts = new Array(totalBuckets).fill(0);
+  for (const e of callLogItems) {
+    if (!e.calledAt) continue;
+    const d = new Date(e.calledAt);
+    if (Number.isNaN(d.getTime())) continue;
+    const idx = d.getHours() * bucketsPerHour + Math.floor(d.getMinutes() / ACTIVITY_BUCKET_MINUTES);
+    counts[idx] += 1;
+  }
+
+  const bucketLabel = (idx) => {
+    const h = Math.floor(idx / bucketsPerHour);
+    const m = (idx % bucketsPerHour) * ACTIVITY_BUCKET_MINUTES;
+    const h12 = h % 12 || 12;
+    return `${h12}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`;
+  };
+
+  const activeIdx = counts.map((c, i) => (c > 0 ? i : -1)).filter((i) => i >= 0);
+  if (activeIdx.length === 0) return { buckets: [], gaps: [] };
+
+  // Frame the chart on the working window actually seen in the data
+  // (padded by one bucket either side) instead of a full, mostly-empty
+  // 24 hours.
+  const first = Math.max(0, activeIdx[0] - 1);
+  const last = Math.min(totalBuckets - 1, activeIdx[activeIdx.length - 1] + 1);
+  const buckets = [];
+  for (let i = first; i <= last; i++) {
+    buckets.push({ time: bucketLabel(i), calls: counts[i] });
+  }
+
+  // Flag any stretch of 60+ minutes with zero dial attempts that sits
+  // *between* two active buckets — quiet time in the middle of a
+  // working stretch, not just before the first call or after the last.
+  const gaps = [];
+  let runStart = null;
+  for (let i = activeIdx[0]; i <= activeIdx[activeIdx.length - 1]; i++) {
+    if (counts[i] === 0) {
+      if (runStart === null) runStart = i;
+    } else if (runStart !== null) {
+      if (i - runStart >= bucketsPerHour) {
+        gaps.push({
+          start: bucketLabel(runStart),
+          end: bucketLabel(i - 1),
+          minutes: (i - runStart) * ACTIVITY_BUCKET_MINUTES,
+        });
+      }
+      runStart = null;
+    }
+  }
+  return { buckets, gaps };
+}
+
+// ---------- Client Portal — ad placeholders ----------
+// No ad-platform integration yet, so these are illustrative sample
+// cards only (clearly labelled "Preview data" wherever they render,
+// never presented as a client's real numbers). The dial/lead numbers
+// on the same screen are real, pulled from the same contacts/call log
+// data as the rest of the app — swapping this constant for a real
+// fetch (e.g. Meta/Google Ads insights) is the only change needed
+// once that integration exists; the card layout already expects this
+// shape.
+const PLACEHOLDER_ADS = [
+  {
+    id: "sample-1",
+    name: "Battery Rebate — Carousel",
+    platform: "Meta",
+    status: "Active",
+    impressions: 18400,
+    clicks: 612,
+    ctr: 3.3,
+    spend: 940,
+    leads: 24,
+  },
+  {
+    id: "sample-2",
+    name: "Free Site Assessment — Video",
+    platform: "Meta",
+    status: "Active",
+    impressions: 9250,
+    clicks: 287,
+    ctr: 3.1,
+    spend: 460,
+    leads: 11,
+  },
+  {
+    id: "sample-3",
+    name: "Savings Calculator — Static",
+    platform: "Google",
+    status: "Paused",
+    impressions: 5100,
+    clicks: 96,
+    ctr: 1.9,
+    spend: 210,
+    leads: 4,
+  },
+];
 
 // ---------- Dynamic columns (shared by the Client table and the
 // Contact table — same column types, same storage pattern: a
@@ -299,7 +475,12 @@ const MULTILINE_STATUS_LABELS = {
   queued: "Dialling…",
   initiated: "Dialling…",
   ringing: "Ringing…",
-  "in-progress": "Answered",
+  // Deliberately not "Connected" or "Answered" alone — answering
+  // doesn't mean the rep can hear (or be heard by) this line yet; it
+  // stays muted server-side until confirmed as the one winning line
+  // (see server/twilioCore.js), which is also the split second this
+  // card disappears in favor of the single live-call view.
+  "in-progress": "Answered — connecting…",
   completed: "Ended",
   busy: "Busy",
   failed: "Failed",
@@ -328,8 +509,46 @@ const navItems = [
   { key: "bulk-sms", label: "Bulk SMS", icon: Send },
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
+  { key: "portal", label: "Portal", icon: Globe },
   { key: "clients", label: "Clients", icon: Briefcase },
+  { key: "calendars", label: "Calendars", icon: Calendar },
+  { key: "automations", label: "Automations", icon: Zap },
+  { key: "ai-voice", label: "AI Voice", icon: Bot },
   { key: "settings", label: "Settings", icon: Settings },
+];
+
+// Calendar settings' left mini-nav — Integrate → Timezone → Availability
+// → Booking rules → Share & embed, per the sidebar tab → Add Calendar →
+// Calendar settings → options flow.
+const CALENDAR_SETTINGS_SECTIONS = [
+  { key: "integrate", label: "Integrate", icon: Globe },
+  { key: "timezone", label: "Timezone", icon: Clock },
+  { key: "availability", label: "Availability", icon: Calendar },
+  { key: "rules", label: "Booking rules", icon: ListChecks },
+  { key: "video", label: "Video conference", icon: Video },
+  { key: "share", label: "Share & embed", icon: Link2 },
+];
+
+// Automations — a trigger + an ordered chain of actions, same linear
+// shape as GoHighLevel's workflow builder (see server/automations.js
+// for how these are actually interpreted when a trigger fires).
+const AUTOMATION_TRIGGER_OPTIONS = [
+  { value: "contact_tag_added", label: "Contact Tag Added" },
+  { value: "booking_created", label: "Booking Created" },
+];
+
+// Clickable in the builder's Actions section — inserts "{{key}}" at
+// the cursor in whichever subject/body field was last focused. Keys
+// must match the `data` object server/automations.js's fillTemplate()
+// fills in at send time.
+const MERGE_FIELDS = [
+  { key: "name", label: "Contact Name" },
+  { key: "email", label: "Contact Email" },
+  { key: "phone", label: "Contact Phone" },
+  { key: "tag", label: "Contact Tag" },
+  { key: "calendar", label: "Calendar Name" },
+  { key: "appointment_date_time", label: "Appointment Date + Time" },
+  { key: "timezone", label: "Timezone" },
 ];
 
 export default function SimpleCRM() {
@@ -407,6 +626,75 @@ export default function SimpleCRM() {
     window.location.reload();
   };
 
+  // ---------- Portal invite claim (client self-signup link) ----------
+  // A client's invite link is this same app URL with ?invite=<token>
+  // on it — see api/portal-invite-claim.js. Detected once on mount;
+  // when present it takes over the whole screen (below, ahead of the
+  // normal login form) regardless of whether someone else is already
+  // logged in on this browser.
+  const [inviteToken] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("invite") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [inviteTags, setInviteTags] = useState(null); // null = still checking / invalid
+  const [inviteCheckError, setInviteCheckError] = useState("");
+  const [inviteChecking, setInviteChecking] = useState(Boolean(inviteToken));
+  const [claimForm, setClaimForm] = useState({ name: "", email: "", password: "", confirm: "" });
+  const [claimError, setClaimError] = useState("");
+  const [claimSubmitting, setClaimSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    let cancelled = false;
+    api
+      .get(`/api/portal-invite-claim?token=${encodeURIComponent(inviteToken)}`)
+      .then(({ tags }) => {
+        if (!cancelled) setInviteTags(tags || []);
+      })
+      .catch((err) => {
+        if (!cancelled) setInviteCheckError(err.message || "This invite link is invalid or has been revoked.");
+      })
+      .finally(() => {
+        if (!cancelled) setInviteChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [inviteToken]);
+
+  const handleClaimSubmit = async (e) => {
+    e.preventDefault();
+    setClaimError("");
+    if (!claimForm.name.trim() || !claimForm.email.trim() || !claimForm.password) {
+      setClaimError("Fill in your name, email and password.");
+      return;
+    }
+    if (claimForm.password !== claimForm.confirm) {
+      setClaimError("Passwords don't match.");
+      return;
+    }
+    setClaimSubmitting(true);
+    try {
+      const { user } = await api.post("/api/portal-invite-claim", {
+        token: inviteToken,
+        name: claimForm.name.trim(),
+        email: claimForm.email.trim(),
+        password: claimForm.password,
+      });
+      // Drop ?invite= from the URL now that it's claimed, then let the
+      // normal logged-in app take over.
+      window.history.replaceState({}, "", window.location.pathname);
+      setAuthUser(user);
+    } catch (err) {
+      setClaimError(err.message || "Something went wrong.");
+    } finally {
+      setClaimSubmitting(false);
+    }
+  };
+
   // Start empty rather than pre-filled with the sample data — that
   // data is only ever a fallback for when the database fetch below
   // genuinely fails, not something to flash on screen while it's
@@ -414,17 +702,52 @@ export default function SimpleCRM() {
   // back, and real conversations look like they'd disappeared, for
   // however long the initial fetch took).
   const [contacts, setContacts] = useState([]);
+  const [callLog, setCallLog] = useState([]);
+  // How many times each lead has been called — one number derived from
+  // the call log, shown on the left of every lead in the Contacts list,
+  // on every board card and in the dialler tables. Universal: it's the
+  // same count everywhere, whatever tag the lead sits under.
+  const callCountByLeadId = useMemo(() => {
+    const counts = {};
+    for (const e of callLog) {
+      if (e.leadId === null || e.leadId === undefined) continue;
+      counts[e.leadId] = (counts[e.leadId] || 0) + 1;
+    }
+    return counts;
+  }, [callLog]);
+  const renderCallCount = (contact) => {
+    const n = callCountByLeadId[contact.id] || 0;
+    return (
+      <span
+        title={`Called ${n} time${n === 1 ? "" : "s"}`}
+        className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold tabular-nums whitespace-nowrap ${
+          n ? "bg-gray-100 text-gray-700" : "bg-gray-50 text-gray-300"
+        }`}
+      >
+        <Phone size={10} /> {n}
+      </span>
+    );
+  };
   const [clients, setClients] = useState([]);
   const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
   const [contactColumns, setContactColumns] = useState([]); // dynamic custom columns for the contact table
-  // STAGE is a custom column like any other, but it's the one piece of
-  // pipeline state every list of leads needs to show regardless of
-  // which client/tag is being viewed — so it's pulled out and shown
-  // as its own fixed column (Contacts + Powerdialler tables) instead
-  // of being folded into the "imported criteria" columns, which only
-  // render when data narrows them into view and can end up scrolled
-  // out of sight.
-  const stageColumnDef = contactColumns.find((c) => c.key === "stage");
+
+  // Contacts page: table or kanban board (one column per status).
+  // Display-only preference, remembered per browser.
+  const [contactsView, setContactsView] = useState(() => {
+    try {
+      return localStorage.getItem("scalbl:contactsView") === "board" ? "board" : "list";
+    } catch {
+      return "list";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("scalbl:contactsView", contactsView);
+    } catch {
+      // ignore — private browsing / storage disabled
+    }
+  }, [contactsView]);
 
   // Which custom Contacts columns the user has chosen to hide from the
   // table — a display-only preference, kept per-browser since it's not
@@ -510,6 +833,385 @@ export default function SimpleCRM() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser]);
 
+  // ---------- Calendars ----------
+  // Loaded lazily the first time the tab is opened rather than as
+  // part of /api/bootstrap — a brand-new team has zero calendars, and
+  // there's no reason to make every page load wait on a fetch for a
+  // tab most sessions never visit.
+  const [calendars, setCalendars] = useState([]);
+  const [calendarsLoaded, setCalendarsLoaded] = useState(false);
+  const [calendarsLoading, setCalendarsLoading] = useState(false);
+  const [openCalendarId, setOpenCalendarId] = useState(null);
+  const [calendarSettingsTab, setCalendarSettingsTab] = useState("integrate");
+  const [showAddCalendarModal, setShowAddCalendarModal] = useState(false);
+  const [newCalendarName, setNewCalendarName] = useState("");
+  const [addingCalendar, setAddingCalendar] = useState(false);
+  const [calendarBookings, setCalendarBookings] = useState([]);
+  const [savingCalendar, setSavingCalendar] = useState(false);
+
+  const loadCalendars = async () => {
+    setCalendarsLoading(true);
+    try {
+      const data = await api.get("/api/calendars");
+      setCalendars(data);
+    } catch {
+      // Left as whatever was already loaded — the Calendars tab shows
+      // its own inline error state rather than a global banner.
+    } finally {
+      setCalendarsLoading(false);
+      setCalendarsLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    if (page === "calendars" && !calendarsLoaded && !calendarsLoading) loadCalendars();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  // Picks up ?calendar=<id>&google=connected|error after the "Integrate
+  // with Google" OAuth round trip lands back on the CRM (see
+  // api/calendar-google-callback.js) — reopens that calendar's
+  // Integrate section and refreshes its state so the newly-connected
+  // account shows up immediately.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const google = params.get("google");
+    const calendarParam = params.get("calendar");
+    if (!google) return;
+    setPage("calendars");
+    setCalendarSettingsTab("integrate");
+    if (calendarParam) setOpenCalendarId(Number(calendarParam));
+    loadCalendars();
+    window.history.replaceState({}, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const openCalendar = calendars.find((c) => c.id === openCalendarId) || null;
+  const timezoneDropdownOptions = useMemo(() => timezoneOptions(), []);
+  const timeOfDayDropdownOptions = useMemo(() => timeOfDayOptions(), []);
+
+  useEffect(() => {
+    if (!openCalendarId) return;
+    api
+      .get(`/api/calendar-bookings?calendarId=${openCalendarId}`)
+      .then(setCalendarBookings)
+      .catch(() => setCalendarBookings([]));
+  }, [openCalendarId]);
+
+  // Which Google calendar (on the connected account) to sync to —
+  // fetched once a calendar's Google connection is live, so the
+  // Integrate section can offer a picker instead of always using
+  // "primary".
+  const [googleCalendarOptions, setGoogleCalendarOptions] = useState([]);
+  const [googleCalendarsLoading, setGoogleCalendarsLoading] = useState(false);
+  const [googleCalendarsError, setGoogleCalendarsError] = useState("");
+  useEffect(() => {
+    setGoogleCalendarsError("");
+    if (!openCalendarId || !openCalendar?.googleConnected) {
+      setGoogleCalendarOptions([]);
+      return;
+    }
+    setGoogleCalendarsLoading(true);
+    api
+      .get(`/api/calendar-google-calendars?calendarId=${openCalendarId}`)
+      .then((list) => setGoogleCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary }))))
+      .catch((err) => {
+        setGoogleCalendarOptions([]);
+        setGoogleCalendarsError(err.message || "Could not load your Google calendars.");
+      })
+      .finally(() => setGoogleCalendarsLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCalendarId, openCalendar?.googleConnected]);
+
+  // Availability and booking-rules edits are drafted locally and saved
+  // with an explicit button (like the rest of Settings) rather than
+  // patching the server on every click — editing a weekly hours grid
+  // one field at a time would otherwise fire a save per keystroke.
+  const [availabilityDraft, setAvailabilityDraft] = useState(null);
+  const [rulesDraft, setRulesDraft] = useState(null);
+  const [videoDraft, setVideoDraft] = useState(null);
+  useEffect(() => {
+    if (!openCalendar) return;
+    setAvailabilityDraft(openCalendar.availability);
+    setRulesDraft({
+      eventLengthMinutes: String(openCalendar.eventLengthMinutes),
+      bufferMinutes: String(openCalendar.bufferMinutes),
+      minNoticeHours: String(openCalendar.minNoticeHours),
+      bookingWindowDays: String(openCalendar.bookingWindowDays),
+      maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
+    });
+    setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCalendar?.id]);
+
+  const setDayRange = (day, index, key, value) =>
+    setAvailabilityDraft((draft) => ({
+      ...draft,
+      [day]: draft[day].map((r, i) => (i === index ? { ...r, [key]: value } : r)),
+    }));
+  const addDayRange = (day) =>
+    setAvailabilityDraft((draft) => ({ ...draft, [day]: [...(draft[day] || []), { start: "09:00", end: "17:00" }] }));
+  const removeDayRange = (day, index) =>
+    setAvailabilityDraft((draft) => ({ ...draft, [day]: draft[day].filter((_, i) => i !== index) }));
+  const toggleDayEnabled = (day) =>
+    setAvailabilityDraft((draft) => ({
+      ...draft,
+      [day]: draft[day]?.length ? [] : [{ start: "09:00", end: "17:00" }],
+    }));
+  // Copies one day's time ranges onto every other day — the common
+  // case of "9-5 every weekday" shouldn't need setting each day by hand.
+  const applyDayToAllDays = (day) =>
+    setAvailabilityDraft((draft) => {
+      const source = (draft[day] || []).map((r) => ({ ...r }));
+      const next = {};
+      for (const { key } of WEEKDAYS) next[key] = source.map((r) => ({ ...r }));
+      return next;
+    });
+
+  const handleAddCalendar = async (e) => {
+    e.preventDefault();
+    if (!newCalendarName.trim()) return;
+    setAddingCalendar(true);
+    try {
+      const calendar = await api.post("/api/calendars", { name: newCalendarName.trim() });
+      setCalendars((cs) => [...cs, calendar]);
+      setNewCalendarName("");
+      setShowAddCalendarModal(false);
+      setOpenCalendarId(calendar.id);
+      setCalendarSettingsTab("integrate");
+    } catch (err) {
+      alert(err.message || "Could not create the calendar");
+    } finally {
+      setAddingCalendar(false);
+    }
+  };
+
+  const patchCalendar = async (id, patch) => {
+    setSavingCalendar(true);
+    try {
+      const updated = await api.patch(`/api/calendars?id=${id}`, patch);
+      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      alert(err.message || "Could not save that change");
+    } finally {
+      setSavingCalendar(false);
+    }
+  };
+
+  const deleteCalendar = async (id) => {
+    if (!window.confirm("Delete this calendar? Its booking link will stop working.")) return;
+    try {
+      await api.delete(`/api/calendars?id=${id}`);
+      setCalendars((cs) => cs.filter((c) => c.id !== id));
+      if (openCalendarId === id) setOpenCalendarId(null);
+    } catch (err) {
+      alert(err.message || "Could not delete the calendar");
+    }
+  };
+
+  const connectGoogleCalendar = (id) => {
+    window.location.href = `/api/calendar-google-connect?calendarId=${id}`;
+  };
+
+  const disconnectGoogleCalendar = async (id) => {
+    try {
+      const updated = await api.post("/api/calendar-google-disconnect", { calendarId: id });
+      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      alert(err.message || "Could not disconnect Google");
+    }
+  };
+
+  const cancelCalendarBooking = async (id) => {
+    if (!window.confirm("Cancel this booking?")) return;
+    try {
+      await api.delete(`/api/calendar-bookings?id=${id}`);
+      setCalendarBookings((bs) => bs.map((b) => (b.id === id ? { ...b, status: "cancelled" } : b)));
+    } catch (err) {
+      alert(err.message || "Could not cancel the booking");
+    }
+  };
+
+  // ---------- Automations ----------
+  const [automations, setAutomations] = useState([]);
+  const [automationsLoaded, setAutomationsLoaded] = useState(false);
+  const [automationsLoading, setAutomationsLoading] = useState(false);
+  const [openAutomationId, setOpenAutomationId] = useState(null);
+  const [showAddAutomationModal, setShowAddAutomationModal] = useState(false);
+  const [newAutomationName, setNewAutomationName] = useState("");
+  const [addingAutomation, setAddingAutomation] = useState(false);
+  const [savingAutomation, setSavingAutomation] = useState(false);
+
+  const loadAutomations = async () => {
+    setAutomationsLoading(true);
+    try {
+      setAutomations(await api.get("/api/automations"));
+    } catch {
+      // list just stays whatever it was — no global banner for this
+    } finally {
+      setAutomationsLoading(false);
+      setAutomationsLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    if (page !== "automations") return;
+    if (!automationsLoaded && !automationsLoading) loadAutomations();
+    // The "Booking is in calendar" filter needs calendar names —
+    // Calendars is normally loaded lazily on its own tab, so make
+    // sure it's also loaded here.
+    if (!calendarsLoaded && !calendarsLoading) loadCalendars();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  const openAutomation = automations.find((a) => a.id === openAutomationId) || null;
+
+  // Drafted locally and saved with an explicit button, same pattern
+  // as Calendar settings' Availability/Booking rules sections.
+  const [automationDraft, setAutomationDraft] = useState(null);
+  const [savedAutomationSnapshot, setSavedAutomationSnapshot] = useState(null);
+  useEffect(() => {
+    if (!openAutomation) return;
+    const draft = {
+      triggerType: openAutomation.triggerType,
+      triggerConfig: openAutomation.triggerConfig || {},
+      actions: openAutomation.actions || [],
+    };
+    setAutomationDraft(draft);
+    // A snapshot of what's actually persisted, so the builder can tell
+    // the difference between "nothing changed yet" and "you edited
+    // this and haven't hit Save" — the single most common reason an
+    // automation silently "doesn't fire" is that its trigger was
+    // configured in the UI but never actually saved.
+    setSavedAutomationSnapshot(JSON.stringify(draft));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAutomationId]);
+  const automationHasUnsavedChanges =
+    automationDraft && savedAutomationSnapshot !== null && JSON.stringify(automationDraft) !== savedAutomationSnapshot;
+
+  // Recent activity for the opened automation — the actual answer to
+  // "did this fire": zero rows means the trigger never matched at all
+  // (check the filter, Active, and whether it was saved); a 'done' row
+  // means it ran — so a missing message from there is a delivery
+  // problem (SendGrid/Twilio), not an automation problem.
+  const [automationRuns, setAutomationRuns] = useState([]);
+  const [automationRunsLoading, setAutomationRunsLoading] = useState(false);
+  const loadAutomationRuns = async (id) => {
+    setAutomationRunsLoading(true);
+    try {
+      setAutomationRuns(await api.get(`/api/automations?runsFor=${id}`));
+    } catch {
+      setAutomationRuns([]);
+    } finally {
+      setAutomationRunsLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (openAutomationId) loadAutomationRuns(openAutomationId);
+  }, [openAutomationId]);
+
+  const handleAddAutomation = async (e) => {
+    e.preventDefault();
+    if (!newAutomationName.trim()) return;
+    setAddingAutomation(true);
+    try {
+      const automation = await api.post("/api/automations", { name: newAutomationName.trim() });
+      setAutomations((as) => [...as, automation]);
+      setNewAutomationName("");
+      setShowAddAutomationModal(false);
+      setOpenAutomationId(automation.id);
+    } catch (err) {
+      alert(err.message || "Could not create the automation");
+    } finally {
+      setAddingAutomation(false);
+    }
+  };
+
+  const deleteAutomation = async (id) => {
+    if (!window.confirm("Delete this automation?")) return;
+    try {
+      await api.delete(`/api/automations?id=${id}`);
+      setAutomations((as) => as.filter((a) => a.id !== id));
+      if (openAutomationId === id) setOpenAutomationId(null);
+    } catch (err) {
+      alert(err.message || "Could not delete the automation");
+    }
+  };
+
+  const toggleAutomationActive = async (automation) => {
+    try {
+      const updated = await api.patch(`/api/automations?id=${automation.id}`, { active: !automation.active });
+      setAutomations((as) => as.map((a) => (a.id === automation.id ? updated : a)));
+    } catch (err) {
+      alert(err.message || "Could not update the automation");
+    }
+  };
+
+  const saveAutomationDraft = async () => {
+    if (!openAutomation || !automationDraft) return;
+    setSavingAutomation(true);
+    try {
+      const updated = await api.patch(`/api/automations?id=${openAutomation.id}`, automationDraft);
+      setAutomations((as) => as.map((a) => (a.id === openAutomation.id ? updated : a)));
+      setSavedAutomationSnapshot(JSON.stringify(automationDraft));
+    } catch (err) {
+      alert(err.message || "Could not save the automation");
+    } finally {
+      setSavingAutomation(false);
+    }
+  };
+
+  // Switching trigger type clears the old filter — a tag filter makes
+  // no sense once the trigger becomes "Booking Created", and vice versa.
+  const setAutomationTriggerType = (triggerType) =>
+    setAutomationDraft((d) => ({ ...d, triggerType, triggerConfig: {} }));
+  const setAutomationTriggerConfig = (patch) =>
+    setAutomationDraft((d) => ({ ...d, triggerConfig: { ...d.triggerConfig, ...patch } }));
+  // Inserts a new step at any position — before the first step,
+  // between any two, or after the last — rather than only ever being
+  // able to append to the end.
+  const insertAutomationAction = (index, newAction) =>
+    setAutomationDraft((d) => {
+      const actions = [...d.actions];
+      actions.splice(index, 0, newAction);
+      return { ...d, actions };
+    });
+  const updateAutomationAction = (index, patch) =>
+    setAutomationDraft((d) => ({ ...d, actions: d.actions.map((a, i) => (i === index ? { ...a, ...patch } : a)) }));
+  const removeAutomationAction = (index) =>
+    setAutomationDraft((d) => ({ ...d, actions: d.actions.filter((_, i) => i !== index) }));
+
+  // Merge fields insert into whichever subject/body field was last
+  // focused, at its exact cursor position — tracked via a ref (not
+  // state, no re-render needed) rather than tied to a specific
+  // action's index, since the same DOM node stays valid across
+  // re-renders regardless of index/id churn. The merge-field buttons
+  // use onMouseDown + preventDefault (not onClick) specifically so
+  // clicking one never steals focus away from the field first —
+  // otherwise selectionStart/selectionEnd would already be lost by
+  // the time the click handler ran.
+  const lastFocusedActionFieldRef = useRef(null); // { el, index, field }
+  const [pendingCursorRestore, setPendingCursorRestore] = useState(null); // { el, pos }
+  useEffect(() => {
+    if (!pendingCursorRestore) return;
+    const { el, pos } = pendingCursorRestore;
+    el.focus();
+    el.setSelectionRange(pos, pos);
+    setPendingCursorRestore(null);
+  }, [pendingCursorRestore]);
+
+  const insertMergeField = (key) => {
+    const target = lastFocusedActionFieldRef.current;
+    if (!target) return;
+    const { el, index, field } = target;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const token = `{{${key}}}`;
+    const newValue = el.value.slice(0, start) + token + el.value.slice(end);
+    updateAutomationAction(index, { [field]: newValue });
+    setPendingCursorRestore({ el, pos: start + token.length });
+  };
+
   // Add-contact modal
   const emptyContactForm = {
     name: "",
@@ -559,15 +1261,17 @@ export default function SimpleCRM() {
     phone: "",
     client: "All",
     notes: "",
-    status: "All",
   };
   const [dialFilters, setDialFilters] = useState(emptyDialFilters);
-  // Per-custom-column filters, so leads can be filtered/excluded by
-  // any imported criteria too, not just the fixed columns above.
-  // Select/checkbox columns (e.g. Stage) get an exclude-checklist —
-  // check "Booked" and "Not Interested" to hide those leads from the
-  // dial queue. Everything else gets a plain substring text filter.
-  const [dialFieldExcludes, setDialFieldExcludes] = useState({}); // { [columnKey]: string[] of values to hide }
+  // Per-column exclude/text filters for the dial queue. Select/checkbox
+  // columns get an exclude-checklist, everything else a plain substring
+  // filter. The lead's Status uses the same checklist under the
+  // "__status" key — and starts out hiding Booked + Not Interested,
+  // because a lead that's been booked (or has said no) must never be
+  // sitting in the dial queue by default. Untick them to review
+  // closed leads deliberately.
+  const defaultDialFieldExcludes = { __status: CLOSED_LEAD_STATUSES };
+  const [dialFieldExcludes, setDialFieldExcludes] = useState(defaultDialFieldExcludes); // { [columnKey]: string[] of values to hide }
   const [dialFieldTextFilters, setDialFieldTextFilters] = useState({}); // { [columnKey]: string }
   const toggleDialFieldExclude = (key, value) =>
     setDialFieldExcludes((f) => {
@@ -580,8 +1284,9 @@ export default function SimpleCRM() {
 
   // Filter-row cell for one custom column in the Powerdialler table —
   // an exclude-checklist for select/checkbox columns, a plain text
-  // filter for everything else. Shared by the fixed Stage column and
-  // every column in visibleDialColumns, so both filter the same way.
+  // filter for everything else. Shared by the fixed Status column
+  // (DIAL_STATUS_FILTER_COL) and every column in visibleDialColumns,
+  // so both filter the same way.
   const renderDialColumnFilter = (col) =>
     col.type === "select" || col.type === "checkbox" ? (
       <div className="relative">
@@ -600,8 +1305,15 @@ export default function SimpleCRM() {
         {openDialExcludeMenu === col.key && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setOpenDialExcludeMenu(null)} />
-            <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-2 w-48 max-h-56 overflow-y-auto normal-case">
+            <div
+              className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-2 w-52 max-h-64 overflow-y-auto normal-case"
+            >
               <div className="text-xs font-semibold text-gray-400 px-1 pb-1">Hide leads where {col.label} is…</div>
+              {col.key === "__status" && (
+                <div className="text-[11px] text-gray-400 px-1 pb-1.5 leading-snug">
+                  Booked and Not Interested leads are hidden by default so they aren't re-called.
+                </div>
+              )}
               {(col.type === "checkbox" ? ["Yes", "No"] : col.options || []).map((opt) => {
                 const value = typeof opt === "string" ? opt : opt.value;
                 const checked = (dialFieldExcludes[col.key] || []).includes(value);
@@ -655,6 +1367,160 @@ export default function SimpleCRM() {
     return SELECT_COLORS[SELECT_COLOR_CYCLE[idx % SELECT_COLOR_CYCLE.length]] || SELECT_COLORS.gray;
   };
 
+  // ---------- Tag folders ----------
+  // A purely organizational grouping layer over the tag list above —
+  // a tag not listed in any folder's tagNames still shows up
+  // ungrouped in the sidebar, exactly as it always has. Loaded
+  // lazily, same as Calendars/Automations, the first time the
+  // Contacts tab is opened.
+  const [tagFolders, setTagFolders] = useState([]);
+  const [tagFoldersLoaded, setTagFoldersLoaded] = useState(false);
+  const loadTagFolders = async () => {
+    try {
+      setTagFolders(await api.get("/api/tag-folders"));
+    } catch {
+      // sidebar just falls back to the flat, ungrouped tag list
+    } finally {
+      setTagFoldersLoaded(true);
+    }
+  };
+  useEffect(() => {
+    if (page === "contacts" && !tagFoldersLoaded) loadTagFolders();
+  }, [page, tagFoldersLoaded]);
+
+  // Per-tag booking links — shown on the dialler hotseat and wrap-up
+  // screen for whichever tag the live lead carries, configured in
+  // Settings → "Booking links by tag". A tiny map, so it's loaded once
+  // on login rather than lazily, to be ready before the first call.
+  const [tagBookingLinks, setTagBookingLinks] = useState({}); // { [tagName]: url }
+  useEffect(() => {
+    if (!authUser) return;
+    api
+      .get("/api/tag-booking-links")
+      .then(setTagBookingLinks)
+      .catch(() => {}); // hotseat just shows no link
+  }, [authUser]);
+  // Call recordings land in a lead's conversation via Twilio's
+  // callback a little after the call ends (see api/recording-status.js)
+  // — and inbound SMS arrive server-side too — so re-fetch the threads
+  // each time the Conversation tab is opened, not just at login.
+  useEffect(() => {
+    if (page !== "conversation" || !authUser) return;
+    api
+      .get("/api/conversations")
+      .then(setConversations)
+      .catch(() => {}); // keep whatever's already loaded
+  }, [page, authUser]);
+
+  const saveTagBookingLink = async (tagName, bookingLink) => {
+    try {
+      setTagBookingLinks(await api.patch("/api/tag-booking-links", { tagName, bookingLink }));
+    } catch (err) {
+      setDbError(err.message || "Could not save the booking link.");
+    }
+  };
+
+  // Which folders are expanded in the sidebar — per-browser display
+  // preference, same as hiddenContactColumnKeys above, not something
+  // worth syncing across the team.
+  const [expandedTagFolderIds, setExpandedTagFolderIds] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("scalbl:expandedTagFolders") || "[]"));
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("scalbl:expandedTagFolders", JSON.stringify([...expandedTagFolderIds]));
+    } catch {
+      // ignore — private browsing / storage disabled
+    }
+  }, [expandedTagFolderIds]);
+  const toggleTagFolderExpanded = (id) =>
+    setExpandedTagFolderIds((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const tagNamesInFolders = new Set(tagFolders.flatMap((f) => f.tagNames));
+  const ungroupedTagNames = contactTagNames.filter((t) => !tagNamesInFolders.has(t));
+  const tagFolderCount = (folder) => folder.tagNames.reduce((sum, t) => sum + (contactTagCounts[t] || 0), 0);
+
+  const [showManageTagFoldersModal, setShowManageTagFoldersModal] = useState(false);
+  const [newTagFolderName, setNewTagFolderName] = useState("");
+  const [savingTagFolder, setSavingTagFolder] = useState(false);
+
+  const handleCreateTagFolder = async (e) => {
+    e.preventDefault();
+    if (!newTagFolderName.trim()) return;
+    setSavingTagFolder(true);
+    try {
+      const folder = await api.post("/api/tag-folders", { name: newTagFolderName.trim() });
+      setTagFolders((fs) => [...fs, folder]);
+      setNewTagFolderName("");
+    } catch (err) {
+      alert(err.message || "Could not create the folder");
+    } finally {
+      setSavingTagFolder(false);
+    }
+  };
+
+  const renameTagFolder = async (id, name) => {
+    try {
+      const updated = await api.patch(`/api/tag-folders?id=${id}`, { name });
+      setTagFolders((fs) => fs.map((f) => (f.id === id ? updated : f)));
+    } catch (err) {
+      alert(err.message || "Could not rename the folder");
+    }
+  };
+
+  // A tag can only usefully live in one folder at a time — assigning
+  // it here removes it from whichever other folder had it, so the
+  // checklists in the modal never show the same tag "in" two folders
+  // at once.
+  const toggleTagInFolder = async (folder, tag) => {
+    const isInThisFolder = folder.tagNames.includes(tag);
+    const updates = [];
+    if (isInThisFolder) {
+      updates.push({ id: folder.id, tagNames: folder.tagNames.filter((t) => t !== tag) });
+    } else {
+      updates.push({ id: folder.id, tagNames: [...folder.tagNames, tag] });
+      for (const other of tagFolders) {
+        if (other.id !== folder.id && other.tagNames.includes(tag)) {
+          updates.push({ id: other.id, tagNames: other.tagNames.filter((t) => t !== tag) });
+        }
+      }
+    }
+    try {
+      const updatedFolders = await Promise.all(
+        updates.map((u) => api.patch(`/api/tag-folders?id=${u.id}`, { tagNames: u.tagNames }))
+      );
+      setTagFolders((fs) => fs.map((f) => updatedFolders.find((u) => u.id === f.id) || f));
+    } catch (err) {
+      alert(err.message || "Could not update the folder");
+    }
+  };
+
+  const deleteTagFolderById = async (id) => {
+    if (!window.confirm("Delete this folder? Its tags stay on their contacts and just become ungrouped again.")) {
+      return;
+    }
+    try {
+      await api.delete(`/api/tag-folders?id=${id}`);
+      setTagFolders((fs) => fs.filter((f) => f.id !== id));
+      setExpandedTagFolderIds((s) => {
+        const next = new Set(s);
+        next.delete(id);
+        return next;
+      });
+    } catch (err) {
+      alert(err.message || "Could not delete the folder");
+    }
+  };
+
   // Filter bar (Contacts) — any number of filters, each on any
   // column (fixed fields or any of the imported criteria), each with
   // is / is not / is empty / is not empty. "is"/"is not" means
@@ -671,8 +1537,8 @@ export default function SimpleCRM() {
       key: "__status",
       label: "Status",
       kind: "select",
-      options: Object.keys(statusColors),
-      optionColor: (v) => statusColors[v],
+      options: LEAD_STATUSES,
+      optionColor: (v) => statusSolidClass(v),
       get: (c) => c.status,
     },
     { key: "__leadDate", label: "Date", kind: "text", get: (c) => c.leadDate },
@@ -764,8 +1630,10 @@ export default function SimpleCRM() {
   };
 
   const FIXED_SORT_KEYS = {
+    __calls: (c) => callCountByLeadId[c.id] || 0,
     __leadDate: (c) => parseAuDate(c.leadDate),
     __name: (c) => c.name?.toLowerCase() || null,
+    __email: (c) => c.email?.toLowerCase() || null,
     __phone: (c) => c.phone?.toLowerCase() || null,
     __client: (c) => c.client?.toLowerCase() || null,
     __tag: (c) => c.tag?.toLowerCase() || null,
@@ -816,6 +1684,195 @@ export default function SimpleCRM() {
   useEffect(() => {
     setContactsPage(0);
   }, [contactFilters, search, contactSort.key, contactSort.dir]);
+  // ----- Contacts kanban board (one column per status) -----
+  // Same filtered + sorted set as the table (tag sidebar, filter bar
+  // and search all apply), bucketed by status. Columns render at most
+  // KANBAN_COLUMN_CAP cards until "Show more" — a column of a few
+  // thousand New Leads would otherwise be the same freeze the table's
+  // pagination exists to avoid.
+  const KANBAN_COLUMN_CAP = 50;
+  const [kanbanLimits, setKanbanLimits] = useState({}); // { [status]: cards to show }
+  const [draggingContactId, setDraggingContactId] = useState(null);
+  const [dragOverStatus, setDragOverStatus] = useState(null);
+  const boardColumns = LEAD_STATUSES.map((status) => ({
+    status,
+    contacts: sortedContacts.filter((c) => (LEAD_STATUSES.includes(c.status) ? c.status : "New Lead") === status),
+  }));
+  const dropContactOnStatus = (status) => {
+    if (draggingContactId !== null) updateContactStatus(draggingContactId, status);
+    setDraggingContactId(null);
+    setDragOverStatus(null);
+  };
+  const renderContactsBoard = () => (
+    <div className="p-6">
+      <div className="flex items-center justify-between mb-3 text-xs text-gray-400">
+        <span>
+          {sortedContacts.length} lead{sortedContacts.length === 1 ? "" : "s"}
+          {contactFilters.length > 0 || search ? " matching your filters" : ""} · drag a card between columns to change its status
+        </span>
+      </div>
+      <div className="flex gap-4 items-start overflow-x-auto pb-2">
+        {boardColumns.map(({ status, contacts: column }) => {
+          const limit = kanbanLimits[status] || KANBAN_COLUMN_CAP;
+          const shown = column.slice(0, limit);
+          const hidden = column.length - shown.length;
+          const isOver = draggingContactId !== null && dragOverStatus === status;
+          return (
+            <div
+              key={status}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                if (dragOverStatus !== status) setDragOverStatus(status);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget)) setDragOverStatus((cur) => (cur === status ? null : cur));
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                dropContactOnStatus(status);
+              }}
+              className={`flex-1 min-w-[260px] max-w-[360px] rounded-xl border flex flex-col transition-colors ${
+                isOver ? "border-gray-500 bg-gray-100" : "border-gray-200 bg-gray-50/60"
+              }`}
+            >
+              <div className={`px-3 py-2.5 flex items-center justify-between rounded-t-xl ${statusSolidClass(status)}`}>
+                <span className="text-sm font-bold uppercase tracking-wide truncate">{status}</span>
+                <span className="text-xs font-semibold bg-white/25 rounded-full px-2 py-0.5 tabular-nums">{column.length}</span>
+              </div>
+              <div className="p-2 space-y-2 overflow-y-auto max-h-[calc(100vh-280px)]">
+                {shown.map((c) => (
+                  <div
+                    key={c.id}
+                    draggable={editingCloserNotesId !== c.id}
+                    onDragStart={(e) => {
+                      setDraggingContactId(c.id);
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", String(c.id));
+                    }}
+                    onDragEnd={() => {
+                      setDraggingContactId(null);
+                      setDragOverStatus(null);
+                    }}
+                    className={`bg-white border rounded-lg p-3 shadow-sm cursor-grab active:cursor-grabbing ${
+                      draggingContactId === c.id ? "opacity-40" : ""
+                    } ${selectedContactIds.includes(c.id) ? "border-gray-500" : "border-gray-200 hover:border-gray-300"}`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedContactIds.includes(c.id)}
+                        onChange={() => toggleContactSelected(c.id)}
+                        className="mt-0.5 w-3.5 h-3.5 rounded border-gray-300 shrink-0"
+                      />
+                      {renderCallCount(c)}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 truncate">{c.name}</div>
+                        <div className="text-xs text-gray-500 truncate">{c.phone}</div>
+                      </div>
+                    </div>
+                    {(c.tag || c.client) && (
+                      <div className="mt-2 flex items-center gap-1.5 min-w-0">
+                        {c.tag && (
+                          <span className={`text-[11px] px-2 py-0.5 rounded-full border truncate ${tagColorClasses(c.tag)}`}>
+                            {c.tag}
+                          </span>
+                        )}
+                        {c.client && c.client !== c.tag && (
+                          <span className="text-[11px] text-gray-400 truncate">{c.client}</span>
+                        )}
+                      </div>
+                    )}
+                    {c.notes && <div className="mt-2 text-xs text-gray-500 line-clamp-2">{c.notes}</div>}
+                    <div className="mt-2.5 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-gray-400 truncate">
+                        {c.leadDate ? `Lead ${c.leadDate}` : c.lastContact ? `Last contact ${c.lastContact}` : ""}
+                      </span>
+                      {renderStatusPicker(c, { variant: "chip", align: "right" })}
+                    </div>
+                    {/* Closer notes — the closer's own notes on the lead, kept apart from the setter's call notes above */}
+                    <div className="mt-2.5 border-t border-gray-100 pt-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Closer notes</span>
+                        {editingCloserNotesId !== c.id && (
+                          <button
+                            type="button"
+                            onClick={() => startEditCloserNotes(c)}
+                            className="text-gray-300 hover:text-gray-600"
+                            title="Edit closer notes"
+                          >
+                            <Pencil size={11} />
+                          </button>
+                        )}
+                      </div>
+                      {editingCloserNotesId === c.id ? (
+                        <textarea
+                          autoFocus
+                          value={closerNotesDraft}
+                          onChange={(e) => setCloserNotesDraft(e.target.value)}
+                          onBlur={() => commitCloserNotes(c)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") setEditingCloserNotesId(null);
+                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) commitCloserNotes(c);
+                          }}
+                          rows={3}
+                          placeholder="What did the closer find out?"
+                          className="mt-1 w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs outline-none focus:border-gray-500 resize-none"
+                        />
+                      ) : (
+                        <button type="button" onClick={() => startEditCloserNotes(c)} className="mt-0.5 w-full text-left text-xs">
+                          {c.closerNotes ? (
+                            <span className="text-gray-600 line-clamp-3 whitespace-pre-line">{c.closerNotes}</span>
+                          ) : (
+                            <span className="text-gray-300 italic">Add closer notes…</span>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                    {/* Deal outcome — Won / Lost / Pending tab strip along the bottom edge of the card */}
+                    <div className="mt-2.5 -mx-3 -mb-3 grid grid-cols-3 border-t border-gray-100 rounded-b-lg overflow-hidden">
+                      {DEAL_OUTCOMES.map((o) => {
+                        const active = (c.dealOutcome || "Pending") === o;
+                        return (
+                          <button
+                            key={o}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              updateContactDealOutcome(c.id, o);
+                            }}
+                            className={`py-1.5 text-[11px] font-bold uppercase tracking-wide transition ${
+                              active ? dealOutcomeActiveClass[o] : "bg-gray-50 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                            }`}
+                          >
+                            {o}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                {column.length === 0 && (
+                  <div className="text-xs text-gray-400 text-center py-8 border border-dashed border-gray-200 rounded-lg">
+                    {isOver ? "Drop to move here" : `No ${status.toLowerCase()} leads`}
+                  </div>
+                )}
+                {hidden > 0 && (
+                  <button
+                    onClick={() => setKanbanLimits((l) => ({ ...l, [status]: limit + KANBAN_COLUMN_CAP }))}
+                    className="w-full text-xs font-medium text-gray-500 hover:text-gray-800 border border-gray-200 bg-white rounded-lg py-2"
+                  >
+                    Show {Math.min(KANBAN_COLUMN_CAP, hidden)} more ({hidden} hidden)
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   const totalContactsPages = Math.max(1, Math.ceil(sortedContacts.length / CONTACTS_PAGE_SIZE));
   const pagedContacts = sortedContacts.slice(
     contactsPage * CONTACTS_PAGE_SIZE,
@@ -831,7 +1888,6 @@ export default function SimpleCRM() {
   const hasFieldValue = (v) => v !== null && v !== undefined && v !== "" && v !== false;
   const visibleContactColumns = contactColumns.filter(
     (col) =>
-      col.key !== "stage" && // shown as its own fixed column instead — see stageColumnDef
       !hiddenContactColumnKeys.has(col.key) &&
       filteredContacts.some((c) => hasFieldValue(c.fields?.[col.key]))
   );
@@ -1201,7 +2257,7 @@ export default function SimpleCRM() {
   // omitted it, an old cached shape) is treated as a client — a
   // missing field must narrow access, never widen it.
   const isClientRole = Boolean(authUser) && (authUser.role === "client" || !FULL_ACCESS_ROLES.includes(authUser.role));
-  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports"];
+  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal"];
   const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
   useEffect(() => {
     if (isClientRole && !CLIENT_NAV_KEYS.includes(page)) setPage("conversation");
@@ -1284,6 +2340,79 @@ export default function SimpleCRM() {
     patchTeamUser(u.id, { allowedTags: next });
   };
   const canDeleteTeamUser = (targetRole) => canManageUsers && targetRole !== "owner";
+
+  // ---------- Portal invite links (Settings → Team, client self-signup) ----------
+  // There's no email infrastructure to send a portal invite, so
+  // instead of pre-creating a named user (like handleInviteUser
+  // above), an owner/super admin generates a shareable link scoped to
+  // one or more tags and hands it to the client directly — whoever
+  // opens it picks their own name/email/password (see
+  // api/portal-invite-claim.js). Reusable, so one link can onboard a
+  // whole client team; revoking it just stops new signups.
+  const [portalInvites, setPortalInvites] = useState([]);
+  const [portalInvitesLoading, setPortalInvitesLoading] = useState(false);
+  const [newInviteTags, setNewInviteTags] = useState([]);
+  const [creatingInvite, setCreatingInvite] = useState(false);
+  const [copiedInviteId, setCopiedInviteId] = useState(null);
+
+  useEffect(() => {
+    if (page !== "settings" || !authUser || isClientRole) return;
+    let cancelled = false;
+    setPortalInvitesLoading(true);
+    api
+      .get("/api/portal-invites")
+      .then((list) => {
+        if (!cancelled) setPortalInvites(list);
+      })
+      .catch((err) => {
+        if (!cancelled) setDbError(err.message || "Could not load invite links.");
+      })
+      .finally(() => {
+        if (!cancelled) setPortalInvitesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [page, authUser]);
+
+  const toggleNewInviteTag = (tag) =>
+    setNewInviteTags((tags) => (tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]));
+
+  const handleCreatePortalInvite = async () => {
+    if (!newInviteTags.length) return;
+    setCreatingInvite(true);
+    try {
+      const created = await api.post("/api/portal-invites", { tags: newInviteTags });
+      setPortalInvites((list) => [created, ...list]);
+      setNewInviteTags([]);
+    } catch (err) {
+      setDbError(err.message || "Could not create that invite link.");
+    } finally {
+      setCreatingInvite(false);
+    }
+  };
+
+  const handleRevokePortalInvite = async (id) => {
+    if (!window.confirm("Revoke this invite link? Anyone who hasn't already signed up with it won't be able to.")) return;
+    try {
+      await api.delete(`/api/portal-invites?id=${id}`);
+      setPortalInvites((list) => list.filter((inv) => inv.id !== id));
+    } catch (err) {
+      setDbError(err.message || "Could not revoke that invite link.");
+    }
+  };
+
+  const portalInviteUrl = (invite) => `${window.location.origin}/?invite=${invite.token}`;
+  const copyPortalInviteUrl = async (invite) => {
+    const url = portalInviteUrl(invite);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedInviteId(invite.id);
+      setTimeout(() => setCopiedInviteId((cur) => (cur === invite.id ? null : cur)), 2000);
+    } catch {
+      window.prompt("Copy this invite link:", url);
+    }
+  };
 
   // Generates the key the first time, or replaces the existing one —
   // there's only ever at most one (see api/api-keys.js). Regenerating
@@ -1504,6 +2633,131 @@ export default function SimpleCRM() {
     }
   };
 
+  // The single place a lead's status changes from the Contacts page —
+  // inline pill dropdown in the table, drag/drop or the card's menu on
+  // the board, and the bulk "Set status" action. Optimistic update,
+  // persisted with the same PATCH the dialler's wrap-up uses, and
+  // logged into the lead's conversation thread as an outcome.
+  const updateContactStatus = async (contactId, status) => {
+    if (!LEAD_STATUSES.includes(status)) return;
+    const lead = contacts.find((c) => c.id === contactId);
+    if (!lead || lead.status === status) return;
+    setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status } : c)));
+    try {
+      await api.patch("/api/contacts", { id: contactId, status });
+      logStatusToConversation(lead, status);
+    } catch (err) {
+      setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status: lead.status } : c)));
+      setDbError(err.message || "Could not update the lead's status.");
+    }
+  };
+  // Closer notes / deal outcome — the closer's side of a lead, edited
+  // straight on the board card. Same optimistic-then-PATCH pattern as
+  // status; a failure rolls the card back and shows the banner.
+  const [editingCloserNotesId, setEditingCloserNotesId] = useState(null);
+  const [closerNotesDraft, setCloserNotesDraft] = useState("");
+  const startEditCloserNotes = (contact) => {
+    setCloserNotesDraft(contact.closerNotes || "");
+    setEditingCloserNotesId(contact.id);
+  };
+  const commitCloserNotes = async (contact) => {
+    const text = closerNotesDraft;
+    setEditingCloserNotesId(null);
+    if (text === (contact.closerNotes || "")) return;
+    setContacts((cs) => cs.map((c) => (c.id === contact.id ? { ...c, closerNotes: text } : c)));
+    try {
+      await api.patch("/api/contacts", { id: contact.id, closerNotes: text });
+    } catch (err) {
+      setContacts((cs) => cs.map((c) => (c.id === contact.id ? { ...c, closerNotes: contact.closerNotes || "" } : c)));
+      setDbError(err.message || "Could not save the closer notes.");
+    }
+  };
+  const updateContactDealOutcome = async (contactId, dealOutcome) => {
+    if (!DEAL_OUTCOMES.includes(dealOutcome)) return;
+    const lead = contacts.find((c) => c.id === contactId);
+    if (!lead || (lead.dealOutcome || "Pending") === dealOutcome) return;
+    setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, dealOutcome } : c)));
+    try {
+      await api.patch("/api/contacts", { id: contactId, dealOutcome });
+    } catch (err) {
+      setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, dealOutcome: lead.dealOutcome } : c)));
+      setDbError(err.message || "Could not update the deal outcome.");
+    }
+  };
+
+  const setStatusForSelectedContacts = async (status) => {
+    const ids = selectedContactIds.filter((id) => contacts.find((c) => c.id === id)?.status !== status);
+    setShowBulkStatusMenu(false);
+    for (const id of ids) {
+      // Sequential on purpose — a handful of PATCHes, and one failure
+      // shouldn't leave the rest half-applied without a banner.
+      // eslint-disable-next-line no-await-in-loop
+      await updateContactStatus(id, status);
+    }
+  };
+  const [showBulkStatusMenu, setShowBulkStatusMenu] = useState(false);
+  const [openStatusCellId, setOpenStatusCellId] = useState(null); // contact id whose status pill menu is open
+
+  // The status control. variant "cell" paints the whole table cell in
+  // the status colour (the td must be `p-0 h-px` so the block reaches
+  // every edge); variant "chip" is the compact solid chip for board
+  // cards. Clicking either opens the four-option menu, each option
+  // drawn as the same solid block so what you pick is what you'll see.
+  const renderStatusPicker = (contact, { variant = "cell", align = "left" } = {}) => {
+    const isOpen = openStatusCellId === contact.id;
+    const label = contact.status || "New Lead";
+    const trigger =
+      variant === "cell"
+        ? `w-full h-full min-h-[44px] px-4 flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wide whitespace-nowrap hover:brightness-110 ${statusSolidClass(
+            contact.status
+          )}`
+        : `inline-flex items-center gap-1 hover:brightness-110 ${STATUS_CHIP} ${statusSolidClass(contact.status)}`;
+    return (
+      <div className={variant === "cell" ? "relative h-full" : "relative inline-block"}>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpenStatusCellId((cur) => (cur === contact.id ? null : contact.id));
+          }}
+          className={trigger}
+          title="Change status"
+        >
+          {label}
+          <ChevronDown size={variant === "cell" ? 13 : 11} className="opacity-80" />
+        </button>
+        {isOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setOpenStatusCellId(null)} />
+            <div
+              className={`absolute top-full mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-xl p-1.5 space-y-1 w-48 ${
+                align === "right" ? "right-0" : "left-0"
+              }`}
+            >
+              {LEAD_STATUSES.map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setOpenStatusCellId(null);
+                    updateContactStatus(contact.id, st);
+                  }}
+                  className={`w-full flex items-center justify-between gap-2 rounded-md px-3 py-2 text-xs font-bold uppercase tracking-wide hover:brightness-110 ${statusSolidClass(
+                    st
+                  )} ${st === contact.status ? "ring-2 ring-offset-1 ring-gray-900/60" : ""}`}
+                >
+                  {st}
+                  {st === contact.status && <CheckCircle2 size={13} />}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   const startEditContactCell = (contactId, key, currentValue) => {
     setEditingContactCell(`${contactId}:${key}`);
     setContactEditValue(currentValue === null || currentValue === undefined ? "" : String(currentValue));
@@ -1714,21 +2968,22 @@ export default function SimpleCRM() {
     (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
   );
   const dialClientOptions = ["All", ...clients.map((cl) => cl.name)];
-  const dialStatusOptions = ["All", ...Object.keys(statusColors)];
   // Custom columns worth showing/filtering in the Powerdialler table —
   // whatever actually has a value somewhere in the queue. Computed
   // from the full queue (not the currently-filtered set) so the
   // column list stays put as filters change instead of flickering.
-  const visibleDialColumns = contactColumns.filter(
-    (col) => col.key !== "stage" && dialQueue.some((l) => hasFieldValue(l.fields?.[col.key]))
+  const visibleDialColumns = contactColumns.filter((col) =>
+    dialQueue.some((l) => hasFieldValue(l.fields?.[col.key]))
   );
-  // Stage gets its own fixed header/filter cell (rendered separately,
-  // right after Client) rather than living in visibleDialColumns, but
-  // it still needs to participate in the same exclude/text filtering
-  // as every other criteria column below.
-  const dialFilterableColumns = stageColumnDef ? [stageColumnDef, ...visibleDialColumns] : visibleDialColumns;
+  const dialStatusExcludes = dialFieldExcludes.__status || [];
+  // "Active" means different from the default — hiding closed leads is
+  // the baseline, not a filter someone applied.
+  const dialStatusExcludesAtDefault =
+    dialStatusExcludes.length === CLOSED_LEAD_STATUSES.length &&
+    CLOSED_LEAD_STATUSES.every((s) => dialStatusExcludes.includes(s));
   const dialFieldFiltersActive =
-    Object.values(dialFieldExcludes).some((vals) => vals && vals.length > 0) ||
+    !dialStatusExcludesAtDefault ||
+    Object.entries(dialFieldExcludes).some(([key, vals]) => key !== "__status" && vals && vals.length > 0) ||
     Object.values(dialFieldTextFilters).some((v) => v);
   const dialFiltersActive =
     Object.entries(dialFilters).some(([key, value]) => value !== emptyDialFilters[key]) || dialFieldFiltersActive;
@@ -1736,7 +2991,7 @@ export default function SimpleCRM() {
     setDialFilters((f) => ({ ...f, [key]: value }));
   const clearAllDialFilters = () => {
     setDialFilters(emptyDialFilters);
-    setDialFieldExcludes({});
+    setDialFieldExcludes(defaultDialFieldExcludes);
     setDialFieldTextFilters({});
   };
   const filteredDialQueueBase = dialQueue.filter(
@@ -1747,8 +3002,8 @@ export default function SimpleCRM() {
       l.phone.toLowerCase().includes(dialFilters.phone.toLowerCase()) &&
       (dialFilters.client === "All" || l.client === dialFilters.client) &&
       l.notes.toLowerCase().includes(dialFilters.notes.toLowerCase()) &&
-      (dialFilters.status === "All" || l.status === dialFilters.status) &&
-      dialFilterableColumns.every((col) => {
+      !dialStatusExcludes.includes(l.status) &&
+      visibleDialColumns.every((col) => {
         const val = l.fields?.[col.key];
         if (col.type === "select" || col.type === "checkbox") {
           const excluded = dialFieldExcludes[col.key] || [];
@@ -1917,7 +3172,7 @@ export default function SimpleCRM() {
   };
 
   // Shared by every system message logged into a lead's conversation
-  // thread (call summaries, stage/outcome updates, …) — creates a new
+  // thread (call summaries, status changes, …) — creates a new
   // thread if one doesn't exist yet, otherwise appends to it and bumps
   // it to the top of the list, then persists it.
   const logSystemMessageToConversation = (lead, { type, text, preview }) => {
@@ -1975,13 +3230,14 @@ export default function SimpleCRM() {
     logSystemMessageToConversation(lead, { type: "call", text: summary });
   };
 
-  // Logs the wrap-up's chosen STAGE as its own message — separate from
-  // the "Outgoing call" line above, since the outcome isn't known
-  // until wrap-up finishes, a beat after the call itself ends. This is
-  // what makes a "Booked" outcome show up in the Conversation tab.
-  const logStageToConversation = (lead, stage) => {
-    if (!stage) return;
-    logSystemMessageToConversation(lead, { type: "outcome", text: stage, preview: `Outcome: ${stage}` });
+  // Logs a status change as its own message — from the wrap-up screen
+  // (separate from the "Outgoing call" line above, since the outcome
+  // isn't known until wrap-up finishes), or from the Contacts table /
+  // kanban board. This is what makes a "Booked" outcome show up in
+  // the Conversation tab.
+  const logStatusToConversation = (lead, status) => {
+    if (!status) return;
+    logSystemMessageToConversation(lead, { type: "outcome", text: status, preview: `Outcome: ${status}` });
   };
 
   // ----- Power Dialler session (auto-dial through a list) -----
@@ -2069,9 +3325,7 @@ export default function SimpleCRM() {
   };
   const [session, setSession] = useState(null); // { listName, queue: [leadId,...] }
   const [sessionPaused, setSessionPaused] = useState(false);
-  const [wrapUp, setWrapUp] = useState(null); // { lead, customStage, notes, secondsLeft }
-  const [wrapUpStatusMenuOpen, setWrapUpStatusMenuOpen] = useState(false);
-  const [callLog, setCallLog] = useState([]);
+  const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, durationMs, secondsLeft }
 
   // ---------- Reports ----------
   const isoToday = () => new Date().toISOString().slice(0, 10);
@@ -2083,22 +3337,29 @@ export default function SimpleCRM() {
   const [reportsFrom, setReportsFrom] = useState(() => isoDaysAgo(30));
   const [reportsTo, setReportsTo] = useState(() => isoToday());
   const [reportsUserFilter, setReportsUserFilter] = useState("All");
+  const [reportsTagFilter, setReportsTagFilter] = useState("All");
 
   const reportsUserNames = [...new Set(callLog.map((e) => e.userName || "Unknown"))].sort();
+  // A client role only ever has their own allowedTags to narrow down
+  // to (their call log is already scoped server-side to just those);
+  // staff can filter by any tag currently in use on a Contact, same
+  // list Contacts/Bulk SMS/Dial lists use.
+  const reportsTagOptions = isClientRole ? authUser?.allowedTags || [] : contactTagNames;
   const reportsCallLog = callLog.filter((e) => {
     if (!e.calledAt) return false;
     const d = String(e.calledAt).slice(0, 10);
     if (reportsFrom && d < reportsFrom) return false;
     if (reportsTo && d > reportsTo) return false;
     if (reportsUserFilter !== "All" && (e.userName || "Unknown") !== reportsUserFilter) return false;
+    if (reportsTagFilter !== "All" && (e.tag || "Untagged") !== reportsTagFilter) return false;
     return true;
   });
   const reportsTotalCalls = reportsCallLog.length;
   const reportsTotalSeconds = reportsCallLog.reduce((sum, e) => sum + (e.durationSeconds || 0), 0);
   const reportsAvgSeconds = reportsTotalCalls ? reportsTotalSeconds / reportsTotalCalls : 0;
   const reportsUniqueLeads = new Set(reportsCallLog.map((e) => e.leadId)).size;
-  // "Successful booking" = a call whose outcome (STAGE) was moved to
-  // Booked — the one number a Client-role user gets in place of the
+  // "Successful booking" = a call after which the lead's status was
+  // set to Booked — the one number a Client-role user gets in place of the
   // internal talk-time metrics they don't see.
   const reportsBookedCalls = reportsCallLog.filter((e) => e.status === "Booked").length;
   const reportsIsClientView = isClientRole;
@@ -2131,72 +3392,55 @@ export default function SimpleCRM() {
   // The point isn't the trend over the date range, it's the shape of
   // a working day: a rep who's clocked in but has gone quiet shows up
   // as a flat-to-zero stretch between two active buckets, which is
-  // exactly what the gap-detection below flags.
-  const ACTIVITY_BUCKET_MINUTES = 30;
-  const reportsActivity = useMemo(() => {
-    const bucketsPerHour = 60 / ACTIVITY_BUCKET_MINUTES;
-    const totalBuckets = 24 * bucketsPerHour;
-    const counts = new Array(totalBuckets).fill(0);
-    for (const e of reportsCallLog) {
-      if (!e.calledAt) continue;
-      const d = new Date(e.calledAt);
-      if (Number.isNaN(d.getTime())) continue;
-      const idx = d.getHours() * bucketsPerHour + Math.floor(d.getMinutes() / ACTIVITY_BUCKET_MINUTES);
-      counts[idx] += 1;
-    }
-
-    const bucketLabel = (idx) => {
-      const h = Math.floor(idx / bucketsPerHour);
-      const m = (idx % bucketsPerHour) * ACTIVITY_BUCKET_MINUTES;
-      const h12 = h % 12 || 12;
-      return `${h12}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`;
-    };
-
-    const activeIdx = counts.map((c, i) => (c > 0 ? i : -1)).filter((i) => i >= 0);
-    if (activeIdx.length === 0) return { buckets: [], gaps: [] };
-
-    // Frame the chart on the working window actually seen in the data
-    // (padded by one bucket either side) instead of a full, mostly-empty
-    // 24 hours.
-    const first = Math.max(0, activeIdx[0] - 1);
-    const last = Math.min(totalBuckets - 1, activeIdx[activeIdx.length - 1] + 1);
-    const buckets = [];
-    for (let i = first; i <= last; i++) {
-      buckets.push({ time: bucketLabel(i), calls: counts[i] });
-    }
-
-    // Flag any stretch of 60+ minutes with zero dial attempts that sits
-    // *between* two active buckets — quiet time in the middle of a
-    // working stretch, not just before the first call or after the last.
-    const gaps = [];
-    let runStart = null;
-    for (let i = activeIdx[0]; i <= activeIdx[activeIdx.length - 1]; i++) {
-      if (counts[i] === 0) {
-        if (runStart === null) runStart = i;
-      } else if (runStart !== null) {
-        if (i - runStart >= bucketsPerHour) {
-          gaps.push({
-            start: bucketLabel(runStart),
-            end: bucketLabel(i - 1),
-            minutes: (i - runStart) * ACTIVITY_BUCKET_MINUTES,
-          });
-        }
-        runStart = null;
-      }
-    }
-    return { buckets, gaps };
-  }, [reportsCallLog]);
+  // exactly what the gap-detection below flags. (buildActivityStream
+  // is the module-level function above — shared with the Portal tab.)
+  const reportsActivity = useMemo(() => buildActivityStream(reportsCallLog), [reportsCallLog]);
   // The actual list behind the Bookings tile — every call in range
   // whose outcome was Booked, most recent first.
   const reportsBookedList = reportsCallLog
     .filter((e) => e.status === "Booked")
     .sort((a, b) => new Date(b.calledAt) - new Date(a.calledAt));
 
-  // Call log "status"/"outcome" is written from the imported STAGE
-  // column's value (see finishWrapUp) — colored the same way STAGE
-  // pills are everywhere else, rather than the app's built-in
-  // statusColors (which only covers manually-created contacts).
-  const callOutcomeColor = (value) => (value ? selectOptionColor(stageColumnDef || {}, value) : "");
+  // ---------- Client Portal ----------
+  // A read-only, client-facing summary: total current leads, a dial
+  // activity graph in the exact same shape as the internal Activity
+  // Stream above (just scoped down), and placeholder ad creative/
+  // metrics until a real ad-platform integration exists. Scoped by
+  // tag exactly like everywhere else a client role's data is limited
+  // — a client account is pinned to their own allowedTags; staff pick
+  // one tag from the dropdown below to preview that client's portal.
+  const portalIsClientRole = isClientRole;
+  const [portalSelectedTag, setPortalSelectedTag] = useState("");
+  const portalEffectiveTags = portalIsClientRole ? authUser?.allowedTags || [] : portalSelectedTag ? [portalSelectedTag] : [];
+  const portalHasScope = portalEffectiveTags.length > 0;
+
+  const portalContacts = portalHasScope ? contacts.filter((c) => portalEffectiveTags.includes(c.tag)) : [];
+  const portalTotalLeads = portalContacts.length;
+  const portalStatusCounts = portalContacts.reduce((acc, c) => {
+    const s = c.status || "New Lead";
+    acc[s] = (acc[s] || 0) + 1;
+    return acc;
+  }, {});
+
+  const [portalFrom, setPortalFrom] = useState(() => isoDaysAgo(30));
+  const [portalTo, setPortalTo] = useState(() => isoToday());
+  const portalCallLog = portalHasScope
+    ? callLog.filter((e) => {
+        if (!portalEffectiveTags.includes(e.tag)) return false;
+        if (!e.calledAt) return false;
+        const d = String(e.calledAt).slice(0, 10);
+        if (portalFrom && d < portalFrom) return false;
+        if (portalTo && d > portalTo) return false;
+        return true;
+      })
+    : [];
+  const portalTotalDials = portalCallLog.length;
+  const portalBookedCalls = portalCallLog.filter((e) => e.status === "Booked").length;
+  const portalActivity = useMemo(() => buildActivityStream(portalCallLog), [portalCallLog]);
+
+  // Call log "status"/"outcome" is the lead's status as of wrap-up —
+  // the same four values, coloured the same way, as everywhere else.
+  const callOutcomeColor = (value) => (value ? statusSolidClass(value) : "");
 
   // Kept in sync with `session` so the long-lived Twilio call event
   // handlers below (registered once per call, not re-created each
@@ -2206,6 +3450,10 @@ export default function SimpleCRM() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+  const sessionPausedRef = useRef(false);
+  useEffect(() => {
+    sessionPausedRef.current = sessionPaused;
+  }, [sessionPaused]);
 
   const WRAP_UP_SECONDS = 15;
 
@@ -2214,9 +3462,16 @@ export default function SimpleCRM() {
 
   // A list's leadIds already only ever contains leads still worth
   // calling (removeLeadFromLists drops one the moment its call
-  // actually completes) — this just filters out any that no longer
-  // exist as contacts at all.
-  const remainingInList = (leadIds) => leadIds.filter((id) => dialQueue.some((l) => l.id === id));
+  // actually completes) — this filters out any that no longer exist
+  // as contacts at all, plus any whose status has since been set to
+  // Booked / Not Interested from anywhere else (the Contacts table,
+  // the board, another rep's wrap-up), so a stale Powerlist can never
+  // re-dial a lead that's already closed.
+  const remainingInList = (leadIds) =>
+    leadIds.filter((id) => {
+      const lead = dialQueue.find((l) => l.id === id);
+      return Boolean(lead) && !isClosedLeadStatus(lead.status);
+    });
 
   const saveSelectedAsList = async () => {
     if (!newListName.trim() || selectedLeadIds.length === 0) return;
@@ -2255,7 +3510,28 @@ export default function SimpleCRM() {
     setSession(null);
     setSessionPaused(false);
     setWrapUp(null);
-    if (multilineBatchIdRef.current) cancelMultilineBatch(multilineBatchIdRef.current);
+    // Stopped directly here rather than only relying on the Twilio
+    // call's own disconnect/cancel event to eventually fire
+    // onCallEnded — that event isn't guaranteed (e.g. the conference
+    // leg is in a bad state), and until it does, the poll loop would
+    // keep running against a batch the rep already walked away from,
+    // able to still set activeLeadId/callStatus="in-progress" if it
+    // later observes a winner.
+    stopMultilinePolling();
+    setMultilineBatch(null);
+    if (multilineBatchIdRef.current) {
+      cancelMultilineBatch(multilineBatchIdRef.current);
+      multilineBatchIdRef.current = null;
+    }
+    // Deliberately NOT clearing multilineWinnerRef here — if the rep
+    // is actively connected to a winner when they hit Stop, the
+    // conference call's disconnect event is still going to fire
+    // onCallEnded asynchronously, and it needs to still see the real
+    // winner there to log the call at all (session is already null by
+    // then, so it logs it directly rather than opening a wrap-up
+    // screen — see onCallEnded's `!winner` branch). Nulling it here
+    // used to silently drop that call's outcome — no call log, no
+    // conversation log — any time "Stop session" was clicked mid-call.
     if (calling) {
       hangUp();
       activeCallRef.current = null;
@@ -2283,7 +3559,7 @@ export default function SimpleCRM() {
   // complete instead of only covering session calls.
   const logCallDirect = (lead, durationMs) => {
     const durationSeconds = Math.round((durationMs || 0) / 1000);
-    const status = lead.fields?.stage || lead.status;
+    const status = lead.status;
     const tempLogId = `${lead.id}-${Date.now()}`;
     setCallLog((log) => [
       {
@@ -2324,7 +3600,13 @@ export default function SimpleCRM() {
   // the table has no wrap-up to force, so it's logged directly — but
   // still remembered (lastAdHocCall) so "Call again"/"Call again with
   // a different number" can offer an immediate redial on it too.
-  const handleCallEnded = (lead, durationMs) => {
+  // `batchLeadIds` is every lead actually dialled in this round — for
+  // a normal single-line call that's always just [lead.id], but for a
+  // Multi Line winner it's every line that was tried, not just the one
+  // that answered. finishWrapUp needs the whole set so the ones that
+  // rang and lost leave the queue too, instead of contaminating the
+  // next round with numbers that were just tried a moment ago.
+  const handleCallEnded = (lead, durationMs, batchLeadIds) => {
     if (!lead) return;
     if (!sessionRef.current) {
       logCallDirect(lead, durationMs);
@@ -2332,47 +3614,36 @@ export default function SimpleCRM() {
       return;
     }
     // A redial via "Call again" carries the wrap-up screen's in-
-    // progress stage/notes forward (see callLeadAgain) rather than
+    // progress status/notes forward (see callLeadAgain) rather than
     // losing what was already typed — everything else about this
     // call's outcome still starts fresh.
     const draft = lead.__wrapUpDraft;
-    // customStage edits the imported STAGE column (contacts.fields.stage)
-    // — the real per-lead pipeline state — rather than the app's fixed
-    // status field, which every imported lead defaults to "New Lead".
     setWrapUp({
       lead,
-      customStage: draft ? draft.customStage : lead.fields?.stage || "",
+      status: draft ? draft.status : lead.status || "New Lead",
       notes: draft ? draft.notes : lead.notes || "",
       durationMs,
       secondsLeft: WRAP_UP_SECONDS,
+      batchLeadIds: batchLeadIds && batchLeadIds.length ? batchLeadIds : [lead.id],
     });
   };
 
-  // Saves the wrap-up's stage/notes onto the lead, logs the call, and
+  // Saves the wrap-up's status/notes onto the lead, logs the call, and
   // advances the session to the next lead — auto-triggered by the
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, customStage, notes, durationMs } = wrapUp;
-    // customStage edits the imported STAGE column (contacts.fields.stage)
-    // — the real per-lead pipeline state — rather than the app's fixed
-    // status field, which every imported lead defaults to "New Lead".
-    const status = customStage;
+    const { lead, notes, durationMs, batchLeadIds } = wrapUp;
+    const status = LEAD_STATUSES.includes(wrapUp.status) ? wrapUp.status : lead.status || "New Lead";
     const durationSeconds = Math.round((durationMs || 0) / 1000);
 
-    // Only log an outcome message when the stage actually changed in
-    // this session — re-confirming the same stage isn't news.
-    if (customStage && customStage !== (lead.fields?.stage || "")) {
-      logStageToConversation(lead, customStage);
+    // Only log an outcome message when the status actually changed in
+    // this session — re-confirming the same status isn't news.
+    if (status !== lead.status) {
+      logStatusToConversation(lead, status);
     }
 
-    setContacts((cs) =>
-      cs.map((c) =>
-        c.id === lead.id
-          ? { ...c, notes, lastContact: "Today", fields: { ...c.fields, stage: customStage } }
-          : c
-      )
-    );
+    setContacts((cs) => cs.map((c) => (c.id === lead.id ? { ...c, notes, lastContact: "Today", status } : c)));
     const tempLogId = `${lead.id}-${Date.now()}`;
     setCallLog((log) => [
       {
@@ -2395,7 +3666,7 @@ export default function SimpleCRM() {
     // Persist to the database — fire-and-forget, surfaced as a banner
     // on failure rather than blocking the session from moving on.
     api
-      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", fields: { stage: customStage } })
+      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", status })
       .catch((err) => setDbError(err.message || "Could not save the updated lead."));
     api
       .post("/api/call-log", {
@@ -2415,7 +3686,12 @@ export default function SimpleCRM() {
     removeLeadFromLists(lead.id);
 
     if (!session) return;
-    const remainingQueue = session.queue.filter((id) => id !== lead.id);
+    // Every lead actually dialled this round comes off the queue, not
+    // just the one who answered — otherwise a Multi Line batch's other
+    // lines (rang, didn't pick up) stay in the queue and mostly re-ring
+    // on the very next round instead of the fresh leads after them.
+    const dialledIds = new Set(batchLeadIds && batchLeadIds.length ? batchLeadIds : [lead.id]);
+    const remainingQueue = session.queue.filter((id) => !dialledIds.has(id));
     if (!remainingQueue.length) {
       setSession(null);
       setSessionPaused(false);
@@ -2451,7 +3727,7 @@ export default function SimpleCRM() {
     setLastAdHocCall(null); // starting any call retires the previous one's redial card
     callEndedRef.current = false;
     try {
-      const { call, callerId } = await placeCall(lead.phone);
+      const { call, callerId } = await placeCall(lead.phone, "rep", { leadId: lead.id });
       activeCallRef.current = call;
       callStartRef.current = Date.now();
       setActiveCallerId(callerId);
@@ -2465,6 +3741,12 @@ export default function SimpleCRM() {
         setCalling(false);
         setCallStatus("idle");
         setActiveCallerId("");
+        // See the matching comment in startMultilineCall's onCallEnded
+        // — cleared here rather than left for the next call to
+        // overwrite, so a stray render in between can't show a "Live
+        // call" card for a lead who's already been hung up on.
+        setActiveLeadId(null);
+        setActiveCallPhone("");
         activeCallRef.current = null;
         const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
         callStartRef.current = null;
@@ -2498,6 +3780,74 @@ export default function SimpleCRM() {
       setCalling(false);
       setCallStatus("idle");
       setActiveCallerId("");
+    }
+  };
+
+  // ----- Manual dial (floating phone button, every page) -----
+  // Dial any number by hand without it having to be a contact. Goes
+  // through the same placeCall() as every other call, so it picks up
+  // the same caller ID rotation across TWILIO_CALLER_IDS — but keeps
+  // its own state rather than borrowing activeLeadId/startCall, since
+  // those assume a lead in dialQueue and would open a wrap-up screen
+  // if a Powerdialler session happened to be paused underneath.
+  const [showManualDial, setShowManualDial] = useState(false);
+  const [manualDialNumber, setManualDialNumber] = useState("");
+  const [manualCall, setManualCall] = useState(null); // { phone, callerId, status, startedAt } | null
+  const [manualCallError, setManualCallError] = useState("");
+  const [manualCallElapsedMs, setManualCallElapsedMs] = useState(0);
+  const manualCallEndedRef = useRef(false);
+
+  useEffect(() => {
+    if (!manualCall?.startedAt || manualCall.status !== "in-progress") return;
+    const t = setInterval(() => setManualCallElapsedMs(Date.now() - manualCall.startedAt), 1000);
+    return () => clearInterval(t);
+  }, [manualCall]);
+
+  const startManualCall = async (e) => {
+    e?.preventDefault?.();
+    const phone = manualDialNumber.trim();
+    // `calling` is the one flag every dial path already checks, so
+    // setting it here is what stops the diallers (and this button)
+    // from putting a second call on the same Twilio device.
+    if (!phone || calling || manualCall) return;
+    setManualCallError("");
+    setManualCallElapsedMs(0);
+    setManualCall({ phone, callerId: "", status: "connecting", startedAt: null });
+    setCalling(true);
+    manualCallEndedRef.current = false;
+    try {
+      const { call, callerId } = await placeCall(phone);
+      const startedAt = Date.now();
+      setManualCall((m) => (m ? { ...m, callerId, startedAt } : m));
+
+      const onEnded = (err) => {
+        if (manualCallEndedRef.current) return;
+        manualCallEndedRef.current = true;
+        setCalling(false);
+        setManualCall(null);
+        if (err) {
+          setManualCallError(err.message || "The call failed.");
+          return;
+        }
+        // Log it so the Reports tab's per-user counts stay complete —
+        // no lead to attach it to, so it's a call-log row of its own.
+        const durationSeconds = Math.round((Date.now() - startedAt) / 1000);
+        api
+          .post("/api/call-log", { leadId: null, name: "Manual dial", phone, status: "Manual dial", durationSeconds })
+          .then((saved) => {
+            if (saved?.id) setCallLog((log) => [saved, ...log]);
+          })
+          .catch(() => {});
+      };
+
+      call.on("accept", () => setManualCall((m) => (m ? { ...m, status: "in-progress" } : m)));
+      call.on("disconnect", () => onEnded());
+      call.on("cancel", () => onEnded());
+      call.on("error", (err) => onEnded(err));
+    } catch (err) {
+      setCalling(false);
+      setManualCall(null);
+      setManualCallError(err.message || "Could not start the call — check your Twilio setup.");
     }
   };
 
@@ -2538,12 +3888,30 @@ export default function SimpleCRM() {
   const startMultilinePolling = (batchId, giveUpAt) => {
     stopMultilinePolling();
     multilinePollRef.current = setInterval(async () => {
+      // Second line of defense against a stale poll outliving the
+      // call it belongs to (see the callEndedRef check right before
+      // this function is called in startMultilineCall) — if the call
+      // it was tracking has already ended one way or another, there's
+      // nothing left for this tick to usefully do, and the give-up
+      // branch below calling hangUp() would otherwise risk dropping
+      // whatever call the rep has since moved on to.
+      if (callEndedRef.current) {
+        stopMultilinePolling();
+        return;
+      }
       let data;
       try {
         data = await api.get(`/api/multiline-batch?id=${batchId}`);
       } catch {
         return; // transient — try again next tick
       }
+      // clearInterval (stopMultilinePolling) only stops *future* ticks
+      // — it can't cancel this tick's fetch once it's already in
+      // flight. If the call ended while that fetch was pending (the
+      // rep hung up right as this tick started), re-check here too:
+      // otherwise this stale tick would still set state for a call
+      // that's no longer live.
+      if (callEndedRef.current) return;
       setMultilineBatch((b) => (b && b.id === batchId ? { ...b, candidates: data.calls } : b));
 
       if (data.status === "connected" && data.winner && !multilineWinnerRef.current) {
@@ -2580,7 +3948,7 @@ export default function SimpleCRM() {
         hangUp();
         if (batchId) cancelMultilineBatch(batchId); // best-effort — drop any leg still stuck ringing
       }
-    }, 1200);
+    }, 600); // was 400ms — still snappy, but that rate was adding meaningfully to the concurrent load that tipped the database into "remaining connection slots" errors (see server/db.js)
   };
 
   // Dials several leads at once (see startSession/togglePause/
@@ -2603,15 +3971,16 @@ export default function SimpleCRM() {
 
     let batchId;
     try {
+      // Phase 1: reserve the batch and a row per lead, but don't dial
+      // anyone yet — see api/multiline-start.js's comment for why.
       const started = await api.post("/api/multiline-start", { leadIds: leadsToTry.map((l) => l.id) });
       batchId = started.batchId;
       multilineBatchIdRef.current = batchId;
       const ringSeconds = started.ringSeconds || 25;
-      const startedAt = Date.now();
       setMultilineBatch({
         id: batchId,
         candidates: started.candidates.map((c) => ({ ...c, status: "placed" })),
-        startedAt,
+        startedAt: Date.now(), // corrected below, once the leads are actually dialled
         ringSeconds,
       });
 
@@ -2627,6 +3996,20 @@ export default function SimpleCRM() {
         setCalling(false);
         setCallStatus("idle");
         setActiveCallerId("");
+        // Cleared the instant the call ends, not left to whenever the
+        // *next* dial attempt happens to get around to it — the "Live
+        // call" panel is gated on `calling && activeLead`, and the
+        // next multi-line batch's own activeLeadId reset doesn't land
+        // until a moment into that batch's async setup (reserving the
+        // batch, joining the conference, waiting for it to connect).
+        // Leaving the just-ended lead's id sitting here in the
+        // meantime is exactly what let a stray render during that gap
+        // redisplay this lead's full "Live call" card — script panel,
+        // soundboard and all — for a few confusing seconds after the
+        // rep had already hung up on them, right as the wrap-up screen
+        // was handing off to the next batch.
+        setActiveLeadId(null);
+        setActiveCallPhone("");
         activeCallRef.current = null;
         stopMultilinePolling();
         setMultilineBatch(null);
@@ -2644,15 +4027,78 @@ export default function SimpleCRM() {
           if (sessionRef.current) setSessionPaused(true);
           return;
         }
-        if (!winner) return; // rep hung up (or nothing answered) before anyone was bridged — nothing to log
+        if (!winner) {
+          // Nobody answered any of this round's lines (or the rep
+          // cancelled mid-dial) — there's no wrap-up screen for a round
+          // with no one to log, so this is the only place a losing
+          // round's leads ever leave the queue. Without this, the
+          // session just sat idle forever after a no-answer batch —
+          // finishWrapUp (the only other place that advances the
+          // queue) only ever runs once someone's actually been talked
+          // to. All of leadsToTry — not just one lead — needs to come
+          // off the queue, or the very next batch would mostly re-dial
+          // the same numbers that just failed to pick up.
+          if (sessionRef.current) {
+            const dialledIds = new Set(leadsToTry.map((l) => l.id));
+            const remainingQueue = sessionRef.current.queue.filter((id) => !dialledIds.has(id));
+            if (!remainingQueue.length) {
+              setSession(null);
+              setSessionPaused(false);
+            } else {
+              setSession((s) => (s ? { ...s, queue: remainingQueue } : s));
+              if (!sessionPausedRef.current) dialNextInQueue(remainingQueue, sessionRef.current.lines);
+            }
+          }
+          return;
+        }
 
         logCallToConversation(winner, durationMs);
-        handleCallEnded(winner, durationMs);
+        handleCallEnded(
+          winner,
+          durationMs,
+          leadsToTry.map((l) => l.id)
+        );
       };
 
       call.on("disconnect", () => onCallEnded());
       call.on("cancel", () => onCallEnded());
       call.on("error", (err) => onCallEnded(err));
+
+      // Wait for the rep's own leg to actually be live in the
+      // conference before dialling anyone — startConferenceOnEnter
+      // means THIS leg is what starts the conference (see
+      // buildConferenceTwiml), so placing a lead's call any earlier
+      // risks it answering into a conference that hasn't started yet:
+      // it would sit there on hold, unable to hear anything, until
+      // the rep's leg caught up a moment later. A lead who answers
+      // fast enough to land in that window experiences exactly "I
+      // picked up and couldn't hear anyone." 'accept' is the SDK's
+      // signal that this leg is genuinely connected.
+      await new Promise((resolve, reject) => {
+        call.once("accept", resolve);
+        call.once("disconnect", () => reject(new Error("Call ended before connecting.")));
+        call.once("cancel", () => reject(new Error("Call ended before connecting.")));
+        call.once("error", (err) => reject(err));
+      });
+      if (callEndedRef.current) return; // onCallEnded already ran (e.g. hung up mid-connect) — nothing left to do
+
+      const startedAt = Date.now();
+      setMultilineBatch((b) => (b && b.id === batchId ? { ...b, startedAt } : b));
+
+      // Phase 2: now that the conference is actually live, place the
+      // real Twilio call to every reserved lead.
+      await api.post("/api/multiline-place-legs", { batchId });
+      // That POST is a real network round trip (up to 6 concurrent
+      // Twilio REST calls server-side) — long enough for the rep to
+      // hit Stop/Cancel while it's in flight. onCallEnded (from the
+      // call's own disconnect/cancel/error, or stopSession acting
+      // directly) can't reach into an already-sent fetch to stop it,
+      // so without this check a batch the UI already tore down would
+      // still start polling once the POST resolves — reviving "in a
+      // call" UI for a call the rep dismissed, or worse, since the
+      // give-up branch below calls hangUp() (device.disconnectAll()),
+      // silently dropping whatever call the rep has since moved on to.
+      if (callEndedRef.current) return;
 
       // A few seconds of slack on top of Twilio's own per-leg ring
       // timeout, so a normal "genuinely nobody answered" resolution
@@ -2660,10 +4106,19 @@ export default function SimpleCRM() {
       // isn't raced by this backstop firing first.
       startMultilinePolling(batchId, startedAt + ringSeconds * 1000 + 8000);
     } catch (err) {
+      if (callEndedRef.current) return; // onCallEnded (above) already fully handled this
       setCallError(err.message || "Could not start multi-line dialling.");
       setCalling(false);
       setCallStatus("idle");
+      setActiveCallerId("");
       setMultilineBatch(null);
+      // The rep's own leg may already be live in an empty conference
+      // (e.g. /api/multiline-place-legs failed after 'accept') — don't
+      // strand it.
+      if (activeCallRef.current) {
+        hangUp();
+        activeCallRef.current = null;
+      }
       if (batchId) cancelMultilineBatch(batchId);
       multilineBatchIdRef.current = null;
     }
@@ -2696,6 +4151,21 @@ export default function SimpleCRM() {
   // call's wrap-up actually finishes (or this one's logged directly,
   // for an ad hoc redial).
   const callLeadAgain = (lead, draft) => {
+    // A redial via "Call again" skips finishWrapUp entirely — it goes
+    // straight back into startCall — so finishWrapUp's batchLeadIds
+    // cleanup (stripping every lead actually dialled this round, not
+    // just the one who answered, off the queue) never runs for this
+    // path. Left alone, a Multi Line winner's other lines that rang
+    // and lost stay in session.queue and get redialled again almost
+    // immediately on the very next round. Apply the same cleanup here
+    // (minus the lead being redialled itself, which is about to be
+    // dialled on purpose).
+    if (session && wrapUp?.batchLeadIds?.length) {
+      const staleIds = wrapUp.batchLeadIds.filter((id) => id !== lead.id);
+      if (staleIds.length) {
+        setSession({ ...session, queue: session.queue.filter((id) => !staleIds.includes(id)) });
+      }
+    }
     setWrapUp(null);
     setLastAdHocCall(null);
     startCall(draft ? { ...lead, __wrapUpDraft: draft } : lead);
@@ -2712,6 +4182,119 @@ export default function SimpleCRM() {
     if (!newNumber) return;
     callLeadAgain({ ...lead, phone: newNumber }, draft);
   };
+
+  // A portal invite link takes over the whole screen — checked ahead
+  // of the normal auth states below, and regardless of whether this
+  // browser already has an unrelated session cookie.
+  if (inviteToken && !authUser) {
+    return (
+      <div
+        className="flex h-screen items-center justify-center bg-gray-50"
+        style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
+      >
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-6">
+            <div className="text-xl font-bold tracking-tight text-gray-900">Scalbl CRM</div>
+            <div className="text-xs text-gray-400 mt-0.5">Client portal invite</div>
+          </div>
+
+          {inviteChecking ? (
+            <div className="bg-white border border-gray-200 rounded-lg p-8 shadow-sm flex items-center justify-center gap-2 text-sm text-gray-400">
+              <Loader2 size={16} className="animate-spin" /> Checking invite…
+            </div>
+          ) : inviteCheckError ? (
+            <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm text-center">
+              <AlertTriangle size={20} className="mx-auto text-red-400 mb-2" />
+              <div className="text-sm text-gray-600">{inviteCheckError}</div>
+              <button
+                onClick={() => {
+                  window.history.replaceState({}, "", window.location.pathname);
+                  window.location.reload();
+                }}
+                className="mt-4 text-xs text-gray-400 hover:text-gray-600"
+              >
+                Go to login instead
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={handleClaimSubmit} className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+              <div className="flex items-center gap-2 mb-1 text-sm font-semibold text-gray-800">
+                <Globe size={15} />
+                Set up your portal access
+              </div>
+              {inviteTags?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-4 mt-2">
+                  {inviteTags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {claimError && (
+                <div className="mb-4 mt-3 flex items-start gap-2 rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  {claimError}
+                </div>
+              )}
+
+              <label className="block text-xs font-medium text-gray-500 mb-1 mt-3">Your name</label>
+              <input
+                autoComplete="name"
+                value={claimForm.name}
+                onChange={(e) => setClaimForm((f) => ({ ...f, name: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="Jane Smith"
+              />
+
+              <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
+              <input
+                type="email"
+                autoComplete="email"
+                value={claimForm.email}
+                onChange={(e) => setClaimForm((f) => ({ ...f, email: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="you@example.com"
+              />
+
+              <label className="block text-xs font-medium text-gray-500 mb-1">Choose a password</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={claimForm.password}
+                onChange={(e) => setClaimForm((f) => ({ ...f, password: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="At least 8 characters"
+              />
+
+              <label className="block text-xs font-medium text-gray-500 mb-1">Confirm password</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={claimForm.confirm}
+                onChange={(e) => setClaimForm((f) => ({ ...f, confirm: e.target.value }))}
+                className="w-full mb-3 rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900/10 focus:border-gray-400"
+                placeholder="••••••••"
+              />
+
+              <button
+                type="submit"
+                disabled={claimSubmitting}
+                className="w-full mt-1 flex items-center justify-center gap-2 rounded-md bg-gray-900 text-white text-sm font-medium py-2 hover:bg-gray-800 disabled:opacity-60"
+              >
+                {claimSubmitting && <Loader2 size={14} className="animate-spin" />}
+                Create account &amp; log in
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (authLoading) {
     return (
@@ -2866,8 +4449,15 @@ export default function SimpleCRM() {
         <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
           {page === "contacts" && (
             <>
-              <div className="px-4 pt-5 pb-2">
+              <div className="px-4 pt-5 pb-2 flex items-center justify-between">
                 <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">Tags</span>
+                <button
+                  onClick={() => setShowManageTagFoldersModal(true)}
+                  title="Manage tag folders"
+                  className="text-gray-300 hover:text-gray-600"
+                >
+                  <FolderPlus size={13} />
+                </button>
               </div>
               <nav className="flex-1 pb-4">
                 <button
@@ -2881,7 +4471,45 @@ export default function SimpleCRM() {
                   <span className="truncate">All contacts</span>
                   <span className="text-xs text-gray-400 shrink-0">{contacts.length}</span>
                 </button>
-                {contactTagNames.map((tag) => (
+                {tagFolders.map((folder) => {
+                  const expanded = expandedTagFolderIds.has(folder.id);
+                  return (
+                    <div key={folder.id}>
+                      <button
+                        onClick={() => toggleTagFolderExpanded(folder.id)}
+                        className="w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left text-gray-600 hover:bg-gray-100"
+                      >
+                        <span className="flex items-center gap-1.5 truncate">
+                          <ChevronDown
+                            size={12}
+                            className={`text-gray-400 shrink-0 transition-transform ${expanded ? "" : "-rotate-90"}`}
+                          />
+                          <Folder size={13} className="text-gray-400 shrink-0" />
+                          <span className="truncate">{folder.name}</span>
+                        </span>
+                        <span className="text-xs text-gray-400 shrink-0">{tagFolderCount(folder)}</span>
+                      </button>
+                      {expanded &&
+                        folder.tagNames.map((tag) => (
+                          <button
+                            key={tag}
+                            onClick={() => setTagQuickFilter("is", tag)}
+                            className={`w-full flex items-center justify-between gap-2 pl-8 pr-4 py-2 text-sm text-left transition-colors ${
+                              tagQuickFilter?.op === "is" && tagQuickFilter.value === tag
+                                ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                                : "hover:bg-gray-100"
+                            }`}
+                          >
+                            <span className={`truncate text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
+                              {tag}
+                            </span>
+                            <span className="text-xs text-gray-400 shrink-0">{contactTagCounts[tag] || 0}</span>
+                          </button>
+                        ))}
+                    </div>
+                  );
+                })}
+                {ungroupedTagNames.map((tag) => (
                   <button
                     key={tag}
                     onClick={() => setTagQuickFilter("is", tag)}
@@ -3052,7 +4680,24 @@ export default function SimpleCRM() {
                   <div className="px-6 py-4 border-b border-gray-100 font-semibold">{activeConversation.name}</div>
                   <div className="flex-1 p-6 space-y-3 overflow-y-auto bg-gray-50/50">
                     {(activeConversation.messages || []).map((m) =>
-                      m.type === "call" ? (
+                      m.type === "recording" ? (
+                        <div key={m.id} className="flex justify-center">
+                          <div className="flex flex-col items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-4 py-2.5 rounded-2xl">
+                            <span className="flex items-center gap-1.5">
+                              <Mic size={12} /> {m.text}
+                            </span>
+                            {m.recordingSid && (
+                              <audio
+                                controls
+                                preload="none"
+                                crossOrigin="use-credentials"
+                                src={`${import.meta.env.VITE_CALL_SERVER_URL || ""}/api/recording-audio?sid=${m.recordingSid}`}
+                                className="h-8 max-w-full"
+                              />
+                            )}
+                          </div>
+                        </div>
+                      ) : m.type === "call" ? (
                         <div key={m.id} className="flex justify-center">
                           <div className="flex items-center gap-1.5 bg-gray-200/70 text-gray-600 text-xs px-3 py-1.5 rounded-full">
                             <PhoneCall size={12} /> {m.text}
@@ -3061,10 +4706,7 @@ export default function SimpleCRM() {
                       ) : m.type === "outcome" ? (
                         <div key={m.id} className="flex justify-center">
                           <div
-                            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border font-medium ${selectOptionColor(
-                              stageColumnDef || {},
-                              m.text
-                            )}`}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 ${STATUS_CHIP} ${statusSolidClass(m.text)}`}
                           >
                             <CheckCircle2 size={12} /> Outcome: {m.text}
                           </div>
@@ -3239,6 +4881,32 @@ export default function SimpleCRM() {
                 </div>
               </div>
               <div className="flex gap-3">
+                {selectedContactIds.length > 0 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowBulkStatusMenu((v) => !v)}
+                      className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
+                    >
+                      Set status for {selectedContactIds.length} <ChevronDown size={14} className="text-gray-400" />
+                    </button>
+                    {showBulkStatusMenu && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setShowBulkStatusMenu(false)} />
+                        <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-1.5 space-y-1 w-48">
+                          {LEAD_STATUSES.map((st) => (
+                            <button
+                              key={st}
+                              onClick={() => setStatusForSelectedContacts(st)}
+                              className={`w-full text-left rounded-md px-3 py-2 text-xs font-bold uppercase tracking-wide hover:brightness-110 ${statusSolidClass(st)}`}
+                            >
+                              {st}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
                 {selectedContactIds.length > 0 && !isClientRole && (
                   <button
                     onClick={() => setShowAddToPowerlist(true)}
@@ -3255,6 +4923,25 @@ export default function SimpleCRM() {
                     <Trash2 size={15} /> Delete {selectedContactIds.length} selected
                   </button>
                 )}
+                <div className="flex border border-gray-200 rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setContactsView("list")}
+                    className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium ${
+                      contactsView === "list" ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    <Table2 size={15} /> List
+                  </button>
+                  <button
+                    onClick={() => setContactsView("board")}
+                    className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium ${
+                      contactsView === "board" ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    <SquareKanban size={15} /> Board
+                  </button>
+                </div>
+                {contactsView === "list" && (
                 <div className="relative">
                   <button
                     onClick={() => {
@@ -3309,7 +4996,7 @@ export default function SimpleCRM() {
                                 <span className="truncate">{col.label}</span>
                               </label>
                             ))}
-                          {contactColumns.filter((col) => col.key !== "stage" && col.label.toLowerCase().includes(columnSettingsSearch.toLowerCase())).length === 0 && (
+                          {contactColumns.filter((col) => col.label.toLowerCase().includes(columnSettingsSearch.toLowerCase())).length === 0 && (
                             <div className="text-xs text-gray-400 px-1.5 py-2">No columns match "{columnSettingsSearch}"</div>
                           )}
                         </div>
@@ -3317,6 +5004,7 @@ export default function SimpleCRM() {
                     </>
                   )}
                 </div>
+                )}
                 <div className="relative">
                   <Search size={15} className="absolute left-3 top-2.5 text-gray-400" />
                   <input
@@ -3355,6 +5043,9 @@ export default function SimpleCRM() {
                 </button>
               </div>
             </div>
+            {contactsView === "board" && renderContactsBoard()}
+            {contactsView === "list" && (
+              <>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -3366,6 +5057,11 @@ export default function SimpleCRM() {
                         onChange={toggleSelectAllContacts}
                         className="w-4 h-4 rounded border-gray-300"
                       />
+                    </th>
+                    <th className="px-3 py-2 font-medium whitespace-nowrap">
+                      <button onClick={() => toggleContactSort("__calls")} className="flex items-center gap-1 hover:text-gray-700">
+                        Calls {sortIndicator("__calls")}
+                      </button>
                     </th>
                     <th className="px-5 py-2 font-medium whitespace-nowrap">
                       <button
@@ -3381,6 +5077,14 @@ export default function SimpleCRM() {
                         className="flex items-center gap-1 hover:text-gray-700"
                       >
                         Name {sortIndicator("__name")}
+                      </button>
+                    </th>
+                    <th className="py-2 font-medium whitespace-nowrap">
+                      <button
+                        onClick={() => toggleContactSort("__email")}
+                        className="flex items-center gap-1 hover:text-gray-700"
+                      >
+                        Email {sortIndicator("__email")}
                       </button>
                     </th>
                     <th className="py-2 font-medium whitespace-nowrap">
@@ -3409,18 +5113,10 @@ export default function SimpleCRM() {
                     </th>
                     <th className="py-2 font-medium whitespace-nowrap">
                       <button
-                        onClick={() => toggleContactSort("stage")}
-                        className="flex items-center gap-1 hover:text-gray-700"
-                      >
-                        Stage {sortIndicator("stage")}
-                      </button>
-                    </th>
-                    <th className="py-2 font-medium whitespace-nowrap">
-                      <button
                         onClick={() => toggleContactSort("__status")}
                         className="flex items-center gap-1 hover:text-gray-700"
                       >
-                        Status {sortIndicator("__status")}
+                        <span className="text-gray-700 font-semibold">Status</span> {sortIndicator("__status")}
                       </button>
                     </th>
                     <th className="py-2 font-medium whitespace-nowrap">
@@ -3472,8 +5168,10 @@ export default function SimpleCRM() {
                           className="w-4 h-4 rounded border-gray-300"
                         />
                       </td>
+                      <td className="px-3 py-2.5">{renderCallCount(c)}</td>
                       <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{c.leadDate || "—"}</td>
                       <td className="px-5 py-2.5 font-medium whitespace-nowrap">{c.name}</td>
+                      <td className="py-2.5 pr-5 text-gray-600 whitespace-nowrap">{c.email || "—"}</td>
                       <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.phone}</td>
                       <td className="py-2.5 text-gray-600 whitespace-nowrap">{c.client}</td>
                       <td className="py-2.5 whitespace-nowrap">
@@ -3485,18 +5183,7 @@ export default function SimpleCRM() {
                           <span className="text-gray-300 text-xs">—</span>
                         )}
                       </td>
-                      <td className="py-2.5 whitespace-nowrap">
-                        {stageColumnDef ? (
-                          renderContactCell(c, stageColumnDef)
-                        ) : (
-                          <span className="text-gray-300 text-xs">—</span>
-                        )}
-                      </td>
-                      <td className="py-2.5 whitespace-nowrap">
-                        <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[c.status]}`}>
-                          {c.status}
-                        </span>
-                      </td>
+                      <td className="p-0 h-px min-w-[160px] align-middle">{renderStatusPicker(c)}</td>
                       <td className="py-2.5 text-gray-500 whitespace-nowrap">{c.lastContact}</td>
                       {visibleContactColumns.map((col) => (
                         <td key={col.id} className="px-3 py-2.5 min-w-[130px] max-w-[220px]">
@@ -3509,7 +5196,7 @@ export default function SimpleCRM() {
                   {filteredContacts.length === 0 && (
                     <tr>
                       <td
-                        colSpan={visibleContactColumns.length + 10}
+                        colSpan={visibleContactColumns.length + 11}
                         className="px-8 py-10 text-center text-sm text-gray-400"
                       >
                         No contacts
@@ -3548,6 +5235,8 @@ export default function SimpleCRM() {
                   </button>
                 </div>
               </div>
+            )}
+              </>
             )}
           </div>
         )}
@@ -3861,6 +5550,28 @@ export default function SimpleCRM() {
                       <div className="text-sm text-gray-600 mt-1">
                         {wrapUp.lead.phone} · {wrapUp.lead.client}
                       </div>
+                      {tagBookingLinks[wrapUp.lead.tag] && (
+                        <div className="flex items-center gap-2 mt-2 text-sm">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-gray-400 shrink-0">
+                            Booking link
+                          </span>
+                          <a
+                            href={tagBookingLinks[wrapUp.lead.tag]}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:underline truncate"
+                          >
+                            {tagBookingLinks[wrapUp.lead.tag]}
+                          </a>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(tagBookingLinks[wrapUp.lead.tag])}
+                            title="Copy link"
+                            className="text-gray-400 hover:text-gray-700 shrink-0"
+                          >
+                            <Copy size={13} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <div
@@ -3885,59 +5596,34 @@ export default function SimpleCRM() {
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
-                      <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
-                      {(() => {
-                        const stageCol = contactColumns.find((c) => c.key === "stage");
-                        const options = stageCol?.options || [];
-                        return (
-                          <>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">
+                        Status <span className="text-gray-400 font-normal">— set the lead's status from this call</span>
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {LEAD_STATUSES.map((st) => {
+                          const selected = wrapUp.status === st;
+                          return (
                             <button
+                              key={st}
                               type="button"
-                              onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
-                              className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
+                              onClick={() => setWrapUp((w) => (w ? { ...w, status: st } : w))}
+                              className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition ${
+                                selected
+                                  ? `${statusSolidClass(st)} shadow-md ring-2 ring-offset-2 ring-offset-amber-50 ring-gray-900/70`
+                                  : "bg-white border border-gray-200 text-gray-500 hover:border-gray-400 hover:text-gray-800"
+                              }`}
                             >
-                              {wrapUp.customStage ? (
-                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(stageCol || {}, wrapUp.customStage)}`}>
-                                  {wrapUp.customStage}
-                                </span>
-                              ) : (
-                                <span className="text-gray-300 text-xs">—</span>
-                              )}
-                              <ChevronDown size={14} className="text-gray-400" />
+                              {selected && <CheckCircle2 size={13} />}
+                              {st}
                             </button>
-                            {wrapUpStatusMenuOpen && (
-                              <>
-                                <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
-                                <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full max-h-64 overflow-y-auto">
-                                  <button
-                                    onClick={() => {
-                                      setWrapUp((w) => (w ? { ...w, customStage: "" } : w));
-                                      setWrapUpStatusMenuOpen(false);
-                                    }}
-                                    className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 text-xs text-gray-400"
-                                  >
-                                    —
-                                  </button>
-                                  {options.map((o) => (
-                                    <button
-                                      key={o.value}
-                                      onClick={() => {
-                                        setWrapUp((w) => (w ? { ...w, customStage: o.value } : w));
-                                        setWrapUpStatusMenuOpen(false);
-                                      }}
-                                      className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
-                                    >
-                                      <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${SELECT_COLORS[o.color] || SELECT_COLORS.gray}`}>
-                                        {o.value}
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              </>
-                            )}
-                          </>
-                        );
-                      })()}
+                          );
+                        })}
+                      </div>
+                      <div className="mt-1.5 text-[11px] text-gray-500 leading-snug">
+                        {isClosedLeadStatus(wrapUp.status)
+                          ? `${wrapUp.status} — this lead leaves the dial queue and won't be called again.`
+                          : `${wrapUp.status} — this lead stays in the dial queue.`}
+                      </div>
                     </div>
                     <div>
                       <label className="text-xs font-medium text-gray-500 block mb-1">Notes</label>
@@ -3955,7 +5641,7 @@ export default function SimpleCRM() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() =>
-                          callLeadAgain(wrapUp.lead, { customStage: wrapUp.customStage, notes: wrapUp.notes })
+                          callLeadAgain(wrapUp.lead, { status: wrapUp.status, notes: wrapUp.notes })
                         }
                         className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
                       >
@@ -3964,7 +5650,7 @@ export default function SimpleCRM() {
                       <button
                         onClick={() =>
                           callLeadAgainWithDifferentNumber(wrapUp.lead, {
-                            customStage: wrapUp.customStage,
+                            status: wrapUp.status,
                             notes: wrapUp.notes,
                           })
                         }
@@ -4032,9 +5718,35 @@ export default function SimpleCRM() {
                         <span>{activeLead.email}</span>
                         <span>{activeLead.client}</span>
                       </div>
+                      <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                        <span>Current status</span>
+                        <span className={`${STATUS_CHIP} ${statusSolidClass(activeLead.status)}`}>{activeLead.status}</span>
+                      </div>
                       {activeLead.notes && (
                         <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2 text-sm text-gray-600">
                           {activeLead.notes}
+                        </div>
+                      )}
+                      {tagBookingLinks[activeLead.tag] && (
+                        <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Booking link</div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <a
+                              href={tagBookingLinks[activeLead.tag]}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sm text-blue-600 hover:underline truncate"
+                            >
+                              {tagBookingLinks[activeLead.tag]}
+                            </a>
+                            <button
+                              onClick={() => navigator.clipboard.writeText(tagBookingLinks[activeLead.tag])}
+                              title="Copy link"
+                              className="text-gray-400 hover:text-gray-700 shrink-0"
+                            >
+                              <Copy size={13} />
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -4175,14 +5887,14 @@ export default function SimpleCRM() {
                   <thead>
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 py-3 font-medium w-8" />
+                      <th className="px-5 py-3 font-semibold text-gray-700 whitespace-nowrap">Status</th>
+                      <th className="px-3 py-3 font-medium whitespace-nowrap">Calls</th>
                       <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
                       <th className="px-5 py-3 font-medium">Name</th>
                       <th className="px-5 py-3 font-medium">Email</th>
                       <th className="px-5 py-3 font-medium">Phone</th>
                       <th className="px-5 py-3 font-medium">Client</th>
-                      <th className="px-5 py-3 font-medium whitespace-nowrap">Stage</th>
                       <th className="px-5 py-3 font-medium">Notes</th>
-                      <th className="px-5 py-3 font-medium">Status</th>
                       {visibleDialColumns.map((col) => (
                         <th key={col.id} className="px-5 py-3 font-medium whitespace-nowrap">
                           {col.label}
@@ -4193,6 +5905,8 @@ export default function SimpleCRM() {
                     </tr>
                     <tr className="border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 pb-3" />
+                      <th className="px-5 pb-3 font-normal min-w-[160px]">{renderDialColumnFilter(DIAL_STATUS_FILTER_COL)}</th>
+                      <th className="px-3 pb-3" />
                       <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.leadDate}
@@ -4239,28 +5953,12 @@ export default function SimpleCRM() {
                         </select>
                       </th>
                       <th className="px-5 pb-3 font-normal">
-                        {stageColumnDef && renderDialColumnFilter(stageColumnDef)}
-                      </th>
-                      <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.notes}
                           onChange={(e) => updateDialFilter("notes", e.target.value)}
                           placeholder="Filter…"
                           className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
                         />
-                      </th>
-                      <th className="px-5 pb-3 font-normal">
-                        <select
-                          value={dialFilters.status}
-                          onChange={(e) => updateDialFilter("status", e.target.value)}
-                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
-                        >
-                          {dialStatusOptions.map((name) => (
-                            <option key={name} value={name}>
-                              {name}
-                            </option>
-                          ))}
-                        </select>
                       </th>
                       {visibleDialColumns.map((col) => (
                         <th key={col.id} className="px-5 pb-3 font-normal">
@@ -4287,32 +5985,15 @@ export default function SimpleCRM() {
                             className="w-4 h-4 rounded border-gray-300"
                           />
                         </td>
+                        <td className="p-0 h-px min-w-[160px] align-middle">{renderStatusPicker(lead)}</td>
+                        <td className="px-3 py-3.5">{renderCallCount(lead)}</td>
                         <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{lead.leadDate || "—"}</td>
                         <td className="px-5 py-3.5 font-medium">{lead.name}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.phone}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.client}</td>
-                        <td className="px-5 py-3.5">
-                          {lead.fields?.stage ? (
-                            <span
-                              className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(
-                                stageColumnDef || {},
-                                lead.fields.stage
-                              )}`}
-                            >
-                              {lead.fields.stage}
-                            </span>
-                          ) : (
-                            <span className="text-gray-300 text-xs">—</span>
-                          )}
-                        </td>
                         <td className="px-5 py-3.5 text-gray-500 max-w-xs truncate" title={lead.notes}>
                           {lead.notes}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[lead.status]}`}>
-                            {lead.status}
-                          </span>
                         </td>
                         {visibleDialColumns.map((col) => {
                           const val = lead.fields?.[col.key];
@@ -4680,6 +6361,28 @@ export default function SimpleCRM() {
                       <div className="text-sm text-gray-600 mt-1">
                         {wrapUp.lead.phone} · {wrapUp.lead.client}
                       </div>
+                      {tagBookingLinks[wrapUp.lead.tag] && (
+                        <div className="flex items-center gap-2 mt-2 text-sm">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-gray-400 shrink-0">
+                            Booking link
+                          </span>
+                          <a
+                            href={tagBookingLinks[wrapUp.lead.tag]}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-600 hover:underline truncate"
+                          >
+                            {tagBookingLinks[wrapUp.lead.tag]}
+                          </a>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(tagBookingLinks[wrapUp.lead.tag])}
+                            title="Copy link"
+                            className="text-gray-400 hover:text-gray-700 shrink-0"
+                          >
+                            <Copy size={13} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <div
@@ -4704,59 +6407,34 @@ export default function SimpleCRM() {
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
-                      <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
-                      {(() => {
-                        const stageCol = contactColumns.find((c) => c.key === "stage");
-                        const options = stageCol?.options || [];
-                        return (
-                          <>
+                      <label className="text-xs font-medium text-gray-500 block mb-1">
+                        Status <span className="text-gray-400 font-normal">— set the lead's status from this call</span>
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {LEAD_STATUSES.map((st) => {
+                          const selected = wrapUp.status === st;
+                          return (
                             <button
+                              key={st}
                               type="button"
-                              onClick={() => setWrapUpStatusMenuOpen((v) => !v)}
-                              className="w-full flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white outline-none focus:border-gray-400"
+                              onClick={() => setWrapUp((w) => (w ? { ...w, status: st } : w))}
+                              className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-xs font-bold uppercase tracking-wide transition ${
+                                selected
+                                  ? `${statusSolidClass(st)} shadow-md ring-2 ring-offset-2 ring-offset-amber-50 ring-gray-900/70`
+                                  : "bg-white border border-gray-200 text-gray-500 hover:border-gray-400 hover:text-gray-800"
+                              }`}
                             >
-                              {wrapUp.customStage ? (
-                                <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(stageCol || {}, wrapUp.customStage)}`}>
-                                  {wrapUp.customStage}
-                                </span>
-                              ) : (
-                                <span className="text-gray-300 text-xs">—</span>
-                              )}
-                              <ChevronDown size={14} className="text-gray-400" />
+                              {selected && <CheckCircle2 size={13} />}
+                              {st}
                             </button>
-                            {wrapUpStatusMenuOpen && (
-                              <>
-                                <div className="fixed inset-0 z-40" onClick={() => setWrapUpStatusMenuOpen(false)} />
-                                <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-full max-h-64 overflow-y-auto">
-                                  <button
-                                    onClick={() => {
-                                      setWrapUp((w) => (w ? { ...w, customStage: "" } : w));
-                                      setWrapUpStatusMenuOpen(false);
-                                    }}
-                                    className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50 text-xs text-gray-400"
-                                  >
-                                    —
-                                  </button>
-                                  {options.map((o) => (
-                                    <button
-                                      key={o.value}
-                                      onClick={() => {
-                                        setWrapUp((w) => (w ? { ...w, customStage: o.value } : w));
-                                        setWrapUpStatusMenuOpen(false);
-                                      }}
-                                      className="w-full text-left px-2 py-1.5 rounded-md hover:bg-gray-50"
-                                    >
-                                      <span className={`text-xs px-2 py-1 rounded-full border whitespace-nowrap ${SELECT_COLORS[o.color] || SELECT_COLORS.gray}`}>
-                                        {o.value}
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              </>
-                            )}
-                          </>
-                        );
-                      })()}
+                          );
+                        })}
+                      </div>
+                      <div className="mt-1.5 text-[11px] text-gray-500 leading-snug">
+                        {isClosedLeadStatus(wrapUp.status)
+                          ? `${wrapUp.status} — this lead leaves the dial queue and won't be called again.`
+                          : `${wrapUp.status} — this lead stays in the dial queue.`}
+                      </div>
                     </div>
                     <div>
                       <label className="text-xs font-medium text-gray-500 block mb-1">Notes</label>
@@ -4774,7 +6452,7 @@ export default function SimpleCRM() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() =>
-                          callLeadAgain(wrapUp.lead, { customStage: wrapUp.customStage, notes: wrapUp.notes })
+                          callLeadAgain(wrapUp.lead, { status: wrapUp.status, notes: wrapUp.notes })
                         }
                         className="flex items-center gap-1.5 border border-amber-300 bg-white text-amber-700 hover:bg-amber-100 text-sm px-3.5 py-2 rounded-lg font-medium"
                       >
@@ -4783,7 +6461,7 @@ export default function SimpleCRM() {
                       <button
                         onClick={() =>
                           callLeadAgainWithDifferentNumber(wrapUp.lead, {
-                            customStage: wrapUp.customStage,
+                            status: wrapUp.status,
                             notes: wrapUp.notes,
                           })
                         }
@@ -4851,9 +6529,35 @@ export default function SimpleCRM() {
                         <span>{activeLead.email}</span>
                         <span>{activeLead.client}</span>
                       </div>
+                      <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                        <span>Current status</span>
+                        <span className={`${STATUS_CHIP} ${statusSolidClass(activeLead.status)}`}>{activeLead.status}</span>
+                      </div>
                       {activeLead.notes && (
                         <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2 text-sm text-gray-600">
                           {activeLead.notes}
+                        </div>
+                      )}
+                      {tagBookingLinks[activeLead.tag] && (
+                        <div className="mt-3 bg-white/70 border border-green-100 rounded-lg px-3 py-2">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Booking link</div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <a
+                              href={tagBookingLinks[activeLead.tag]}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sm text-blue-600 hover:underline truncate"
+                            >
+                              {tagBookingLinks[activeLead.tag]}
+                            </a>
+                            <button
+                              onClick={() => navigator.clipboard.writeText(tagBookingLinks[activeLead.tag])}
+                              title="Copy link"
+                              className="text-gray-400 hover:text-gray-700 shrink-0"
+                            >
+                              <Copy size={13} />
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -4994,14 +6698,14 @@ export default function SimpleCRM() {
                   <thead>
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 py-3 font-medium w-8" />
+                      <th className="px-5 py-3 font-semibold text-gray-700 whitespace-nowrap">Status</th>
+                      <th className="px-3 py-3 font-medium whitespace-nowrap">Calls</th>
                       <th className="px-5 py-3 font-medium whitespace-nowrap">Date</th>
                       <th className="px-5 py-3 font-medium">Name</th>
                       <th className="px-5 py-3 font-medium">Email</th>
                       <th className="px-5 py-3 font-medium">Phone</th>
                       <th className="px-5 py-3 font-medium">Client</th>
-                      <th className="px-5 py-3 font-medium whitespace-nowrap">Stage</th>
                       <th className="px-5 py-3 font-medium">Notes</th>
-                      <th className="px-5 py-3 font-medium">Status</th>
                       {visibleDialColumns.map((col) => (
                         <th key={col.id} className="px-5 py-3 font-medium whitespace-nowrap">
                           {col.label}
@@ -5012,6 +6716,8 @@ export default function SimpleCRM() {
                     </tr>
                     <tr className="border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 pb-3" />
+                      <th className="px-5 pb-3 font-normal min-w-[160px]">{renderDialColumnFilter(DIAL_STATUS_FILTER_COL)}</th>
+                      <th className="px-3 pb-3" />
                       <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.leadDate}
@@ -5058,28 +6764,12 @@ export default function SimpleCRM() {
                         </select>
                       </th>
                       <th className="px-5 pb-3 font-normal">
-                        {stageColumnDef && renderDialColumnFilter(stageColumnDef)}
-                      </th>
-                      <th className="px-5 pb-3 font-normal">
                         <input
                           value={dialFilters.notes}
                           onChange={(e) => updateDialFilter("notes", e.target.value)}
                           placeholder="Filter…"
                           className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
                         />
-                      </th>
-                      <th className="px-5 pb-3 font-normal">
-                        <select
-                          value={dialFilters.status}
-                          onChange={(e) => updateDialFilter("status", e.target.value)}
-                          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs font-normal normal-case outline-none focus:border-gray-400 bg-white"
-                        >
-                          {dialStatusOptions.map((name) => (
-                            <option key={name} value={name}>
-                              {name}
-                            </option>
-                          ))}
-                        </select>
                       </th>
                       {visibleDialColumns.map((col) => (
                         <th key={col.id} className="px-5 pb-3 font-normal">
@@ -5106,32 +6796,15 @@ export default function SimpleCRM() {
                             className="w-4 h-4 rounded border-gray-300"
                           />
                         </td>
+                        <td className="p-0 h-px min-w-[160px] align-middle">{renderStatusPicker(lead)}</td>
+                        <td className="px-3 py-3.5">{renderCallCount(lead)}</td>
                         <td className="px-5 py-3.5 text-gray-500 whitespace-nowrap">{lead.leadDate || "—"}</td>
                         <td className="px-5 py-3.5 font-medium">{lead.name}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.email}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.phone}</td>
                         <td className="px-5 py-3.5 text-gray-600">{lead.client}</td>
-                        <td className="px-5 py-3.5">
-                          {lead.fields?.stage ? (
-                            <span
-                              className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${selectOptionColor(
-                                stageColumnDef || {},
-                                lead.fields.stage
-                              )}`}
-                            >
-                              {lead.fields.stage}
-                            </span>
-                          ) : (
-                            <span className="text-gray-300 text-xs">—</span>
-                          )}
-                        </td>
                         <td className="px-5 py-3.5 text-gray-500 max-w-xs truncate" title={lead.notes}>
                           {lead.notes}
-                        </td>
-                        <td className="px-5 py-3.5">
-                          <span className={`text-xs px-2.5 py-1 rounded-full border ${statusColors[lead.status]}`}>
-                            {lead.status}
-                          </span>
                         </td>
                         {visibleDialColumns.map((col) => {
                           const val = lead.fields?.[col.key];
@@ -5276,7 +6949,7 @@ export default function SimpleCRM() {
                     <td className="py-3.5 text-gray-600">{entry.phone}</td>
                     <td className="py-3.5">
                       {entry.status ? (
-                        <span className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${callOutcomeColor(entry.status)}`}>
+                        <span className={`${STATUS_CHIP} ${callOutcomeColor(entry.status)}`}>
                           {entry.status}
                         </span>
                       ) : (
@@ -5332,6 +7005,20 @@ export default function SimpleCRM() {
                   className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
                 />
                 <select
+                  value={reportsTagFilter}
+                  onChange={(e) => setReportsTagFilter(e.target.value)}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                >
+                  <option value="All">All clients</option>
+                  {reportsTagOptions.map((tag) => (
+                    <option key={tag} value={tag}>
+                      {tag}
+                    </option>
+                  ))}
+                  {/* Matches reportsByTag's own "Untagged" fallback below — lets you isolate calls with no client tag at all. */}
+                  <option value="Untagged">Untagged</option>
+                </select>
+                <select
                   value={reportsUserFilter}
                   onChange={(e) => setReportsUserFilter(e.target.value)}
                   className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
@@ -5348,6 +7035,7 @@ export default function SimpleCRM() {
                     setReportsFrom(isoDaysAgo(30));
                     setReportsTo(isoToday());
                     setReportsUserFilter("All");
+                    setReportsTagFilter("All");
                   }}
                   className="text-sm text-gray-400 hover:text-gray-700 px-2"
                 >
@@ -5669,6 +7357,224 @@ export default function SimpleCRM() {
           </div>
         )}
 
+        {/* Portal — client-facing summary: total leads, a dial activity
+            graph in the same shape as the internal Activity Stream, and
+            (for now) placeholder ad creative/metrics. Scoped by tag — a
+            client role sees their own allowedTags; staff pick one tag
+            from the dropdown to preview that client's view. */}
+        {page === "portal" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
+              <div>
+                <h1 className="text-xl font-bold flex items-center gap-2">
+                  <Globe size={20} className="text-gray-400" />
+                  Client Portal
+                </h1>
+                <div className="text-sm text-gray-400 mt-0.5">
+                  {portalIsClientRole
+                    ? "Your leads, dial activity, and current ad campaigns."
+                    : "Preview exactly what a client sees for their tag."}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {portalIsClientRole ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {(authUser.allowedTags || []).map((tag) => (
+                      <span key={tag} className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <select
+                    value={portalSelectedTag}
+                    onChange={(e) => setPortalSelectedTag(e.target.value)}
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    <option value="">Select a client…</option>
+                    {contactTagNames.map((tag) => (
+                      <option key={tag} value={tag}>
+                        {tag}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+
+            {!portalHasScope ? (
+              <div className="p-8">
+                <div className="border border-dashed border-gray-200 rounded-2xl py-16 text-center text-sm text-gray-400">
+                  {portalIsClientRole
+                    ? "No client tag is assigned to your account yet — ask your account manager to assign one."
+                    : contactTagNames.length === 0
+                    ? "No client tags yet — import some leads first."
+                    : "Select a client above to preview their portal."}
+                </div>
+              </div>
+            ) : (
+              <div className="p-8 space-y-8">
+                {/* KPIs */}
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <div className="border border-gray-200 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Total leads</div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums">{portalTotalLeads}</div>
+                  </div>
+                  <div className="border border-gray-200 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">Dials in range</div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums">{portalTotalDials}</div>
+                  </div>
+                  <div className="border border-green-200 bg-green-50/40 rounded-2xl p-5">
+                    <div className="text-xs font-medium text-green-700 uppercase tracking-wide">Bookings</div>
+                    <div className="text-4xl font-bold mt-2 tabular-nums text-green-800">{portalBookedCalls}</div>
+                  </div>
+                </div>
+
+                {portalTotalLeads > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {LEAD_STATUSES.filter((status) => portalStatusCounts[status]).map((status) => (
+                      <span key={status} className={`${STATUS_CHIP} px-2.5 py-1 ${statusSolidClass(status)}`}>
+                        {status} · {portalStatusCounts[status]}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Dial activity — same chart as Reports' Activity
+                    Stream, scoped to this client's leads. */}
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
+                    <div>
+                      <div className="font-semibold text-sm">Dial activity</div>
+                      <div className="text-xs text-gray-400 mt-0.5">
+                        Dial attempts to your leads by time of day &middot; {ACTIVITY_BUCKET_MINUTES}-min buckets, all
+                        days in range combined
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        value={portalFrom}
+                        onChange={(e) => setPortalFrom(e.target.value)}
+                        className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                      />
+                      <span className="text-sm text-gray-400">to</span>
+                      <input
+                        type="date"
+                        value={portalTo}
+                        onChange={(e) => setPortalTo(e.target.value)}
+                        className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                      />
+                    </div>
+                  </div>
+                  <div className="px-5 py-4">
+                    {portalActivity.buckets.length === 0 ? (
+                      <div className="text-sm text-gray-400 text-center py-14">No dials in this range</div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height={260}>
+                        <AreaChart data={portalActivity.buckets} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="portalActivityStreamFill" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.35} />
+                              <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.02} />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+                          <XAxis
+                            dataKey="time"
+                            tick={{ fontSize: 11, fill: "#9ca3af" }}
+                            tickLine={false}
+                            axisLine={{ stroke: "#e5e7eb" }}
+                            interval="preserveStartEnd"
+                            minTickGap={28}
+                          />
+                          <YAxis
+                            allowDecimals={false}
+                            tick={{ fontSize: 11, fill: "#9ca3af" }}
+                            tickLine={false}
+                            axisLine={false}
+                            width={28}
+                          />
+                          <Tooltip
+                            formatter={(value) => [`${value} call${value === 1 ? "" : "s"}`, "Dial attempts"]}
+                            labelFormatter={(label) => label}
+                            contentStyle={{ borderRadius: 10, border: "1px solid #e5e7eb", fontSize: 12 }}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="calls"
+                            stroke="#3b82f6"
+                            strokeWidth={2}
+                            fill="url(#portalActivityStreamFill)"
+                            isAnimationActive={false}
+                          />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </div>
+
+                {/* Ads — placeholder creative + metrics until a real ad
+                    account is connected. Clearly labelled as preview
+                    data so it's never mistaken for a client's real
+                    numbers. */}
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <Megaphone size={16} className="text-gray-400" />
+                      <div className="font-semibold text-sm">Current ads</div>
+                    </div>
+                    <span className="text-xs px-2.5 py-1 rounded-full border bg-amber-50 text-amber-700 border-amber-200">
+                      Preview data — ad account not connected yet
+                    </span>
+                  </div>
+                  <div className="p-5 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {PLACEHOLDER_ADS.map((ad) => (
+                      <div key={ad.id} className="border border-gray-200 rounded-xl overflow-hidden">
+                        <div className="h-32 bg-gradient-to-br from-gray-100 to-gray-50 flex items-center justify-center">
+                          <Image size={28} className="text-gray-300" />
+                        </div>
+                        <div className="p-4">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-medium text-sm truncate">{ad.name}</div>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border whitespace-nowrap ${
+                                ad.status === "Active"
+                                  ? "bg-green-50 text-green-700 border-green-200"
+                                  : "bg-gray-50 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {ad.status}
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-400 mt-0.5">{ad.platform}</div>
+                          <div className="grid grid-cols-2 gap-2 mt-3">
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <Eye size={12} className="text-gray-300" />
+                              {ad.impressions.toLocaleString()} impr.
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <MousePointerClick size={12} className="text-gray-300" />
+                              {ad.clicks.toLocaleString()} clicks
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <TrendingUp size={12} className="text-gray-300" />
+                              {ad.ctr}% CTR
+                            </div>
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <DollarSign size={12} className="text-gray-300" />${ad.spend.toLocaleString()} spent
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Clients */}
         {page === "clients" && (
           <div className="flex-1 overflow-y-auto">
@@ -5856,6 +7762,818 @@ export default function SimpleCRM() {
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        )}
+
+        {/* Calendars */}
+        {page === "calendars" && (
+          <div className="flex-1 overflow-y-auto">
+            {!openCalendar ? (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <h1 className="text-xl font-bold">Calendars</h1>
+                  <button
+                    onClick={() => setShowAddCalendarModal(true)}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Plus size={15} /> Add Calendar
+                  </button>
+                </div>
+                <div className="p-8">
+                  {calendarsLoading ? (
+                    <div className="flex justify-center py-16">
+                      <Loader2 className="animate-spin text-gray-400" size={20} />
+                    </div>
+                  ) : calendars.length === 0 ? (
+                    <div className="text-center py-16 text-sm text-gray-400">
+                      <Calendar size={28} className="mx-auto mb-3 text-gray-300" />
+                      No calendars yet. Add one to start taking bookings.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {calendars.map((cal) => (
+                        <div key={cal.id} className="border border-gray-200 rounded-xl p-5 bg-white">
+                          <div className="flex items-start justify-between mb-2">
+                            <h3 className="font-semibold text-sm">{cal.name}</h3>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border ${
+                                cal.active
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-gray-100 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {cal.active ? "Active" : "Paused"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-400 mb-1.5 flex items-center gap-1">
+                            <Clock size={12} /> {cal.eventLengthMinutes} min · {cal.timezone}
+                          </p>
+                          <p className="text-xs mb-4">
+                            {cal.googleConnected ? (
+                              <span className="text-emerald-600 flex items-center gap-1">
+                                <CheckCircle2 size={12} /> Google connected
+                              </span>
+                            ) : (
+                              <span className="text-gray-400">Google not connected</span>
+                            )}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setOpenCalendarId(cal.id);
+                                setCalendarSettingsTab("integrate");
+                              }}
+                              className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-3 py-2 rounded-lg font-medium"
+                            >
+                              Open
+                            </button>
+                            <button
+                              onClick={() => deleteCalendar(cal.id)}
+                              className="text-gray-400 hover:text-red-600 p-2"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <button
+                      onClick={() => setOpenCalendarId(null)}
+                      className="text-xs text-gray-400 hover:text-gray-700 mb-1"
+                    >
+                      ← Back to Calendars
+                    </button>
+                    <h1 className="text-xl font-bold">{openCalendar.name}</h1>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-500">
+                    <input
+                      type="checkbox"
+                      checked={openCalendar.active}
+                      onChange={(e) => patchCalendar(openCalendar.id, { active: e.target.checked })}
+                    />
+                    Active
+                  </label>
+                </div>
+                <div className="flex">
+                  <div className="w-48 shrink-0 border-r border-gray-100 py-6 px-3 space-y-1">
+                    {CALENDAR_SETTINGS_SECTIONS.map(({ key, label, icon: Icon }) => (
+                      <button
+                        key={key}
+                        onClick={() => setCalendarSettingsTab(key)}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg text-left ${
+                          calendarSettingsTab === key
+                            ? "bg-gray-100 font-semibold text-gray-900"
+                            : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+                        }`}
+                      >
+                        <Icon size={15} /> {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex-1 p-8">
+                    {calendarSettingsTab === "integrate" && (
+                      <div className="max-w-lg space-y-4">
+                        <h2 className="text-base font-bold">Integrate with Google</h2>
+                        <p className="text-sm text-gray-500">
+                          Connect a Google account so booked calls are added straight to that calendar, and existing
+                          events on it block off time here automatically.
+                        </p>
+                        {openCalendar.googleConnected ? (
+                          <>
+                            <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
+                              <div>
+                                <p className="text-sm font-medium">Connected</p>
+                                <p className="text-xs text-gray-500">{openCalendar.googleEmail}</p>
+                              </div>
+                              <button
+                                onClick={() => disconnectGoogleCalendar(openCalendar.id)}
+                                className="text-sm text-red-600 hover:text-red-700 font-medium"
+                              >
+                                Disconnect
+                              </button>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                                Which calendar should bookings use?
+                              </label>
+                              <Dropdown
+                                value={openCalendar.googleCalendarId}
+                                onChange={(googleCalendarId) => patchCalendar(openCalendar.id, { googleCalendarId })}
+                                options={
+                                  googleCalendarOptions.length
+                                    ? googleCalendarOptions
+                                    : [{ value: openCalendar.googleCalendarId, label: openCalendar.googleCalendarId }]
+                                }
+                                disabled={googleCalendarsLoading}
+                                searchable
+                              />
+                              {googleCalendarsError ? (
+                                <p className="text-xs text-red-600 mt-1.5">
+                                  {googleCalendarsError} If this was connected before other calendars were shared
+                                  with it, disconnect and reconnect Google to refresh access.
+                                </p>
+                              ) : (
+                                <p className="text-xs text-gray-400 mt-1.5">
+                                  Events are created here, and existing events on it block off time in the booking
+                                  widget.
+                                </p>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => connectGoogleCalendar(openCalendar.id)}
+                            className="flex items-center gap-2 border border-gray-200 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                          >
+                            <Globe size={15} /> Connect with Google
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "timezone" && (
+                      <div className="max-w-sm space-y-3">
+                        <h2 className="text-base font-bold">Timezone</h2>
+                        <p className="text-sm text-gray-500">Availability hours below are set in this timezone.</p>
+                        <Dropdown
+                          value={openCalendar.timezone}
+                          onChange={(tz) => patchCalendar(openCalendar.id, { timezone: tz })}
+                          options={timezoneDropdownOptions}
+                          searchable
+                        />
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "availability" && availabilityDraft && (
+                      <div className="max-w-2xl space-y-5">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Availability</h2>
+                          <button
+                            onClick={() => patchCalendar(openCalendar.id, { availability: availabilityDraft })}
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save availability
+                          </button>
+                        </div>
+                        {WEEKDAYS.map(({ key, label }) => {
+                          const ranges = availabilityDraft[key] || [];
+                          return (
+                            <div key={key} className="border border-gray-100 rounded-lg p-4">
+                              <div className="flex items-center justify-between mb-3">
+                                <label className="flex items-center gap-2 text-sm font-medium">
+                                  <input type="checkbox" checked={ranges.length > 0} onChange={() => toggleDayEnabled(key)} />
+                                  {label}
+                                </label>
+                                {ranges.length > 0 && (
+                                  <div className="flex items-center gap-3">
+                                    <button
+                                      onClick={() => applyDayToAllDays(key)}
+                                      className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 font-medium"
+                                      title="Copy this day's hours to every other day"
+                                    >
+                                      <Copy size={12} /> Apply to all
+                                    </button>
+                                    <button
+                                      onClick={() => addDayRange(key)}
+                                      className="text-xs text-gray-500 hover:text-gray-800 font-medium"
+                                    >
+                                      + Add range
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                              {ranges.map((range, i) => (
+                                <div key={i} className="flex items-center gap-2 mb-2">
+                                  <Dropdown
+                                    value={range.start}
+                                    onChange={(v) => setDayRange(key, i, "start", v)}
+                                    options={timeOfDayDropdownOptions}
+                                    className="w-36"
+                                  />
+                                  <span className="text-gray-400 text-sm">to</span>
+                                  <Dropdown
+                                    value={range.end}
+                                    onChange={(v) => setDayRange(key, i, "end", v)}
+                                    options={timeOfDayDropdownOptions}
+                                    className="w-36"
+                                  />
+                                  <button onClick={() => removeDayRange(key, i)} className="text-gray-400 hover:text-red-600 p-1">
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                              ))}
+                              {ranges.length === 0 && <p className="text-xs text-gray-400">Unavailable</p>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "rules" && rulesDraft && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Booking rules</h2>
+                          <button
+                            onClick={() =>
+                              patchCalendar(openCalendar.id, {
+                                eventLengthMinutes: Number(rulesDraft.eventLengthMinutes),
+                                bufferMinutes: Number(rulesDraft.bufferMinutes),
+                                minNoticeHours: Number(rulesDraft.minNoticeHours),
+                                bookingWindowDays: Number(rulesDraft.bookingWindowDays),
+                                maxBookingsPerDay: rulesDraft.maxBookingsPerDay === "" ? null : Number(rulesDraft.maxBookingsPerDay),
+                              })
+                            }
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Call length</label>
+                          <Dropdown
+                            value={rulesDraft.eventLengthMinutes}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, eventLengthMinutes: v }))}
+                            options={EVENT_LENGTH_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Buffer between calls</label>
+                          <Dropdown
+                            value={rulesDraft.bufferMinutes}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, bufferMinutes: v }))}
+                            options={BUFFER_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Minimum notice</label>
+                          <Dropdown
+                            value={rulesDraft.minNoticeHours}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, minNoticeHours: v }))}
+                            options={MIN_NOTICE_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Booking window</label>
+                          <Dropdown
+                            value={rulesDraft.bookingWindowDays}
+                            onChange={(v) => setRulesDraft((d) => ({ ...d, bookingWindowDays: v }))}
+                            options={BOOKING_WINDOW_OPTIONS}
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                            Max bookings per day (optional)
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={rulesDraft.maxBookingsPerDay}
+                            onChange={(e) => setRulesDraft((d) => ({ ...d, maxBookingsPerDay: e.target.value }))}
+                            placeholder="No limit"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "video" && videoDraft && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Video conference</h2>
+                          <button
+                            onClick={() =>
+                              patchCalendar(openCalendar.id, {
+                                videoConferenceLink: videoDraft.videoConferenceLink.trim(),
+                              })
+                            }
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <p className="text-sm text-gray-500">
+                          Add a Zoom (or other) link and every booking on this calendar carries it: it's appended in
+                          brackets after the booker's name in the Google Calendar event title, and set as that
+                          event's location.
+                        </p>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Meeting link</label>
+                          <input
+                            value={videoDraft.videoConferenceLink}
+                            onChange={(e) => setVideoDraft((d) => ({ ...d, videoConferenceLink: e.target.value }))}
+                            placeholder="https://zoom.us/j/…"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                        </div>
+                        {openCalendar.videoConferenceLink && (
+                          <p className="text-xs text-gray-400">
+                            Event title will read: “{openCalendar.name} with Jane Smith ({openCalendar.videoConferenceLink})”
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "share" && (
+                      <div className="max-w-xl space-y-6">
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Share</h2>
+                          <p className="text-sm text-gray-500 mb-3">
+                            Anyone with this link can book an open slot on this calendar.
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <input
+                              readOnly
+                              value={`${window.location.origin}/book/${openCalendar.slug}`}
+                              onFocus={(e) => e.target.select()}
+                              className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50"
+                            />
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(`${window.location.origin}/book/${openCalendar.slug}`)
+                              }
+                              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                            >
+                              <Copy size={14} /> Copy
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Embed</h2>
+                          <p className="text-sm text-gray-500 mb-3">
+                            Paste this into any website to embed the booking widget directly.
+                          </p>
+                          <div className="flex items-start gap-2">
+                            <textarea
+                              readOnly
+                              rows={3}
+                              value={`<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`}
+                              onFocus={(e) => e.target.select()}
+                              className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50 font-mono"
+                            />
+                            <button
+                              onClick={() =>
+                                navigator.clipboard.writeText(
+                                  `<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`
+                                )
+                              }
+                              className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                            >
+                              <Copy size={14} /> Copy
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold mb-2">Bookings</h2>
+                          {calendarBookings.length === 0 ? (
+                            <p className="text-sm text-gray-400">No bookings yet.</p>
+                          ) : (
+                            <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                              {calendarBookings.map((b) => (
+                                <div key={b.id} className="flex items-center justify-between px-4 py-3">
+                                  <div>
+                                    <p className="text-sm font-medium">
+                                      {b.contactName}{" "}
+                                      {b.status === "cancelled" && (
+                                        <span className="text-xs text-red-500 font-normal">(cancelled)</span>
+                                      )}
+                                    </p>
+                                    <p className="text-xs text-gray-500 flex items-center gap-1">
+                                      <MapPin size={11} /> {b.contactEmail || b.contactPhone || "—"}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-gray-500">
+                                      {new Date(b.startTime).toLocaleString("en-US", {
+                                        dateStyle: "medium",
+                                        timeStyle: "short",
+                                        timeZone: openCalendar.timezone,
+                                      })}
+                                    </span>
+                                    {b.status !== "cancelled" && (
+                                      <button
+                                        onClick={() => cancelCalendarBooking(b.id)}
+                                        className="text-xs text-red-500 hover:text-red-700 font-medium"
+                                      >
+                                        Cancel
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Automations */}
+        {page === "automations" && (
+          <div className="flex-1 overflow-y-auto">
+            {!openAutomation ? (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h1 className="text-xl font-bold">Automations</h1>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Fire off emails and texts automatically when something happens in the CRM.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setShowAddAutomationModal(true)}
+                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                  >
+                    <Plus size={15} /> Add Automation
+                  </button>
+                </div>
+                <div className="p-8">
+                  {automationsLoading ? (
+                    <div className="flex justify-center py-16">
+                      <Loader2 className="animate-spin text-gray-400" size={20} />
+                    </div>
+                  ) : automations.length === 0 ? (
+                    <div className="text-center py-16 text-sm text-gray-400">
+                      <Zap size={28} className="mx-auto mb-3 text-gray-300" />
+                      No automations yet. Add one to start automating follow-ups.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {automations.map((a) => (
+                        <div key={a.id} className="border border-gray-200 rounded-xl p-5 bg-white">
+                          <div className="flex items-start justify-between mb-2">
+                            <h3 className="font-semibold text-sm">{a.name}</h3>
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full border ${
+                                a.active
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                  : "bg-gray-100 text-gray-500 border-gray-200"
+                              }`}
+                            >
+                              {a.active ? "Active" : "Paused"}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-400 mb-1.5 flex items-center gap-1">
+                            <Zap size={12} />
+                            {AUTOMATION_TRIGGER_OPTIONS.find((t) => t.value === a.triggerType)?.label ||
+                              "Trigger not set"}
+                          </p>
+                          <p className="text-xs text-gray-400 mb-4">
+                            {a.actions.length} action{a.actions.length === 1 ? "" : "s"}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setOpenAutomationId(a.id)}
+                              className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-3 py-2 rounded-lg font-medium"
+                            >
+                              Open
+                            </button>
+                            <button
+                              onClick={() => deleteAutomation(a.id)}
+                              className="text-gray-400 hover:text-red-600 p-2"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <button
+                      onClick={() => {
+                        if (
+                          automationHasUnsavedChanges &&
+                          !window.confirm("You have unsaved changes — leave without saving?")
+                        ) {
+                          return;
+                        }
+                        setOpenAutomationId(null);
+                      }}
+                      className="text-xs text-gray-400 hover:text-gray-700 mb-1"
+                    >
+                      ← Back to Automations
+                    </button>
+                    <h1 className="text-xl font-bold">{openAutomation.name}</h1>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-gray-500">
+                      <input
+                        type="checkbox"
+                        checked={openAutomation.active}
+                        onChange={() => toggleAutomationActive(openAutomation)}
+                      />
+                      Active
+                    </label>
+                    <button
+                      onClick={saveAutomationDraft}
+                      disabled={savingAutomation}
+                      className={`flex items-center gap-2 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 ${
+                        automationHasUnsavedChanges ? "bg-amber-600" : "bg-gray-900"
+                      }`}
+                    >
+                      {savingAutomation && <Loader2 size={14} className="animate-spin" />}
+                      {automationHasUnsavedChanges ? "Save changes" : "Save"}
+                    </button>
+                  </div>
+                </div>
+
+                {automationHasUnsavedChanges && (
+                  <div className="px-8 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-800">
+                    You have unsaved changes — nothing above will actually run until you click{" "}
+                    <strong>Save changes</strong>.
+                  </div>
+                )}
+
+                {!openAutomation.triggerType && (
+                  <div className="px-8 py-2.5 bg-red-50 border-b border-red-200 text-sm text-red-700">
+                    No trigger is set on the saved automation yet — it will never fire until one is chosen and saved.
+                  </div>
+                )}
+
+                {automationDraft && (
+                  <div className="p-8 max-w-xl space-y-8">
+                    <div className="border border-gray-100 rounded-lg p-5 space-y-4">
+                      <h2 className="text-base font-bold flex items-center gap-2">
+                        <Zap size={16} className="text-gray-400" /> Trigger
+                      </h2>
+                      <Dropdown
+                        value={automationDraft.triggerType}
+                        onChange={setAutomationTriggerType}
+                        options={AUTOMATION_TRIGGER_OPTIONS}
+                        placeholder="Choose a trigger…"
+                      />
+
+                      {automationDraft.triggerType === "contact_tag_added" && (
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500 flex items-center gap-1">
+                            <Tag size={12} /> Contact tag is =
+                          </label>
+                          <Dropdown
+                            value={automationDraft.triggerConfig.tag || ""}
+                            onChange={(v) => setAutomationTriggerConfig({ tag: v || null })}
+                            options={[
+                              { value: "", label: "Any tag" },
+                              ...contactTagNames.map((t) => ({ value: t, label: t })),
+                            ]}
+                            searchable
+                          />
+                        </div>
+                      )}
+
+                      {automationDraft.triggerType === "booking_created" && (
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500 flex items-center gap-1">
+                            <Calendar size={12} /> Booking is in calendar
+                          </label>
+                          <Dropdown
+                            value={String(automationDraft.triggerConfig.calendarId || "")}
+                            onChange={(v) => setAutomationTriggerConfig({ calendarId: v ? Number(v) : null })}
+                            options={[
+                              { value: "", label: "Any calendar" },
+                              ...calendars.map((c) => ({ value: String(c.id), label: c.name })),
+                            ]}
+                            searchable
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-4">
+                      <h2 className="text-base font-bold">Actions</h2>
+
+                      <div>
+                        {automationDraft.actions.length === 0 && (
+                          <p className="text-sm text-gray-400 text-center pb-1">
+                            No steps yet — click below to add an email, SMS, or wait step.
+                          </p>
+                        )}
+                        <AddStepMenu onAdd={(a) => insertAutomationAction(0, a)} />
+                        {automationDraft.actions.map((action, i) => (
+                          <div key={i}>
+                            {action.type === "wait" ? (
+                              <div className="border border-gray-100 rounded-lg p-4 bg-gray-50">
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="text-sm font-semibold flex items-center gap-1.5">
+                                    <Clock size={13} /> Step {i + 1}: Wait
+                                  </span>
+                                  <button
+                                    onClick={() => removeAutomationAction(i)}
+                                    className="text-gray-400 hover:text-red-600 p-1"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <Dropdown
+                                    value={action.mode}
+                                    onChange={(mode) => updateAutomationAction(i, { mode })}
+                                    className="w-52"
+                                    options={[
+                                      { value: "duration", label: "Wait for" },
+                                      ...(automationDraft.triggerType === "booking_created"
+                                        ? [{ value: "before_appointment", label: "Wait until before appointment" }]
+                                        : []),
+                                    ]}
+                                  />
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={action.amount}
+                                    onChange={(e) => updateAutomationAction(i, { amount: e.target.value })}
+                                    className="w-20 border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400"
+                                  />
+                                  <Dropdown
+                                    value={action.unit}
+                                    onChange={(unit) => updateAutomationAction(i, { unit })}
+                                    className="w-32"
+                                    options={[
+                                      { value: "minutes", label: "Minutes" },
+                                      { value: "hours", label: "Hours" },
+                                      { value: "days", label: "Days" },
+                                    ]}
+                                  />
+                                  {action.mode === "before_appointment" && (
+                                    <span className="text-xs text-gray-500">before the appointment time</span>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="border border-gray-100 rounded-lg p-4">
+                                <div className="flex items-center justify-between mb-3">
+                                  <span className="text-sm font-semibold flex items-center gap-1.5">
+                                    {action.type === "email" ? <Send size={13} /> : <MessageSquare size={13} />}
+                                    Step {i + 1}: {action.type === "email" ? "Send Email" : "Send SMS"}
+                                  </span>
+                                  <button
+                                    onClick={() => removeAutomationAction(i)}
+                                    className="text-gray-400 hover:text-red-600 p-1"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                {action.type === "email" && (
+                                  <input
+                                    value={action.subject}
+                                    onChange={(e) => updateAutomationAction(i, { subject: e.target.value })}
+                                    onFocus={(e) => {
+                                      lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "subject" };
+                                    }}
+                                    placeholder="Subject"
+                                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 mb-2"
+                                  />
+                                )}
+                                <textarea
+                                  value={action.body}
+                                  onChange={(e) => updateAutomationAction(i, { body: e.target.value })}
+                                  onFocus={(e) => {
+                                    lastFocusedActionFieldRef.current = { el: e.target, index: i, field: "body" };
+                                  }}
+                                  placeholder={action.type === "email" ? "Email body…" : "Text message…"}
+                                  rows={3}
+                                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                                />
+                              </div>
+                            )}
+                            <AddStepMenu onAdd={(a) => insertAutomationAction(i + 1, a)} />
+                          </div>
+                        ))}
+                      </div>
+                      {automationDraft.actions.length > 0 && (
+                        <div>
+                          <p className="text-xs text-gray-500 mb-2">
+                            Click into a subject or body field, then click a merge field to insert it there:
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {MERGE_FIELDS.map((f) => (
+                              <button
+                                key={f.key}
+                                type="button"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  insertMergeField(f.key);
+                                }}
+                                className="text-xs px-2.5 py-1 rounded-full border border-gray-200 text-gray-600 hover:border-gray-400 hover:bg-gray-50 font-medium"
+                              >
+                                {f.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h2 className="text-base font-bold">Recent activity</h2>
+                        <button
+                          onClick={() => loadAutomationRuns(openAutomation.id)}
+                          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 font-medium"
+                        >
+                          <RefreshCw size={12} /> Refresh
+                        </button>
+                      </div>
+                      {automationRunsLoading ? (
+                        <div className="flex justify-center py-6">
+                          <Loader2 size={16} className="animate-spin text-gray-400" />
+                        </div>
+                      ) : automationRuns.length === 0 ? (
+                        <p className="text-sm text-gray-400">
+                          Never fired yet. If you expected it to have, check the trigger filter above, that the
+                          automation is <strong>Active</strong>, and that it's been saved.
+                        </p>
+                      ) : (
+                        <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                          {automationRuns.map((run) => (
+                            <div key={run.id} className="flex items-center justify-between px-4 py-3">
+                              <div>
+                                <span
+                                  className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
+                                    run.status === "done"
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : run.status === "failed"
+                                      ? "bg-red-50 text-red-700 border-red-200"
+                                      : "bg-gray-100 text-gray-500 border-gray-200"
+                                  }`}
+                                >
+                                  {run.status === "pending" ? "Waiting" : run.status === "processing" ? "Running" : run.status}
+                                </span>
+                                {run.lastError && <p className="text-xs text-red-500 mt-1">{run.lastError}</p>}
+                              </div>
+                              <span className="text-xs text-gray-400">
+                                {run.status === "pending"
+                                  ? `Next step due ${new Date(run.runAt).toLocaleString()}`
+                                  : new Date(run.runAt).toLocaleString()}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
@@ -6096,6 +8814,164 @@ export default function SimpleCRM() {
               </div>
             </div>
 
+            <div className="px-8 pb-10 max-w-3xl">
+              <div className="border-t border-gray-100 pt-8">
+                <h2 className="text-base font-bold">Portal invite links</h2>
+                <p className="text-sm text-gray-500 mt-1 max-w-lg">
+                  No email infrastructure sends a portal invite — instead, generate a link scoped to one or more
+                  tags and share it however you like (text, WhatsApp, in person). Anyone with the link picks
+                  their own email and password; the link stays reusable so a whole client team can sign up with
+                  it until you revoke it.
+                </p>
+
+                {canManageUsers && (
+                  <div className="mt-4 border border-gray-200 rounded-lg p-3 max-w-md">
+                    <div className="text-xs font-medium text-gray-500 mb-1.5">Tags this invite grants access to</div>
+                    {contactTagNames.length === 0 ? (
+                      <div className="text-xs text-gray-400">No tags yet — import some leads first.</div>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                        {contactTagNames.map((tag) => (
+                          <button
+                            type="button"
+                            key={tag}
+                            onClick={() => toggleNewInviteTag(tag)}
+                            className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${
+                              newInviteTags.includes(tag)
+                                ? "bg-gray-900 text-white border-gray-900"
+                                : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                            }`}
+                          >
+                            {tag}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={handleCreatePortalInvite}
+                      disabled={creatingInvite || !newInviteTags.length}
+                      className="mt-3 flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {creatingInvite ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+                      Create invite link
+                    </button>
+                  </div>
+                )}
+
+                <div className="mt-5 border border-gray-200 rounded-xl overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                        <th className="px-4 py-2.5 font-medium">Tags</th>
+                        <th className="px-4 py-2.5 font-medium">Link</th>
+                        <th className="px-4 py-2.5 font-medium">Claimed</th>
+                        <th className="px-4 py-2.5 font-medium">Status</th>
+                        <th className="px-4 py-2.5"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {portalInvites.map((inv) => (
+                        <tr key={inv.id} className="border-b border-gray-50 last:border-0">
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-1 max-w-[220px]">
+                              {inv.tags.map((tag) => (
+                                <span
+                                  key={tag}
+                                  className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200 whitespace-nowrap"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            {inv.revokedAt ? (
+                              <span className="text-gray-300 text-xs">—</span>
+                            ) : (
+                              <button
+                                onClick={() => copyPortalInviteUrl(inv)}
+                                title="Copy invite link"
+                                className="flex items-center gap-1 text-xs font-medium px-2.5 py-1.5 rounded-md border border-gray-200 text-gray-600 hover:bg-gray-50"
+                              >
+                                <Copy size={12} />
+                                {copiedInviteId === inv.id ? "Copied" : "Copy link"}
+                              </button>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {inv.claimCount} {inv.claimCount === 1 ? "signup" : "signups"}
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {inv.revokedAt ? "Revoked" : "Active"}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            {canManageUsers && !inv.revokedAt && (
+                              <button
+                                onClick={() => handleRevokePortalInvite(inv.id)}
+                                className="text-gray-300 hover:text-red-500"
+                                title="Revoke invite link"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                      {!portalInvitesLoading && portalInvites.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
+                            No invite links yet
+                          </td>
+                        </tr>
+                      )}
+                      {portalInvitesLoading && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
+                            <Loader2 size={14} className="animate-spin inline" />
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-8 pb-10 max-w-3xl">
+              <div className="border-t border-gray-100 pt-8">
+                <h2 className="text-base font-bold">Booking links by tag</h2>
+                <p className="text-sm text-gray-500 mt-1 max-w-lg">
+                  Attach a booking link to a tag and it shows on the dialler's live-call card and wrap-up screen
+                  for every lead carrying that tag, ready to read out or copy. Saves when you click away; leave
+                  blank for none.
+                </p>
+                {contactTagNames.length === 0 ? (
+                  <div className="mt-4 text-sm text-gray-400">No tags yet — tags come from your contacts.</div>
+                ) : (
+                  <div className="mt-4 space-y-2">
+                    {contactTagNames.map((tag) => (
+                      <div key={tag} className="flex items-center gap-3">
+                        <span className={`text-xs px-2.5 py-1 rounded-full border shrink-0 ${tagColorClasses(tag)}`}>
+                          {tag}
+                        </span>
+                        <input
+                          key={`${tag}:${tagBookingLinks[tag] || ""}`}
+                          type="url"
+                          defaultValue={tagBookingLinks[tag] || ""}
+                          placeholder="https://…"
+                          onBlur={(e) => {
+                            const value = e.target.value.trim();
+                            if (value !== (tagBookingLinks[tag] || "")) saveTagBookingLink(tag, value);
+                          }}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-gray-400"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div className="px-8 pb-10 max-w-2xl">
               <div className="border-t border-gray-100 pt-8">
                 <h2 className="text-base font-bold">API key</h2>
@@ -6212,7 +9088,82 @@ export default function SimpleCRM() {
             </div>
           </div>
         )}
+
+        {page === "ai-voice" && <AIVoicePanel />}
       </main>
+
+      {/* Manual dial — floating softphone button, available on every
+          page. Hidden from client-portal users, who can't dial. */}
+      {!isClientRole && (
+        <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-2">
+          {showManualDial && (
+            <div className="w-72 bg-white border border-gray-200 rounded-xl shadow-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-sm font-semibold">Manual dial</span>
+                <button onClick={() => setShowManualDial(false)} className="text-gray-300 hover:text-gray-600">
+                  <X size={14} />
+                </button>
+              </div>
+              {manualCall ? (
+                <div>
+                  <div
+                    className={`flex items-center gap-2 text-xs font-medium ${
+                      manualCall.status === "connecting" ? "text-amber-700" : "text-green-700"
+                    }`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        manualCall.status === "connecting" ? "bg-amber-500" : "bg-green-600"
+                      }`}
+                    />
+                    {manualCall.status === "connecting" ? "Connecting…" : "Live call"}
+                    {manualCall.status === "in-progress" && ` · ${formatCallDuration(manualCallElapsedMs)}`}
+                  </div>
+                  <div className="text-lg font-bold mt-1">{manualCall.phone}</div>
+                  <div className="text-xs text-gray-400 mt-0.5">
+                    {manualCall.callerId ? `Calling from ${manualCall.callerId}` : "Picking a number…"}
+                  </div>
+                  <button
+                    onClick={hangUp}
+                    className="mt-3 w-full flex items-center justify-center gap-2 rounded-lg bg-red-600 text-white text-sm font-medium py-2 hover:bg-red-700"
+                  >
+                    <PhoneOff size={14} /> End call
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={startManualCall}>
+                  <input
+                    autoFocus
+                    type="tel"
+                    value={manualDialNumber}
+                    onChange={(e) => setManualDialNumber(e.target.value)}
+                    placeholder="0412 345 678"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!manualDialNumber.trim() || calling}
+                    className="mt-2 w-full flex items-center justify-center gap-2 rounded-lg bg-gray-900 text-white text-sm font-medium py-2 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <PhoneCall size={14} /> Call
+                  </button>
+                  {calling && <div className="mt-2 text-xs text-gray-400">Finish the current call first.</div>}
+                  {manualCallError && <div className="mt-2 text-xs text-red-600">{manualCallError}</div>}
+                </form>
+              )}
+            </div>
+          )}
+          <button
+            onClick={() => setShowManualDial((v) => !v)}
+            title="Manual dial"
+            className={`w-12 h-12 rounded-full shadow-lg flex items-center justify-center text-white ${
+              manualCall ? "bg-green-600 hover:bg-green-700" : "bg-gray-900 hover:bg-gray-800"
+            }`}
+          >
+            <Phone size={20} />
+          </button>
+        </div>
+      )}
 
       {/* Soundboard — record a new quick-play clip */}
       {showSoundboardRecorder && (
@@ -6311,6 +9262,199 @@ export default function SimpleCRM() {
                 </form>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manage Tag Folders modal */}
+      {showManageTagFoldersModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowManageTagFoldersModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Manage Tag Folders</h2>
+              <button
+                onClick={() => setShowManageTagFoldersModal(false)}
+                className="text-gray-400 hover:text-gray-700"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 py-5 overflow-y-auto space-y-5 flex-1">
+              <form onSubmit={handleCreateTagFolder} className="flex items-center gap-2">
+                <input
+                  value={newTagFolderName}
+                  onChange={(e) => setNewTagFolderName(e.target.value)}
+                  placeholder="New folder name…"
+                  className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                />
+                <button
+                  type="submit"
+                  disabled={savingTagFolder}
+                  className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {savingTagFolder && <Loader2 size={14} className="animate-spin" />}
+                  Add
+                </button>
+              </form>
+
+              {tagFolders.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-6">
+                  No folders yet — add one above, then click the tags below that belong in it.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {tagFolders.map((folder) => (
+                    <div key={folder.id} className="border border-gray-100 rounded-lg p-4">
+                      <div className="flex items-center gap-2 mb-3">
+                        <input
+                          defaultValue={folder.name}
+                          onBlur={(e) => {
+                            const value = e.target.value.trim();
+                            if (value && value !== folder.name) renameTagFolder(folder.id, value);
+                          }}
+                          className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm font-medium outline-none focus:border-gray-400"
+                        />
+                        <button
+                          onClick={() => deleteTagFolderById(folder.id)}
+                          className="text-gray-400 hover:text-red-600 p-1"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {contactTagNames.length === 0 && (
+                          <span className="text-xs text-gray-400">No tags exist yet.</span>
+                        )}
+                        {contactTagNames.map((tag) => {
+                          const checked = folder.tagNames.includes(tag);
+                          return (
+                            <button
+                              key={tag}
+                              onClick={() => toggleTagInFolder(folder, tag)}
+                              className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
+                                checked
+                                  ? "bg-gray-900 text-white border-gray-900"
+                                  : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                              }`}
+                            >
+                              {tag}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end">
+              <button
+                onClick={() => setShowManageTagFoldersModal(false)}
+                className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Automation modal */}
+      {showAddAutomationModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddAutomationModal(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add Automation</h2>
+              <button onClick={() => setShowAddAutomationModal(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddAutomation} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Automation name</label>
+                <input
+                  autoFocus
+                  required
+                  value={newAutomationName}
+                  onChange={(e) => setNewAutomationName(e.target.value)}
+                  placeholder="e.g. New lead follow-up"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddAutomationModal(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingAutomation}
+                  className="flex items-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {addingAutomation && <Loader2 size={14} className="animate-spin" />}
+                  Create automation
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add Calendar modal */}
+      {showAddCalendarModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowAddCalendarModal(false)}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-lg font-bold">Add Calendar</h2>
+              <button onClick={() => setShowAddCalendarModal(false)} className="text-gray-400 hover:text-gray-700">
+                <X size={18} />
+              </button>
+            </div>
+            <form onSubmit={handleAddCalendar} className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Calendar name</label>
+                <input
+                  autoFocus
+                  required
+                  value={newCalendarName}
+                  onChange={(e) => setNewCalendarName(e.target.value)}
+                  placeholder="e.g. Sales call"
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddCalendarModal(false)}
+                  className="text-sm text-gray-500 hover:text-gray-800 px-4 py-2.5 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingCalendar}
+                  className="flex items-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40"
+                >
+                  {addingCalendar && <Loader2 size={14} className="animate-spin" />}
+                  Create calendar
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -6500,7 +9644,7 @@ export default function SimpleCRM() {
                         onChange={(e) => updateContactForm("status", e.target.value)}
                         className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm outline-none focus:border-gray-400 bg-white"
                       >
-                        {Object.keys(statusColors).map((s) => (
+                        {LEAD_STATUSES.map((s) => (
                           <option key={s} value={s}>
                             {s}
                           </option>
