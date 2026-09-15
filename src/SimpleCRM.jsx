@@ -2627,7 +2627,7 @@ export default function SimpleCRM() {
   const updateContactField = async (contactId, key, value) => {
     setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, fields: { ...c.fields, [key]: value } } : c)));
     try {
-      await api.patch("/api/contacts", { id: contactId, fields: { [key]: value } });
+      await patchContact({ id: contactId, fields: { [key]: value } });
     } catch (err) {
       setDbError(err.message || "Could not save the change.");
     }
@@ -2638,13 +2638,26 @@ export default function SimpleCRM() {
   // the board, and the bulk "Set status" action. Optimistic update,
   // persisted with the same PATCH the dialler's wrap-up uses, and
   // logged into the lead's conversation thread as an outcome.
+  // Every lead PATCH goes through here so the background refresh below
+  // can hold off while a save is in flight (otherwise a refresh landing
+  // between the optimistic update and the server ack would briefly show
+  // the stale value).
+  const pendingContactPatchesRef = useRef(0);
+  const patchContact = async (body) => {
+    pendingContactPatchesRef.current += 1;
+    try {
+      return await api.patch("/api/contacts", body);
+    } finally {
+      pendingContactPatchesRef.current -= 1;
+    }
+  };
   const updateContactStatus = async (contactId, status) => {
     if (!LEAD_STATUSES.includes(status)) return;
     const lead = contacts.find((c) => c.id === contactId);
     if (!lead || lead.status === status) return;
     setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status } : c)));
     try {
-      await api.patch("/api/contacts", { id: contactId, status });
+      await patchContact({ id: contactId, status });
       logStatusToConversation(lead, status);
     } catch (err) {
       setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status: lead.status } : c)));
@@ -2666,7 +2679,7 @@ export default function SimpleCRM() {
     if (text === (contact.closerNotes || "")) return;
     setContacts((cs) => cs.map((c) => (c.id === contact.id ? { ...c, closerNotes: text } : c)));
     try {
-      await api.patch("/api/contacts", { id: contact.id, closerNotes: text });
+      await patchContact({ id: contact.id, closerNotes: text });
     } catch (err) {
       setContacts((cs) => cs.map((c) => (c.id === contact.id ? { ...c, closerNotes: contact.closerNotes || "" } : c)));
       setDbError(err.message || "Could not save the closer notes.");
@@ -2678,12 +2691,57 @@ export default function SimpleCRM() {
     if (!lead || (lead.dealOutcome || "Pending") === dealOutcome) return;
     setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, dealOutcome } : c)));
     try {
-      await api.patch("/api/contacts", { id: contactId, dealOutcome });
+      await patchContact({ id: contactId, dealOutcome });
     } catch (err) {
       setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, dealOutcome: lead.dealOutcome } : c)));
       setDbError(err.message || "Could not update the deal outcome.");
     }
   };
+
+  // ----- Keep every user's leads in sync -----
+  // Status / Won-Lost / closer-notes edits are persisted server-side
+  // the moment they're made (PATCH /api/contacts above), but every
+  // other signed-in user only loaded contacts once at startup. Re-pull
+  // the (tag-scoped) list on a short interval and whenever the tab
+  // regains focus, so a client's edits show up for the team — and
+  // vice versa — without anyone reloading. The card currently being
+  // typed into is left alone so a refresh can't eat a half-written
+  // note; it catches up on the next tick after the note commits.
+  const editingCloserNotesIdRef = useRef(editingCloserNotesId);
+  editingCloserNotesIdRef.current = editingCloserNotesId;
+  useEffect(() => {
+    if (!authUser || dbLoading) return;
+    let cancelled = false;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight || pendingContactPatchesRef.current > 0 || document.visibilityState === "hidden") return;
+      inFlight = true;
+      try {
+        const fresh = await api.get("/api/contacts");
+        if (cancelled || !Array.isArray(fresh)) return;
+        setContacts((cur) => {
+          const editingId = editingCloserNotesIdRef.current;
+          const byId = new Map(cur.map((c) => [c.id, c]));
+          return fresh.map((c) => (c.id === editingId && byId.has(c.id) ? byId.get(c.id) : c));
+        });
+      } catch {
+        // Transient — the next tick (or the next explicit action) retries.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = setInterval(refresh, 15000);
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser, dbLoading]);
 
   const setStatusForSelectedContacts = async (status) => {
     const ids = selectedContactIds.filter((id) => contacts.find((c) => c.id === id)?.status !== status);
