@@ -1261,6 +1261,7 @@ export default function SimpleCRM() {
       allowedTags: f.allowedTags.includes(tag) ? f.allowedTags.filter((t) => t !== tag) : [...f.allowedTags, tag],
     }));
   const [tagMenuUserId, setTagMenuUserId] = useState(null); // which team row's tag-picker popover is open
+  const [tagMenuPos, setTagMenuPos] = useState({ top: 0, left: 0 }); // viewport coords of the open popover (fixed, so the table's overflow-hidden can't clip it)
   const toggleTeamUserTag = (u, tag) => {
     const next = u.allowedTags.includes(tag) ? u.allowedTags.filter((t) => t !== tag) : [...u.allowedTags, tag];
     setTeamUsers((us) => us.map((x) => (x.id === u.id ? { ...x, allowedTags: next } : x)));
@@ -5993,7 +5994,16 @@ export default function SimpleCRM() {
                               <div className="relative">
                                 <button
                                   type="button"
-                                  onClick={() => canManageUsers && setTagMenuUserId((cur) => (cur === u.id ? null : u.id))}
+                                  onClick={(e) => {
+                                    if (!canManageUsers) return;
+                                    const r = e.currentTarget.getBoundingClientRect();
+                                    // keep the popover on-screen: it's up to 224px tall (max-h-56) and 224px wide (w-56)
+                                    setTagMenuPos({
+                                      top: Math.max(8, Math.min(r.bottom + 6, window.innerHeight - 232)),
+                                      left: Math.max(8, Math.min(r.left, window.innerWidth - 232)),
+                                    });
+                                    setTagMenuUserId((cur) => (cur === u.id ? null : u.id));
+                                  }}
                                   className="flex flex-wrap gap-1 max-w-[220px]"
                                 >
                                   {u.allowedTags.length ? (
@@ -6012,7 +6022,10 @@ export default function SimpleCRM() {
                                 {canManageUsers && tagMenuUserId === u.id && (
                                   <>
                                     <div className="fixed inset-0 z-40" onClick={() => setTagMenuUserId(null)} />
-                                    <div className="absolute left-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-56 max-h-56 overflow-y-auto">
+                                    <div
+                                      className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-56 max-h-56 overflow-y-auto"
+                                      style={{ top: tagMenuPos.top, left: tagMenuPos.left }}
+                                    >
                                       {contactTagNames.map((tag) => (
                                         <label
                                           key={tag}
