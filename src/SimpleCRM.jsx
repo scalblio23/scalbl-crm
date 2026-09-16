@@ -71,6 +71,7 @@ import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
 import AIVoicePanel from "./components/AIVoicePanel";
+import RecordingPlayer from "./components/RecordingPlayer";
 import {
   timezoneOptions,
   detectBrowserTimezone,
@@ -4744,15 +4745,7 @@ export default function SimpleCRM() {
                             <span className="flex items-center gap-1.5">
                               <Mic size={12} /> {m.text}
                             </span>
-                            {m.recordingSid && (
-                              <audio
-                                controls
-                                preload="none"
-                                crossOrigin="use-credentials"
-                                src={`${import.meta.env.VITE_CALL_SERVER_URL || ""}/api/recording-audio?sid=${m.recordingSid}`}
-                                className="h-8 max-w-full"
-                              />
-                            )}
+                            {m.recordingSid && <RecordingPlayer recordingSid={m.recordingSid} />}
                           </div>
                         </div>
                       ) : m.type === "call" ? (

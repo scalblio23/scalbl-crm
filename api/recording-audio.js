@@ -1,17 +1,26 @@
-// Streams a call recording's MP3 from Twilio to a logged-in user —
-// the src of the player in the Conversation tab (see the 'recording'
-// message type in src/SimpleCRM.jsx). Twilio's own media URLs need
-// account credentials, which never reach the browser; this proxies
-// the file behind the app's session cookie instead. Client-portal
-// users are held to the same tag scope as everything else they see.
+// Serves a call recording's MP3 to a logged-in user — what the player
+// in the Conversation tab downloads (see src/components/RecordingPlayer.jsx
+// and the 'recording' message type in src/SimpleCRM.jsx). Twilio's own
+// media URLs need account credentials, which never reach the browser;
+// this proxies the file behind the app's session cookie instead.
+// Client-portal users are held to the same tag scope as everything
+// else they see.
 import { Readable } from "node:stream";
 import { ensureSchema, getRecordingLeadTag } from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 import { fetchRecordingMedia } from "../server/twilioCore.js";
 
-// Lets Vercel stream the response instead of buffering it — a long
-// call's MP3 can run past the buffered-response size limit.
-export const config = { supportsResponseStreaming: true };
+export const config = {
+  // Lets Vercel stream the response instead of buffering it — a long
+  // call's MP3 can run past the buffered-response size limit.
+  supportsResponseStreaming: true,
+  // Twilio transcodes the MP3 on first request and a long call's file
+  // takes a while to pull down; the platform's default function
+  // timeout (10s on some plans) is short enough to cut that off, and
+  // a timed-out fetch is indistinguishable in the browser from a
+  // missing file. 60s is accepted on every plan.
+  maxDuration: 60,
+};
 
 // Files up to this size are sent as one buffered body (see below);
 // comfortably under Vercel's 4.5MB buffered-response ceiling, and
@@ -47,10 +56,28 @@ export default async function handler(req, res) {
     // a Content-Length so the bridge frames it itself.
     const upstream = await fetchRecordingMedia(sid);
     if (upstream.status !== 200) {
-      return res.status(upstream.status === 404 ? 404 : 502).json({ error: "Recording unavailable" });
+      // The reason goes to the function logs in full and to the
+      // browser in short — the player shows it in place of a dead
+      // control, so "Twilio returned 401" points straight at the API
+      // key, and 404 at a recording Twilio no longer has.
+      const detail = await upstream.text().catch(() => "");
+      console.error(
+        `[api/recording-audio] Twilio returned ${upstream.status} for ${sid}` +
+          (upstream.status === 401 || upstream.status === 403
+            ? " — check TWILIO_ACCOUNT_SID / TWILIO_API_KEY_SID / TWILIO_API_KEY_SECRET"
+            : ""),
+        detail.slice(0, 500)
+      );
+      const notFound = upstream.status === 404;
+      return res.status(notFound ? 404 : 502).json({
+        error: notFound
+          ? "Twilio no longer has this recording."
+          : `Recording unavailable — Twilio returned ${upstream.status}.`,
+      });
     }
     res.status(200);
     res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Disposition", `inline; filename="recording-${sid}.mp3"`);
     res.setHeader("Cache-Control", "private, max-age=3600");
     res.setHeader("Accept-Ranges", "none");
     if (req.method === "HEAD" || !upstream.body) return res.end();
