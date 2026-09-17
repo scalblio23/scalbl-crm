@@ -293,6 +293,7 @@ export async function ensureSchema() {
       )
     `);
     await seedIfEmpty();
+    await ensureStageColumn();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
     // anyone can grant — self-healing here (after seeding, so it also
@@ -304,6 +305,58 @@ export async function ensureSchema() {
     ]);
   })();
   return schemaReady;
+}
+
+// The Stage dropdown on the wrap-up screen (Powerdialler + Multi Line)
+// and the fixed Stage column on every leads list read their choices
+// from the `stage` row of contact_columns — nothing in the app hard-
+// codes them. Until now the only thing that ever *created* that row
+// was the one-off "Import lead list" reset, so a deployment pointed
+// at a fresh database (or one where the row had been deleted, emptied
+// or retyped) had no outcomes to choose from at all — the wrap-up
+// offered nothing but "—". Self-healed here on every cold start:
+// - no `stage` row → insert it with the default option list;
+// - a row whose option list is empty (or isn't a select) → restore
+//   the defaults, plus whatever stage values are already sitting on
+//   contacts so those stay selectable;
+// - a row with options → left exactly as-is, so deliberate edits to
+//   the list are never overwritten.
+const DEFAULT_STAGE_COLUMN = CONTACT_COLUMNS.find((c) => c.key === "stage");
+
+async function ensureStageColumn() {
+  if (!DEFAULT_STAGE_COLUMN) return;
+  const [existing] = await query("SELECT id, type, options FROM contact_columns WHERE key = 'stage'");
+  const hasOptions = existing && existing.type === "select" && Array.isArray(existing.options) && existing.options.length > 0;
+  if (hasOptions) return;
+
+  const options = DEFAULT_STAGE_COLUMN.options.map((o) => ({ ...o }));
+  const known = new Set(options.map((o) => o.value));
+  const inUse = await query(
+    `SELECT DISTINCT fields->>'stage' AS value FROM contacts
+     WHERE COALESCE(fields->>'stage', '') <> ''
+     ORDER BY 1`
+  );
+  for (const { value } of inUse) {
+    if (known.has(value)) continue;
+    known.add(value);
+    options.push({ value, color: "gray" });
+  }
+
+  if (!existing) {
+    // Position 0 matches where the import seed puts it; it's shown as
+    // its own fixed column regardless, so the number only affects the
+    // order it'd appear among the other custom columns.
+    await query(
+      "INSERT INTO contact_columns (key, label, type, options, position) VALUES ($1,$2,$3,$4,0) ON CONFLICT (key) DO NOTHING",
+      [DEFAULT_STAGE_COLUMN.key, DEFAULT_STAGE_COLUMN.label, "select", JSON.stringify(options)]
+    );
+  } else {
+    await query("UPDATE contact_columns SET type = 'select', options = $2 WHERE id = $1", [
+      existing.id,
+      JSON.stringify(options),
+    ]);
+  }
+  console.log(`[db] ${existing ? "restored" : "created"} the Stage column with ${options.length} options`);
 }
 
 // Invite-only accounts: pre-seed the people allowed to ever log in,
