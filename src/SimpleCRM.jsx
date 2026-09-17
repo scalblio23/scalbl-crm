@@ -850,6 +850,26 @@ export default function SimpleCRM() {
     }
   };
 
+  // Search box on the Conversation list — matches against the thread's
+  // name, the linked contact's phone, and the text of every message in
+  // it, so you can find a thread by something that was said, not just
+  // who said it.
+  const [convoSearch, setConvoSearch] = useState("");
+  const convoSearchQuery = convoSearch.trim().toLowerCase();
+  const visibleConversations = convoSearchQuery
+    ? conversations.filter((c) => {
+        const contact = contacts.find((k) => k.id === c.leadId);
+        const haystack = [
+          c.name,
+          c.preview,
+          contact?.phone,
+          contact?.client,
+          ...(c.messages || []).map((m) => m.text),
+        ];
+        return haystack.some((s) => (s || "").toLowerCase().includes(convoSearchQuery));
+      })
+    : conversations;
+
   // Bulk-select + delete on the Conversation list
   const toggleConvoSelected = (id) =>
     setSelectedConvoIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
@@ -2996,13 +3016,41 @@ export default function SimpleCRM() {
                   </select>
                 </div>
               )}
+              <div className="px-4 py-2.5 border-b border-gray-100">
+                <div className="relative">
+                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <input
+                    value={convoSearch}
+                    onChange={(e) => setConvoSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setConvoSearch("");
+                    }}
+                    placeholder="Search conversations…"
+                    className="w-full border border-gray-200 rounded-lg pl-8 pr-8 py-2 text-sm outline-none focus:border-gray-400"
+                  />
+                  {convoSearch && (
+                    <button
+                      onClick={() => setConvoSearch("")}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
+                      aria-label="Clear search"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+              </div>
               <div className="flex-1 overflow-y-auto">
                 {conversations.length === 0 && (
                   <div className="px-4 py-10 text-center text-sm text-gray-400">
                     No conversations yet — they'll appear automatically after a call or text, or start one with "New".
                   </div>
                 )}
-                {conversations.map((c) => (
+                {conversations.length > 0 && visibleConversations.length === 0 && (
+                  <div className="px-4 py-10 text-center text-sm text-gray-400">
+                    No conversations match "{convoSearch.trim()}".
+                  </div>
+                )}
+                {visibleConversations.map((c) => (
                   <div
                     key={c.id}
                     className={`flex items-start gap-2 px-4 py-3 border-b border-gray-50 hover:bg-gray-50 ${
