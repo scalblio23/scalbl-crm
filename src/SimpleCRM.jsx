@@ -2054,6 +2054,55 @@ export default function SimpleCRM() {
   const [sessionPaused, setSessionPaused] = useState(false);
   const [wrapUp, setWrapUp] = useState(null); // { lead, customStage, notes, secondsLeft }
   const [wrapUpStatusMenuOpen, setWrapUpStatusMenuOpen] = useState(false);
+
+  // The stages the wrap-up screen offers. The STAGE column's own
+  // saved options come first, but a column imported from a sheet is
+  // often a plain text column with no options at all (or only the
+  // handful of values that happened to be in that first import) —
+  // which used to leave this menu completely empty, with no way to
+  // set a stage after a call. So every distinct stage already used
+  // across the contacts is offered too, plus "Add a new stage…".
+  const wrapUpStageOptions = (() => {
+    const saved = stageColumnDef?.options || [];
+    const seen = new Set(saved.map((o) => o.value));
+    const extra = [];
+    for (const c of contacts) {
+      const v = String(c.fields?.stage ?? "").trim();
+      if (v && !seen.has(v)) {
+        seen.add(v);
+        extra.push({ value: v, color: "gray" });
+      }
+    }
+    extra.sort((a, b) => a.value.localeCompare(b.value));
+    return [...saved, ...extra];
+  })();
+
+  // Saves `value` as a proper option on the STAGE column (making it a
+  // select column if it wasn't one yet) so it gets a colour and shows
+  // up for everyone from now on. No-op if it's already there.
+  const ensureStageOption = (value) => {
+    const col = stageColumnDef;
+    if (!col || !value) return;
+    if ((col.options || []).some((o) => o.value === value)) return;
+    const options = [
+      ...(col.options || []),
+      { value, color: SELECT_COLOR_CYCLE[(col.options || []).length % SELECT_COLOR_CYCLE.length] },
+    ];
+    const updated = { ...col, type: "select", options };
+    setContactColumns((cols) => cols.map((c) => (c.key === "stage" ? updated : c)));
+    api
+      .patch("/api/contact-columns", { key: "stage", type: "select", options })
+      .catch((err) => setDbError(err.message || "Could not save the new stage."));
+  };
+
+  const addWrapUpStage = () => {
+    const input = window.prompt("New stage name:");
+    const value = input?.trim();
+    setWrapUpStatusMenuOpen(false);
+    if (!value) return;
+    ensureStageOption(value);
+    setWrapUp((w) => (w ? { ...w, customStage: value } : w));
+  };
   const [callLog, setCallLog] = useState([]);
 
   // ---------- Reports ----------
@@ -3927,8 +3976,8 @@ export default function SimpleCRM() {
                     <div className="relative">
                       <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
                       {(() => {
-                        const stageCol = contactColumns.find((c) => c.key === "stage");
-                        const options = stageCol?.options || [];
+                        const stageCol = stageColumnDef;
+                        const options = wrapUpStageOptions;
                         return (
                           <>
                             <button
@@ -3972,6 +4021,15 @@ export default function SimpleCRM() {
                                       </span>
                                     </button>
                                   ))}
+                                  {options.length === 0 && (
+                                    <div className="px-2 py-1.5 text-xs text-gray-400">No stages yet</div>
+                                  )}
+                                  <button
+                                    onClick={addWrapUpStage}
+                                    className="w-full text-left px-2 py-1.5 mt-1 border-t border-gray-100 rounded-md hover:bg-gray-50 text-xs font-medium text-gray-700 flex items-center gap-1.5"
+                                  >
+                                    <Plus size={12} /> Add a new stage…
+                                  </button>
                                 </div>
                               </>
                             )}
@@ -4756,8 +4814,8 @@ export default function SimpleCRM() {
                     <div className="relative">
                       <label className="text-xs font-medium text-gray-500 block mb-1">Stage</label>
                       {(() => {
-                        const stageCol = contactColumns.find((c) => c.key === "stage");
-                        const options = stageCol?.options || [];
+                        const stageCol = stageColumnDef;
+                        const options = wrapUpStageOptions;
                         return (
                           <>
                             <button
@@ -4801,6 +4859,15 @@ export default function SimpleCRM() {
                                       </span>
                                     </button>
                                   ))}
+                                  {options.length === 0 && (
+                                    <div className="px-2 py-1.5 text-xs text-gray-400">No stages yet</div>
+                                  )}
+                                  <button
+                                    onClick={addWrapUpStage}
+                                    className="w-full text-left px-2 py-1.5 mt-1 border-t border-gray-100 rounded-md hover:bg-gray-50 text-xs font-medium text-gray-700 flex items-center gap-1.5"
+                                  >
+                                    <Plus size={12} /> Add a new stage…
+                                  </button>
                                 </div>
                               </>
                             )}
