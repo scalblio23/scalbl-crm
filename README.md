@@ -222,6 +222,12 @@ Check it worked by visiting `/api/health` — the `database` field should say
 
 - `server/db.js` — shared database layer (schema, seed data, queries), used
   by both `server/index.js` (local dev) and the Vercel functions below.
+- The Stage column (the call-outcome choices on the wrap-up screen and the
+  Stage column on every leads list) self-heals on startup: a fresh database
+  gets it created with the default option list, and one whose row was
+  deleted, emptied or retyped gets the defaults restored (plus any stage
+  values already on leads). An existing, non-empty option list is never
+  touched, so edits to it stick.
 - `api/contacts.js`, `api/clients.js`, `api/conversations.js`,
   `api/dial-lists.js`, `api/called-leads.js`, `api/call-log.js` — one
   serverless function per resource, deployed automatically with the app.
