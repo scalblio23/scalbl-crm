@@ -77,6 +77,20 @@ async function getDevice(identity) {
           device = null;
           deviceReady = null;
         });
+        // Access Tokens only last an hour (see mintAccessToken) and a
+        // dialling session can easily run longer than that. Without a
+        // refresh, Twilio drops the device's signaling connection when
+        // the token expires and every call from then on fails on the
+        // spot — so swap in a fresh token shortly before each expiry.
+        device.on("tokenWillExpire", async () => {
+          try {
+            const fresh = await fetchToken(identity);
+            if (Array.isArray(fresh.callerIds)) callerIdPool = fresh.callerIds;
+            device.updateToken(fresh.token);
+          } catch (err) {
+            console.warn("[twilioDevice] Could not refresh the access token:", err);
+          }
+        });
         return device.register().then(async () => {
           // Adds the soundboard's mixing pipeline to every call this
           // device places from here on — see soundboardProcessor.js.

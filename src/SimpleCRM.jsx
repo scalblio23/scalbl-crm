@@ -3665,9 +3665,18 @@ export default function SimpleCRM() {
   // that answered. finishWrapUp needs the whole set so the ones that
   // rang and lost leave the queue too, instead of contaminating the
   // next round with numbers that were just tried a moment ago.
-  const handleCallEnded = (lead, durationMs, batchLeadIds) => {
+  //
+  // `error` is set when Twilio reported the call as failed (bad
+  // number, gateway/TwiML error, dropped connection, …). Mid-session
+  // the wrap-up still opens for those — with the session paused so it
+  // can't auto-advance — because the rep has to be able to record
+  // what happened ("wrong number", …) and move on to the next lead:
+  // without it, the only ways forward were Resume (which redials the
+  // very same lead, so a bad number just fails again) or Stop session.
+  const handleCallEnded = (lead, durationMs, batchLeadIds, error = null) => {
     if (!lead) return;
     if (!sessionRef.current) {
+      if (error) return; // never reached the lead — nothing to log
       logCallDirect(lead, durationMs);
       setLastAdHocCall({ lead, durationMs });
       return;
@@ -3682,6 +3691,7 @@ export default function SimpleCRM() {
       status: draft ? draft.status : lead.status || "New Lead",
       notes: draft ? draft.notes : lead.notes || "",
       durationMs,
+      error: error ? error.message || "The call failed." : null,
       secondsLeft: WRAP_UP_SECONDS,
       batchLeadIds: batchLeadIds && batchLeadIds.length ? batchLeadIds : [lead.id],
     });
@@ -3813,16 +3823,21 @@ export default function SimpleCRM() {
         if (err) {
           // A technical/connection-level failure (bad caller ID,
           // signaling error, …) never actually reached the lead —
-          // it isn't a real dial attempt, so don't log it and don't
-          // mark the lead called. Pausing an active session here also
+          // it isn't a real dial attempt, so don't log it as an
+          // outgoing call. Pausing an active session here also
           // matters: a failure like this is usually systemic (it'll
           // repeat for every subsequent lead too), so auto-advancing
           // straight into the next call would just as silently mark
           // the whole rest of the list "called" without ever actually
-          // ringing anyone — surface the error and let the rep decide
-          // instead of burning through the list.
-          setCallError(err.message || "The call failed.");
-          if (sessionRef.current) setSessionPaused(true);
+          // ringing anyone. The wrap-up still opens (paused — see
+          // handleCallEnded) so the rep can record an outcome and
+          // move on, or stop the session, rather than being stuck.
+          if (!sessionRef.current) {
+            setCallError(err.message || "The call failed.");
+            return;
+          }
+          setSessionPaused(true);
+          handleCallEnded(lead, durationMs, undefined, err);
           return;
         }
 
@@ -3830,10 +3845,25 @@ export default function SimpleCRM() {
         handleCallEnded(lead, durationMs);
       };
 
+      // Twilio's 'error' doesn't always mean the call is over (a DTMF
+      // or message-send failure mid-call is reported the same way),
+      // and a fatal one is normally followed by its own 'disconnect'.
+      // So an error is remembered here and acted on when the call
+      // actually closes — with a short backstop for the one case the
+      // SDK closes a call without emitting 'disconnect' (its signaling
+      // connection dropping), so the hotseat can't get stuck on
+      // "Live call" with no way to wrap up.
+      let failure = null;
+      const finalize = () => onCallEnded(failure);
       call.on("accept", () => setCallStatus("in-progress"));
-      call.on("disconnect", () => onCallEnded());
-      call.on("cancel", () => onCallEnded());
-      call.on("error", (err) => onCallEnded(err));
+      call.on("disconnect", finalize);
+      call.on("cancel", finalize);
+      call.on("error", (err) => {
+        failure = err;
+        setTimeout(() => {
+          if (call.status() === "closed") finalize();
+        }, 1500);
+      });
     } catch (err) {
       setCallError(err.message || "Could not start the call — check your Twilio setup.");
       setCalling(false);
@@ -4082,6 +4112,20 @@ export default function SimpleCRM() {
         callStartRef.current = null;
 
         if (err) {
+          // Same as startCall: pause the session rather than burn
+          // through the list, but if someone had already been bridged
+          // still open the (paused) wrap-up so their outcome can be
+          // recorded and the session moved past them.
+          if (winner && sessionRef.current) {
+            setSessionPaused(true);
+            handleCallEnded(
+              winner,
+              durationMs,
+              leadsToTry.map((l) => l.id),
+              err
+            );
+            return;
+          }
           setCallError(err.message || "The call failed.");
           if (sessionRef.current) setSessionPaused(true);
           return;
@@ -4119,9 +4163,17 @@ export default function SimpleCRM() {
         );
       };
 
-      call.on("disconnect", () => onCallEnded());
-      call.on("cancel", () => onCallEnded());
-      call.on("error", (err) => onCallEnded(err));
+      // See startCall for why 'error' is deferred to the call's close.
+      let failure = null;
+      const finalize = () => onCallEnded(failure);
+      call.on("disconnect", finalize);
+      call.on("cancel", finalize);
+      call.on("error", (err) => {
+        failure = err;
+        setTimeout(() => {
+          if (call.status() === "closed") finalize();
+        }, 1500);
+      });
 
       // Wait for the rep's own leg to actually be live in the
       // conference before dialling anyone — startConferenceOnEnter
@@ -5645,6 +5697,16 @@ export default function SimpleCRM() {
                     />
                   </div>
 
+                  {wrapUp.error && (
+                    <div className="mt-3 flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700">
+                      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                      <div>
+                        <span className="font-medium">Call failed:</span> {wrapUp.error} — record an outcome and
+                        move on, or try a different number.
+                      </div>
+                    </div>
+                  )}
+
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
                       <label className="text-xs font-medium text-gray-500 block mb-1">
@@ -6455,6 +6517,16 @@ export default function SimpleCRM() {
                       style={{ width: `${(wrapUp.secondsLeft / WRAP_UP_SECONDS) * 100}%` }}
                     />
                   </div>
+
+                  {wrapUp.error && (
+                    <div className="mt-3 flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700">
+                      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                      <div>
+                        <span className="font-medium">Call failed:</span> {wrapUp.error} — record an outcome and
+                        move on, or try a different number.
+                      </div>
+                    </div>
+                  )}
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
