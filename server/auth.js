@@ -30,6 +30,7 @@ const FULL_ACCESS_TABS = [
   "clients",
   "reports",
   "portal",
+  "working-hours",
   "settings",
 ];
 // Portal is the client-facing summary screen — a client role sees their
