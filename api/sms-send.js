@@ -1,6 +1,6 @@
-import { ensureSchema, logMessage } from "../server/db.js";
+import { ensureSchema, logMessage, getContactById } from "../server/db.js";
 import { sendSms, missingTwilioEnv } from "../server/twilioCore.js";
-import { requireAuth } from "../server/auth.js";
+import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 
 // POST /api/sms-send — sends an outbound SMS via Twilio and logs it
 // onto the lead's conversation. Body: { leadId, name, phone, text }.
@@ -19,6 +19,16 @@ export default async function handler(req, res) {
     }
     const { leadId, name, phone, text } = req.body || {};
     if (!phone || !text) return res.status(400).json({ error: "Missing phone or text" });
+
+    // A client may only text leads under their own tags — never an
+    // arbitrary number. Mirrors server/index.js.
+    const allowedTags = scopeTagsForUser(user);
+    if (allowedTags) {
+      const lead = leadId ? await getContactById(leadId) : null;
+      if (!lead || !allowedTags.includes(lead.tag)) {
+        return res.status(403).json({ error: "You can only message your own leads." });
+      }
+    }
 
     await sendSms({ to: phone, body: text });
 
