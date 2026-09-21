@@ -47,6 +47,8 @@ import {
   Play,
   Mic,
   Square,
+  PhoneForwarded,
+  Merge,
 } from "lucide-react";
 import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
 import { api } from "./lib/api";
@@ -306,6 +308,10 @@ const MULTILINE_STATUS_LABELS = {
   "no-answer": "No answer",
   canceled: "Cancelled",
 };
+// Twilio call statuses that mean a leg is over for good — used to
+// tell when the other parties on a live transfer have hung up.
+const TERMINAL_CALL_STATUSES = ["completed", "busy", "no-answer", "failed", "canceled"];
+
 function multilineStatusLabel(status) {
   return MULTILINE_STATUS_LABELS[status] || status || "Dialling…";
 }
@@ -1788,6 +1794,27 @@ export default function SimpleCRM() {
     dialQueueRef.current = dialQueue;
   }, [dialQueue]);
 
+  // Live transfer ("Add to call") — put the lead on hold, ring someone
+  // else into the call, then merge everyone together. The mechanics
+  // (a Twilio Conference everyone gets moved into) live in
+  // server/twilioCore.js; from here it's a handful of call SIDs and
+  // a poll of how each leg is doing. `transfer` is the one in
+  // flight: null when nobody's being added right now.
+  const [transfer, setTransfer] = useState(null); // { stage: ringing|answered|merged, to, conferenceName, leadCallSid, addedCallSid, addedStatus, leadStatus, startedAt, ringSeconds } | null
+  const transferRef = useRef(null); // mirrors `transfer` for the polling loop / call-end handlers
+  const [transferNumber, setTransferNumber] = useState("");
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferError, setTransferError] = useState("");
+  const [transferNotice, setTransferNotice] = useState(""); // e.g. "… didn't answer — back with the lead"
+  const transferPollRef = useRef(null);
+  // The rep's own browser call SID for a plain single-line call —
+  // what the backend uses to find the lead's leg to park on hold.
+  const activeCallSidRef = useRef(null);
+  // Set once the rep's leg is in a conference rather than a plain
+  // bridge — a Multi Line call from the start, or any call after a
+  // transfer has begun. leadCallSid is the lead's own leg, once known.
+  const conferenceRef = useRef(null); // { name, leadCallSid } | null
+
   // Soundboard — short pre-recorded clips a rep can fire off mid-call
   // (see src/lib/soundboardProcessor.js), e.g. a quick canned response
   // to a phone's call-screening prompt ("please state your name and
@@ -2424,6 +2451,199 @@ export default function SimpleCRM() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wrapUp, sessionPaused]);
 
+  const stopTransferPolling = () => {
+    if (transferPollRef.current) {
+      clearInterval(transferPollRef.current);
+      transferPollRef.current = null;
+    }
+  };
+
+  // Clears the in-flight transfer (the added party's gone, one way or
+  // another) but leaves conferenceRef alone: the call itself carries
+  // on in the conference, and the rep can add someone else.
+  const resolveTransfer = (notice) => {
+    transferRef.current = null;
+    setTransfer(null);
+    if (notice) setTransferNotice(notice);
+  };
+
+  const updateTransfer = (patch) => {
+    if (!transferRef.current) return;
+    transferRef.current = { ...transferRef.current, ...patch };
+    setTransfer(transferRef.current);
+  };
+
+  // Called from every call's end-of-call handler. The rep leaving
+  // ends the conference (and everyone in it) on Twilio's side, but a
+  // lead parked on hold — or an added number still ringing — is
+  // outside it and would otherwise be left hanging, so drop every
+  // leg we know about; legs that are already gone are a harmless no-op.
+  const teardownTransfer = () => {
+    stopTransferPolling();
+    const t = transferRef.current;
+    const conf = conferenceRef.current;
+    const sids = [...new Set([t?.leadCallSid, t?.addedCallSid, conf?.leadCallSid].filter(Boolean))];
+    if ((t || conf?.transferred) && sids.length) api.post("/api/transfer-drop", { callSids: sids }).catch(() => {});
+    transferRef.current = null;
+    conferenceRef.current = null;
+    activeCallSidRef.current = null;
+    setTransfer(null);
+    setTransferNumber("");
+    setTransferBusy(false);
+    setTransferError("");
+    setTransferNotice("");
+  };
+
+  // Once a call has been moved into a conference, Twilio no longer
+  // ends the rep's leg when the lead hangs up (that only happens in a
+  // plain <Dial> bridge) — so this keeps an eye on the other legs for
+  // as long as the call lasts: it's how the rep finds out the added
+  // party has answered, and it hangs the rep up once nobody's left
+  // rather than leaving them sitting in a silent conference.
+  const startTransferPolling = () => {
+    stopTransferPolling();
+    transferPollRef.current = setInterval(async () => {
+      const t = transferRef.current;
+      const conf = conferenceRef.current;
+      const leadCallSid = t?.leadCallSid || conf?.leadCallSid || "";
+      const addedCallSid = t?.addedCallSid || "";
+      if (!leadCallSid && !addedCallSid) return stopTransferPolling();
+
+      let data;
+      try {
+        data = await api.get(
+          `/api/transfer-status?leadCallSid=${encodeURIComponent(leadCallSid)}&addedCallSid=${encodeURIComponent(addedCallSid)}`
+        );
+      } catch {
+        return; // transient — try again next tick
+      }
+      // Anything Twilio can't tell us about ("unknown") is assumed
+      // still alive — better a stray extra poll than hanging up on
+      // someone over a blip.
+      const leadGone = !!leadCallSid && TERMINAL_CALL_STATUSES.includes(data.lead);
+      const addedGone = !addedCallSid || TERMINAL_CALL_STATUSES.includes(data.added);
+      const current = transferRef.current;
+
+      if (current && addedCallSid) {
+        // Always a fresh object, even if nothing changed, so the ring
+        // countdown in the panel ticks along with the poll.
+        updateTransfer({ addedStatus: data.added || current.addedStatus });
+        if (current.stage === "ringing" && data.added === "in-progress") {
+          updateTransfer({ stage: "answered" });
+        } else if (addedGone && current.stage !== "merged") {
+          // They never made it in (or bailed before the merge) — bring
+          // the lead straight back, unless they've gone too.
+          const why =
+            current.stage === "answered"
+              ? `${current.to} hung up before the calls were merged`
+              : data.added === "busy"
+              ? `${current.to} is busy`
+              : `${current.to} didn't answer`;
+          if (!leadGone && current.leadStatus !== "completed") {
+            resolveTransfer(`${why} — you're back with the lead.`);
+            api.post("/api/transfer-merge", { leadCallSid: current.leadCallSid, conferenceName: current.conferenceName }).catch(
+              () => {}
+            );
+          } else {
+            resolveTransfer(`${why}.`);
+          }
+        } else if (addedGone && current.stage === "merged") {
+          resolveTransfer(`${current.to} has left the call.`);
+        }
+      }
+
+      if (leadGone) {
+        if (conferenceRef.current) conferenceRef.current = { ...conferenceRef.current, leadCallSid: null };
+        const after = transferRef.current;
+        if (after && after.leadStatus !== "completed") {
+          updateTransfer({ leadStatus: "completed" });
+          setTransferNotice(after.stage === "merged" ? "The lead has left the call." : "The lead hung up while on hold.");
+        }
+        if (addedGone) hangUp(); // nobody left on the line — same end-of-call path as any other hang-up
+      }
+    }, 1500);
+  };
+
+  const startTransfer = async () => {
+    const to = transferNumber.trim();
+    if (!to || transferRef.current || callStatus !== "in-progress") return;
+    const conf = conferenceRef.current;
+    const body = { to, callerId: activeCallerId };
+    if (conf?.leadCallSid) {
+      body.leadCallSid = conf.leadCallSid;
+      body.conferenceName = conf.name;
+    } else if (activeCallSidRef.current) {
+      body.parentCallSid = activeCallSidRef.current;
+    } else {
+      setTransferError("Can't add anyone to this call — the lead's line isn't connected.");
+      return;
+    }
+    setTransferBusy(true);
+    setTransferError("");
+    setTransferNotice("");
+    try {
+      const started = await api.post("/api/transfer-start", body);
+      conferenceRef.current = { name: started.conferenceName, leadCallSid: started.leadCallSid, transferred: true };
+      transferRef.current = {
+        stage: "ringing",
+        to: started.to,
+        conferenceName: started.conferenceName,
+        leadCallSid: started.leadCallSid,
+        addedCallSid: started.addedCallSid,
+        addedStatus: "queued",
+        leadStatus: "in-progress",
+        startedAt: Date.now(),
+        ringSeconds: started.ringSeconds || 30,
+      };
+      setTransfer(transferRef.current);
+      setTransferNumber("");
+      startTransferPolling();
+    } catch (err) {
+      setTransferError(err.message || "Could not add that number to the call.");
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
+  // Takes the lead off hold and into the conference with everyone.
+  const mergeTransfer = async () => {
+    const t = transferRef.current;
+    if (!t || t.stage !== "answered" || t.leadStatus === "completed") return;
+    setTransferBusy(true);
+    setTransferError("");
+    try {
+      await api.post("/api/transfer-merge", { leadCallSid: t.leadCallSid, conferenceName: t.conferenceName });
+      updateTransfer({ stage: "merged" });
+    } catch (err) {
+      setTransferError(err.message || "Could not merge the calls.");
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
+  // Hangs up the added party. Before the merge that also means going
+  // back to the lead (they've been on hold); after it, the lead's
+  // already in the conference and simply stays on.
+  const dropAddedParty = async () => {
+    const t = transferRef.current;
+    if (!t) return;
+    setTransferBusy(true);
+    setTransferError("");
+    try {
+      await api.post("/api/transfer-drop", { callSids: [t.addedCallSid] });
+      const returnLead = t.stage !== "merged" && t.leadStatus !== "completed";
+      if (returnLead) {
+        await api.post("/api/transfer-merge", { leadCallSid: t.leadCallSid, conferenceName: t.conferenceName });
+      }
+      resolveTransfer(returnLead ? "You're back with the lead." : "");
+      if (t.leadStatus === "completed") hangUp(); // nobody left on the line
+    } catch (err) {
+      setTransferError(err.message || "Could not drop that call.");
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
   const startCall = async (lead) => {
     setCallError("");
     setActiveLeadId(lead.id);
@@ -2449,6 +2669,7 @@ export default function SimpleCRM() {
         setCallStatus("idle");
         setActiveCallerId("");
         activeCallRef.current = null;
+        teardownTransfer();
         const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
         callStartRef.current = null;
 
@@ -2472,7 +2693,12 @@ export default function SimpleCRM() {
         handleCallEnded(lead, durationMs);
       };
 
-      call.on("accept", () => setCallStatus("in-progress"));
+      call.on("accept", () => {
+        // Twilio's SID for the rep's own leg — a live transfer finds
+        // the lead's leg from it (see api/transfer-start.js).
+        activeCallSidRef.current = call.parameters?.CallSid || null;
+        setCallStatus("in-progress");
+      });
       call.on("disconnect", () => onCallEnded());
       call.on("cancel", () => onCallEnded());
       call.on("error", (err) => onCallEnded(err));
@@ -2549,6 +2775,9 @@ export default function SimpleCRM() {
         // that's what shows up as "Calling from…" in the live-call
         // view, and it's the number that matters to the lead/rep here.
         if (data.winner.fromNumber) setActiveCallerId(data.winner.fromNumber);
+        if (conferenceRef.current) {
+          conferenceRef.current = { ...conferenceRef.current, leadCallSid: data.winner.callSid || null };
+        }
         setCallStatus("in-progress");
         setMultilineBatch(null);
       } else if (data.status === "no-answer" || Date.now() >= giveUpAt) {
@@ -2601,6 +2830,10 @@ export default function SimpleCRM() {
       const { call, callerId } = await joinConference(started.conferenceName);
       activeCallRef.current = call;
       setActiveCallerId(callerId);
+      // The rep's in a conference from the outset here — a live
+      // transfer on this call parks the winning lead's leg directly
+      // (filled in once there is one — see startMultilinePolling).
+      conferenceRef.current = { name: started.conferenceName, leadCallSid: null };
 
       // Same shared end-of-call handling as startCall, plus tearing
       // down whatever's left of the batch.
@@ -2611,6 +2844,7 @@ export default function SimpleCRM() {
         setCallStatus("idle");
         setActiveCallerId("");
         activeCallRef.current = null;
+        teardownTransfer();
         stopMultilinePolling();
         setMultilineBatch(null);
         if (multilineBatchIdRef.current) {
@@ -2694,6 +2928,123 @@ export default function SimpleCRM() {
     const newNumber = input?.trim();
     if (!newNumber) return;
     callLeadAgain({ ...lead, phone: newNumber }, draft);
+  };
+
+  // "Add to call" — shown in the live-call view of both dialling tabs.
+  // Only offered once the call's actually connected and the lead's
+  // leg is known: on a plain single-line call that's the rep's own
+  // call SID (set on accept), on a Multi Line call it's the winning
+  // lead's leg.
+  const renderTransferPanel = () => {
+    if (callStatus !== "in-progress") return null;
+    const canTransfer = !!(activeCallSidRef.current || conferenceRef.current?.leadCallSid);
+    if (!canTransfer && !transfer) return null;
+    const leadName = activeLead?.name || "the lead";
+    const ringSecondsLeft = transfer
+      ? Math.max(0, transfer.ringSeconds - Math.floor((Date.now() - transfer.startedAt) / 1000))
+      : 0;
+    return (
+      <div className="mt-4 pt-4 border-t border-green-100">
+        <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-1.5">
+          Add to call — live transfer
+        </div>
+        {transfer ? (
+          <div className="bg-white border border-green-100 rounded-xl px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-medium text-gray-800">
+                  {transfer.stage === "ringing" && (
+                    <>
+                      <Loader2 size={14} className="animate-spin text-amber-500 shrink-0" />
+                      Calling {transfer.to}…{" "}
+                      <span className="text-xs font-normal text-gray-400">
+                        {transfer.addedStatus === "ringing" ? "ringing" : "connecting"} · {ringSecondsLeft}s
+                      </span>
+                    </>
+                  )}
+                  {transfer.stage === "answered" && (
+                    <>
+                      <span className="inline-flex h-2 w-2 rounded-full bg-green-500 shrink-0" />
+                      {transfer.to} answered — you're talking privately
+                    </>
+                  )}
+                  {transfer.stage === "merged" && (
+                    <>
+                      <Merge size={14} className="text-green-600 shrink-0" />
+                      3-way call: you, {leadName} and {transfer.to}
+                    </>
+                  )}
+                </div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {transfer.leadStatus === "completed"
+                    ? `${leadName} has hung up.`
+                    : transfer.stage === "merged"
+                    ? "Everyone can hear each other."
+                    : `${leadName} is on hold (hearing music) and can't hear you.`}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 shrink-0">
+                {transfer.stage === "answered" && transfer.leadStatus !== "completed" && (
+                  <button
+                    onClick={mergeTransfer}
+                    disabled={transferBusy}
+                    className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-sm px-4 py-2 rounded-full font-semibold disabled:opacity-50"
+                  >
+                    {transferBusy ? <Loader2 size={14} className="animate-spin" /> : <Merge size={14} />} Merge calls
+                  </button>
+                )}
+                <button
+                  onClick={dropAddedParty}
+                  disabled={transferBusy}
+                  className="flex items-center gap-1.5 border border-red-200 bg-white text-red-600 hover:bg-red-50 text-sm px-3.5 py-2 rounded-full font-medium disabled:opacity-50"
+                >
+                  <PhoneOff size={14} />
+                  {transfer.stage === "merged"
+                    ? `Drop ${transfer.to}`
+                    : transfer.stage === "ringing"
+                    ? transfer.leadStatus === "completed"
+                      ? "Cancel"
+                      : "Cancel — back to lead"
+                    : transfer.leadStatus === "completed"
+                    ? `Hang up ${transfer.to}`
+                    : `Drop ${transfer.to} — back to lead`}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                startTransfer();
+              }}
+              className="flex flex-wrap gap-2"
+            >
+              <input
+                type="tel"
+                value={transferNumber}
+                onChange={(e) => setTransferNumber(e.target.value)}
+                placeholder="Number to add, e.g. 0412 345 678"
+                className="flex-1 min-w-[200px] border border-green-200 bg-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-300"
+              />
+              <button
+                type="submit"
+                disabled={transferBusy || !transferNumber.trim()}
+                className="flex items-center gap-1.5 bg-gray-900 hover:bg-black text-white text-sm px-4 py-2 rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {transferBusy ? <Loader2 size={14} className="animate-spin" /> : <PhoneForwarded size={14} />} Call
+              </button>
+            </form>
+            <div className="text-xs text-gray-400 mt-1.5">
+              {leadName} goes on hold while the new number rings. Once they answer, you can merge everyone into one call.
+            </div>
+          </>
+        )}
+        {transferError && <div className="text-xs text-red-600 mt-1.5">{transferError}</div>}
+        {transferNotice && !transferError && <div className="text-xs text-amber-700 mt-1.5">{transferNotice}</div>}
+      </div>
+    );
   };
 
   if (authLoading) {
@@ -4056,6 +4407,8 @@ export default function SimpleCRM() {
                     })()}
                   </div>
 
+                  {renderTransferPanel()}
+
                   {/* Soundboard — quick-play clips that go through the
                       call itself, e.g. a canned response to a phone's
                       call-screening prompt. */}
@@ -4874,6 +5227,8 @@ export default function SimpleCRM() {
                       );
                     })()}
                   </div>
+
+                  {renderTransferPanel()}
 
                   {/* Soundboard — quick-play clips that go through the
                       call itself, e.g. a canned response to a phone's

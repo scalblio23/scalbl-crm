@@ -17,6 +17,14 @@ import {
   endOrCancelCall,
   publicBaseUrl,
   MULTILINE_RING_SECONDS,
+  buildDialActionTwiml,
+  findBridgedLeadLeg,
+  redirectCallToTwiml,
+  buildHoldTwiml,
+  placeTransferLeg,
+  fetchCallStatus,
+  transferConferenceName,
+  TRANSFER_RING_SECONDS,
 } from "./twilioCore.js";
 import {
   isDbConfigured,
@@ -132,6 +140,9 @@ const PUBLIC_PATHS = new Set([
   // /api/sms-inbound above.
   "/api/voice-multiline-leg",
   "/api/multiline-status",
+  // Where the rep's leg goes once its <Dial> to a lead ends — Twilio
+  // only (see api/voice-dial-action.js).
+  "/api/voice-dial-action",
 ]);
 
 app.use(async (req, res, next) => {
@@ -160,6 +171,10 @@ app.use(
     "/api/multiline-start",
     "/api/multiline-batch",
     "/api/multiline-cancel",
+    "/api/transfer-start",
+    "/api/transfer-status",
+    "/api/transfer-merge",
+    "/api/transfer-drop",
     "/api/soundboard-clips",
   ],
   (req, res, next) => {
@@ -587,6 +602,120 @@ app.post(
     res.status(204).end();
   })
 );
+
+// ---------- Live transfer ----------
+// "Add someone to the call": lead goes on hold, the added number rings
+// into a conference with the rep, then the rep merges everyone. See
+// the "Live transfer" section of server/twilioCore.js for how the
+// legs move around; mirrors api/voice-dial-action.js and the
+// api/transfer-*.js files route-for-route.
+
+// Public — the single-line <Dial>'s `action`. Twilio posts the Dial's
+// outcome here once it ends; the reply either joins the rep into the
+// transfer conference or hangs them up.
+app.post("/api/voice-dial-action", async (req, res) => {
+  res.type("text/xml");
+  try {
+    res.send(await buildDialActionTwiml(req.body || {}));
+  } catch (err) {
+    console.error("[voice-dial-action]", err);
+    res.send("<Response><Hangup/></Response>");
+  }
+});
+
+app.post("/api/transfer-start", async (req, res) => {
+  try {
+    const missing = missingTwilioEnv();
+    if (missing.length) {
+      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+    }
+    const to = String(req.body?.to || "").trim();
+    if (!to) return res.status(400).json({ error: "Enter a number to add to the call" });
+
+    const parentCallSid = String(req.body?.parentCallSid || "").trim();
+    let leadCallSid = String(req.body?.leadCallSid || "").trim();
+    let conferenceName = String(req.body?.conferenceName || "").trim();
+    if (!leadCallSid) {
+      if (!parentCallSid) return res.status(400).json({ error: "Missing parentCallSid" });
+      const lead = await findBridgedLeadLeg(parentCallSid);
+      if (!lead) return res.status(409).json({ error: "There's no live call with the lead to add anyone to." });
+      leadCallSid = lead.sid;
+      conferenceName = transferConferenceName(parentCallSid);
+    }
+    if (!conferenceName) return res.status(400).json({ error: "Missing conferenceName" });
+
+    const pool = getCallerIdPool();
+    const requested = String(req.body?.callerId || "").trim();
+    const from = requested && pool.includes(requested) ? requested : pool[0];
+
+    const added = await placeTransferLeg({ to, from, conferenceName });
+    try {
+      await redirectCallToTwiml(leadCallSid, buildHoldTwiml());
+    } catch (err) {
+      await endOrCancelCall(added.sid);
+      console.error("[transfer-start] could not hold lead", err.message);
+      return res.status(409).json({ error: "Couldn't put the lead on hold — did they just hang up?" });
+    }
+    res.status(201).json({
+      conferenceName,
+      leadCallSid,
+      addedCallSid: added.sid,
+      to: added.to,
+      from,
+      ringSeconds: TRANSFER_RING_SECONDS,
+    });
+  } catch (err) {
+    console.error("[transfer-start]", err);
+    res.status(500).json({ error: err.message || "Could not start the transfer" });
+  }
+});
+
+app.get("/api/transfer-status", async (req, res) => {
+  try {
+    const leadCallSid = String(req.query?.leadCallSid || "").trim();
+    const addedCallSid = String(req.query?.addedCallSid || "").trim();
+    if (!leadCallSid && !addedCallSid) return res.status(400).json({ error: "Missing call SIDs" });
+    const lookup = (sid) => (sid ? fetchCallStatus(sid).catch(() => "unknown") : Promise.resolve(null));
+    const [lead, added] = await Promise.all([lookup(leadCallSid), lookup(addedCallSid)]);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ lead, added });
+  } catch (err) {
+    console.error("[transfer-status]", err);
+    res.status(500).json({ error: err.message || "Could not check the transfer" });
+  }
+});
+
+app.post("/api/transfer-merge", async (req, res) => {
+  try {
+    const leadCallSid = String(req.body?.leadCallSid || "").trim();
+    const conferenceName = String(req.body?.conferenceName || "").trim();
+    if (!leadCallSid || !conferenceName) return res.status(400).json({ error: "Missing leadCallSid or conferenceName" });
+    try {
+      await redirectCallToTwiml(leadCallSid, buildConferenceTwiml({ conferenceName, isRep: false }));
+    } catch (err) {
+      console.error("[transfer-merge] could not merge lead", err.message);
+      return res.status(409).json({ error: "Couldn't bring the lead back in — they may have hung up while on hold." });
+    }
+    res.status(204).end();
+  } catch (err) {
+    console.error("[transfer-merge]", err);
+    res.status(500).json({ error: err.message || "Could not merge the call" });
+  }
+});
+
+app.post("/api/transfer-drop", async (req, res) => {
+  try {
+    const sids = (Array.isArray(req.body?.callSids) ? req.body.callSids : [req.body?.callSid])
+      .map((s) => String(s || "").trim())
+      .filter(Boolean);
+    if (!sids.length) return res.status(400).json({ error: "Missing callSids" });
+    await Promise.all(sids.map((sid) => endOrCancelCall(sid)));
+    res.status(204).end();
+  } catch (err) {
+    console.error("[transfer-drop]", err);
+    res.status(500).json({ error: err.message || "Could not drop the call" });
+  }
+});
 
 // ---------- Soundboard (quick-play clips for a live call) ----------
 // Mirrors api/soundboard-clips.js.

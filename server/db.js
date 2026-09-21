@@ -1340,7 +1340,16 @@ export async function getMultilineBatchWithCalls(id) {
     id: batch.id,
     status,
     winner: winnerCall
-      ? { leadId: batch.winner_lead_id, name: winnerCall.name, phone: winnerCall.phone, fromNumber: winnerCall.from_number }
+      ? {
+          leadId: batch.winner_lead_id,
+          name: winnerCall.name,
+          phone: winnerCall.phone,
+          fromNumber: winnerCall.from_number,
+          // The winning lead's own call leg — what a live transfer on a
+          // Multi Line call parks on hold and brings back (see
+          // api/transfer-start.js).
+          callSid: batch.winner_call_sid,
+        }
       : null,
     calls: calls.map((c) => ({
       leadId: c.lead_id,

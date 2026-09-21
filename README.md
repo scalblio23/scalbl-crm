@@ -140,6 +140,40 @@ regulated practice in a lot of places (the US TCPA/TSR's abandoned-call rules
 in particular) — that's on whoever's operating this CRM to stay within, not
 something the app enforces.
 
+### Live transfer ("Add to call")
+
+Both dialling tabs' live-call view has an **Add to call** box: type a number,
+hit **Call**, and the lead goes on hold (hearing music) while that number
+rings. Once the second person answers, the rep is talking to them privately —
+to brief a closer, say — and can then **Merge calls** to bring the lead back
+in as a three-way call, or drop the second person and go straight back to the
+lead. If the added number doesn't answer (or is busy), the lead is brought
+back automatically. The rep hanging up ends everything, and the wrap-up /
+call log work exactly as they would for a normal call with that lead.
+
+Under the hood a normal call is a plain `<Dial>` bridge between the rep's
+browser leg and the lead's — there's no third seat in a bridge — so a
+transfer moves everyone into a Twilio Conference instead (see the "Live
+transfer" section of `server/twilioCore.js`). The one thing that makes this
+possible on a call that started as a bridge is the `action` on that
+`<Dial>` (`/api/voice-dial-action`): when the lead's leg is pulled out of
+the bridge onto hold, Twilio asks that URL what the rep's leg should do next,
+and — seeing the lead is still connected, i.e. this was a transfer rather
+than a hang-up — joins the rep into the conference. On a Multi Line call the
+rep is in a conference already, so the lead's leg is simply moved out to hold
+and back in. Unlike multi-line dialling this needs no `PUBLIC_URL`: the added
+number is dialled with its conference-join TwiML inlined on the call, and the
+`action` URL is relative to the Voice webhook already configured.
+
+A couple of things worth knowing: nothing about a transfer is stored
+server-side (the browser holds the few call SIDs involved and asks Twilio
+how each leg is doing, every ~1.5s); the added number rings for
+`TRANSFER_RING_SECONDS` (30s); and a lead parked on hold hears one
+play-through of a Twilio-hosted track (a good few minutes) and is then hung
+up with a short apology — a backstop for the rep's browser vanishing
+mid-transfer, since the app otherwise always brings them back or drops them
+itself.
+
 ### Soundboard
 
 Both dialling tabs' live-call view has a small **soundboard** — short clips a
