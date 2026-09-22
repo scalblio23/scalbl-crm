@@ -596,6 +596,7 @@ export async function ensureSchema() {
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS closer_notes TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deal_outcome TEXT DEFAULT 'Pending'`);
     await migrateLegacyStageToStatus();
+    await ensureTransferNumberColumn();
     await seedIfEmpty();
     await ensureStageColumn();
     await seedUsersIfMissing();
@@ -677,6 +678,24 @@ const INVITED_USERS = [
   { name: "Cody", email: "codyadrury90@gmail.com" },
   { name: "Dave", email: "lorddave1513@gmail.com" },
 ];
+
+// Live transfer (see server/twilioCore.js) pre-fills "who to
+// transfer this lead to" from the lead's client — a plain text
+// column on the Clients table, so it's set and edited exactly like
+// any other client field rather than needing its own settings UI. A
+// column, not a fixed table field, so the Clients tab shows it with
+// zero special-casing. Idempotent; also re-run after a client-list
+// import, which resets every column definition.
+export const TRANSFER_NUMBER_COLUMN_KEY = "transfer_number";
+
+async function ensureTransferNumberColumn() {
+  await query(
+    `INSERT INTO client_columns (key, label, type, options, position)
+     SELECT $1, 'Transfer number', 'text', '[]'::jsonb, COALESCE(MAX(position), 0) + 1 FROM client_columns
+     WHERE NOT EXISTS (SELECT 1 FROM client_columns WHERE key = $1)`,
+    [TRANSFER_NUMBER_COLUMN_KEY]
+  );
+}
 
 async function seedUsersIfMissing() {
   for (const u of INVITED_USERS) {
@@ -941,6 +960,7 @@ export async function importClientData() {
   for (const c of IMPORTED_CLIENTS) {
     await query("INSERT INTO clients (name, fields) VALUES ($1,$2)", [c.name, JSON.stringify(c.fields || {})]);
   }
+  await ensureTransferNumberColumn(); // the import wipes every column definition — put this one back
   return { clients: IMPORTED_CLIENTS.length, columns: CLIENT_COLUMNS.length };
 }
 

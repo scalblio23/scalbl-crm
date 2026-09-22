@@ -155,10 +155,16 @@ export async function placeCall(phoneNumber, identity = "rep", { leadId } = {}) 
 // bridged to whichever of several leads (dialled separately via the
 // backend REST API — see api/multiline-start.js) answers first. Same
 // return shape as placeCall, for the same event-driven UI wiring.
-export async function joinConference(conferenceName, identity = "rep") {
+// `leadId` is optional — a live transfer re-joins the rep into a
+// conference the lead is already in, and passes it so the recording
+// of that part of the call is labelled with the right contact too
+// (a Multi Line join has no known lead yet, so it leaves it out).
+export async function joinConference(conferenceName, identity = "rep", { leadId } = {}) {
   const dev = await getDevice(identity);
   const callerId = nextCallerId();
-  const call = await dev.connect({ params: { Conference: conferenceName, callerId } });
+  const call = await dev.connect({
+    params: { Conference: conferenceName, callerId, ...(leadId ? { leadId: String(leadId) } : {}) },
+  });
   return { call, callerId };
 }
 

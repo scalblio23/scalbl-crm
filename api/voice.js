@@ -16,7 +16,16 @@ export default function handler(req, res) {
   if (conferenceName) {
     return res
       .status(200)
-      .send(buildConferenceTwiml({ conferenceName, isRep: true, recording: recordingOptions({ conferenceName }) }));
+      .send(
+        buildConferenceTwiml({
+          conferenceName,
+          isRep: true,
+          // leadId is only ever sent by a live-transfer rejoin (see
+          // joinConference) — a Multi Line join is labelled by its
+          // winner instead, via the conference name.
+          recording: recordingOptions({ conferenceName, leadId: req.body?.leadId }),
+        })
+      );
   }
 
   const to = req.body?.To;

@@ -19,6 +19,9 @@ import {
   unmuteConferenceParticipant,
   publicBaseUrl,
   MULTILINE_RING_SECONDS,
+  startLiveTransfer,
+  getCallStatus,
+  handOffConference,
 } from "./twilioCore.js";
 import {
   isDbConfigured,
@@ -224,6 +227,10 @@ app.use(
     "/api/multiline-place-legs",
     "/api/multiline-batch",
     "/api/multiline-cancel",
+    "/api/transfer-start",
+    "/api/transfer-status",
+    "/api/transfer-complete",
+    "/api/transfer-cancel",
     "/api/soundboard-clips",
     "/api/users", // team roster (names/emails) is internal-only
     "/api/portal-invites",
@@ -571,7 +578,14 @@ app.post("/api/voice", (req, res) => {
   // than dialing out. See "Multi-line dialling" below.
   const conferenceName = req.body?.Conference;
   if (conferenceName) {
-    return res.send(buildConferenceTwiml({ conferenceName, isRep: true, recording: recordingOptions({ conferenceName }) }));
+    return res.send(
+      buildConferenceTwiml({
+        conferenceName,
+        isRep: true,
+        // leadId is only sent by a live-transfer rejoin — see api/voice.js.
+        recording: recordingOptions({ conferenceName, leadId: req.body?.leadId }),
+      })
+    );
   }
 
   const pool = getCallerIdPool();
@@ -762,6 +776,54 @@ app.get(
     res.json(batch);
   })
 );
+
+// ---------- Live transfer ----------
+// Hands a live call over to a third party (the client's closer, say)
+// — see server/twilioCore.js's "Live transfer" section for how it's
+// choreographed, and the matching api/transfer-*.js files, which
+// this mirrors route-for-route. No database involved: the browser
+// holds the handful of call SIDs a transfer needs and passes them
+// back in, and Twilio itself is the source of truth for status.
+app.post("/api/transfer-start", async (req, res) => {
+  try {
+    res.status(201).json(await startLiveTransfer(req.body || {}));
+  } catch (err) {
+    console.error("[transfer-start]", err);
+    res.status(err.status || 500).json({ error: err.message || "Could not start the transfer" });
+  }
+});
+
+app.get("/api/transfer-status", async (req, res) => {
+  try {
+    const status = await getCallStatus(req.query?.callSid);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ status });
+  } catch (err) {
+    console.error("[transfer-status]", err);
+    res.status(err.status || 500).json({ error: err.message || "Could not read the transfer's status" });
+  }
+});
+
+app.post("/api/transfer-complete", async (req, res) => {
+  try {
+    res.json(await handOffConference(req.body || {}));
+  } catch (err) {
+    console.error("[transfer-complete]", err);
+    res.status(err.status || 500).json({ error: err.message || "Could not complete the transfer" });
+  }
+});
+
+app.post("/api/transfer-cancel", async (req, res) => {
+  const sid = String(req.body?.targetCallSid || "");
+  if (!/^CA[a-f0-9]{32}$/.test(sid)) return res.status(400).json({ error: "Missing targetCallSid" });
+  try {
+    await endOrCancelCall(sid);
+    res.sendStatus(204);
+  } catch (err) {
+    console.error("[transfer-cancel]", err);
+    res.status(500).json({ error: err.message || "Could not cancel the transfer" });
+  }
+});
 
 app.post(
   "/api/multiline-cancel",

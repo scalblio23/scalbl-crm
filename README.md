@@ -153,6 +153,40 @@ already sends and mixes a clip's audio into that same stream on demand. Clips
 are shared across the whole team (stored as base64 in `soundboard_clips`),
 not per-rep.
 
+### Live transfer
+
+Both dialling tabs' live-call view also has a **Live transfer** section: bring
+a third person into the call (typically the client's own closer) and, once
+they've answered, hand the lead over and drop off, leaving the two of them
+talking. The number is pre-filled from the lead's client's **Transfer number**
+column on the Clients tab (added automatically; edit it like any other client
+field), or the rep can type any number.
+
+Nothing about placing a normal call changes — a Powerdialler call still
+starts as a plain `<Dial>` bridge, and only gets moved into a conference at
+the moment a rep clicks **Start transfer**:
+
+1. The browser picks a fresh conference name and calls `POST
+   /api/transfer-start`, which redirects the *lead's* leg into that
+   conference. That ends the rep's now-empty `<Dial>`, so their browser leg
+   drops — the browser expects this and immediately re-joins the same
+   conference (the same `joinConference` path Multi Line already uses). The
+   lead hears about a second of silence. A Multi Line call is already in a
+   conference, so it skips this step.
+2. The same request dials the transfer target via the REST API with inline
+   TwiML that joins them into the conference (a beep marks their arrival).
+   The browser polls `GET /api/transfer-status` for that leg's status —
+   there's no status callback, so **no `PUBLIC_URL` is needed** and it works
+   identically in local dev and on Vercel.
+3. While it rings, and once they've answered, the rep is still talking to
+   the lead. **Complete transfer & drop off** (`POST /api/transfer-complete`)
+   flips who ends the conference on exit — rep no longer, lead + target yes
+   — then hangs the rep up; the call is logged as transferred and the
+   session moves on as usual. **Cancel transfer** / **Drop** (`POST
+   /api/transfer-cancel`) just hangs the target up and the rep carries on
+   with the lead. Ending the call outright at any point still tears
+   everything down, exactly as before.
+
 ## SMS (Twilio)
 
 Uses the same Twilio account and credentials as calling — no separate setup.
