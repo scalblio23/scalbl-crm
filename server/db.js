@@ -689,10 +689,15 @@ const INVITED_USERS = [
 export const TRANSFER_NUMBER_COLUMN_KEY = "transfer_number";
 
 async function ensureTransferNumberColumn() {
+  // ON CONFLICT rather than a WHERE NOT EXISTS guard: several
+  // serverless instances cold-start and run ensureSchema at the same
+  // moment, and two of them racing past that guard is exactly what
+  // produced a "duplicate key value violates unique constraint" on
+  // every request (login included) the first time this shipped.
   await query(
     `INSERT INTO client_columns (key, label, type, options, position)
      SELECT $1, 'Transfer number', 'text', '[]'::jsonb, COALESCE(MAX(position), 0) + 1 FROM client_columns
-     WHERE NOT EXISTS (SELECT 1 FROM client_columns WHERE key = $1)`,
+     ON CONFLICT (key) DO NOTHING`,
     [TRANSFER_NUMBER_COLUMN_KEY]
   );
 }
