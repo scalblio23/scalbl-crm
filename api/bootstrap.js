@@ -7,6 +7,7 @@ import {
   getConversations,
   getDialLists,
   getCallLog,
+  getArchivedTags,
 } from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 
@@ -26,7 +27,8 @@ export default async function handler(req, res) {
     // — those aren't on their tab list at all — so skip fetching them
     // rather than shipping data down just to hide it client-side.
     const scoped = allowedTags !== null;
-    const [clients, clientColumns, contacts, contactColumns, conversations, dialLists, callLog] = await Promise.all([
+    const [clients, clientColumns, contacts, contactColumns, conversations, dialLists, callLog, archivedTags] =
+      await Promise.all([
       scoped ? [] : getClients(),
       scoped ? [] : getClientColumns(),
       getContacts(allowedTags),
@@ -34,6 +36,7 @@ export default async function handler(req, res) {
       getConversations(allowedTags),
       scoped ? [] : getDialLists(),
       getCallLog(allowedTags),
+      scoped ? [] : getArchivedTags(),
     ]);
     res.setHeader("Cache-Control", "no-store");
     res.status(200).json({
@@ -44,6 +47,7 @@ export default async function handler(req, res) {
       conversations,
       dialLists,
       callLog,
+      archivedTags,
     });
   } catch (err) {
     console.error("[api/bootstrap]", err);

@@ -292,6 +292,29 @@ export async function ensureSchema() {
         created_at TIMESTAMPTZ DEFAULT now()
       )
     `);
+    // ---------- Archived tags ----------
+    // Tags hidden from the Contacts sidebar's tag list (the contacts
+    // themselves are untouched — archiving is purely a tidy-up of the
+    // list, and can be undone from the "Archived" section).
+    const [{ existed: archivedTagsExisted }] = await query(
+      `SELECT to_regclass('archived_tags') IS NOT NULL AS existed`
+    );
+    await query(`
+      CREATE TABLE IF NOT EXISTS archived_tags (
+        tag TEXT PRIMARY KEY,
+        archived_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    // One-time: the first time this table is created, archive every
+    // "56 - …" tag (the Solar Battery campaigns). Only on creation, so
+    // un-archiving one of them later sticks.
+    if (!archivedTagsExisted) {
+      await query(
+        `INSERT INTO archived_tags (tag)
+         SELECT DISTINCT tag FROM contacts WHERE tag LIKE '56 -%'
+         ON CONFLICT DO NOTHING`
+      );
+    }
     await seedIfEmpty();
     await seedUsersIfMissing();
     // Owner is pinned to one specific email rather than being a role
@@ -1386,4 +1409,19 @@ export async function createSoundboardClip({ label, audioData, mimeType, created
 
 export async function deleteSoundboardClip(id) {
   await query("DELETE FROM soundboard_clips WHERE id = $1", [id]);
+}
+
+// ---------- Archived tags ----------
+
+export async function getArchivedTags() {
+  const rows = await query("SELECT tag FROM archived_tags ORDER BY tag");
+  return rows.map((r) => r.tag);
+}
+
+export async function archiveTag(tag) {
+  await query("INSERT INTO archived_tags (tag) VALUES ($1) ON CONFLICT DO NOTHING", [tag]);
+}
+
+export async function unarchiveTag(tag) {
+  await query("DELETE FROM archived_tags WHERE tag = $1", [tag]);
 }

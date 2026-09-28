@@ -73,6 +73,9 @@ import {
   getOtherPendingMultilineBatchCalls,
   getMultilineBatchWithCalls,
   getSoundboardClips,
+  getArchivedTags,
+  archiveTag,
+  unarchiveTag,
   createSoundboardClip,
   deleteSoundboardClip,
   getUsers,
@@ -161,6 +164,7 @@ app.use(
     "/api/multiline-batch",
     "/api/multiline-cancel",
     "/api/soundboard-clips",
+    "/api/archived-tags",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -381,7 +385,7 @@ app.get(
   dbRoute(async (req, res) => {
     const allowedTags = scopeTagsForUser(req.user);
     const scoped = allowedTags !== null;
-    const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, callLog] =
+    const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, callLog, archivedTags] =
       await Promise.all([
         scoped ? [] : getClients(),
         scoped ? [] : getClientColumns(),
@@ -390,6 +394,7 @@ app.get(
         getConversations(allowedTags),
         scoped ? [] : getDialLists(),
         getCallLog(allowedTags),
+        scoped ? [] : getArchivedTags(),
       ]);
     res.setHeader("Cache-Control", "no-store");
     res.json({
@@ -400,6 +405,7 @@ app.get(
       conversations,
       dialLists,
       callLog,
+      archivedTags,
     });
   })
 );
@@ -617,6 +623,27 @@ app.delete(
     if (!id) return res.status(400).json({ error: "Missing id" });
     await deleteSoundboardClip(id);
     res.status(204).end();
+  })
+);
+
+// ---------- Archived tags ----------
+// Mirrors api/archived-tags.js.
+app.post(
+  "/api/archived-tags",
+  dbRoute(async (req, res) => {
+    const tag = String(req.body?.tag || "");
+    if (!tag) return res.status(400).json({ error: "Missing tag" });
+    await archiveTag(tag);
+    res.status(201).json(await getArchivedTags());
+  })
+);
+app.delete(
+  "/api/archived-tags",
+  dbRoute(async (req, res) => {
+    const tag = String(req.query.tag || "");
+    if (!tag) return res.status(400).json({ error: "Missing tag" });
+    await unarchiveTag(tag);
+    res.json(await getArchivedTags());
   })
 );
 

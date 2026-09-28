@@ -403,6 +403,10 @@ export default function SimpleCRM() {
   const [contacts, setContacts] = useState([]);
   const [clients, setClients] = useState([]);
   const [clientColumns, setClientColumns] = useState([]); // dynamic custom columns for the client table
+  // Tags hidden from the Contacts sidebar's tag list (see
+  // server/db.js's archived_tags) — contacts themselves are untouched.
+  const [archivedTags, setArchivedTags] = useState([]);
+  const [showArchivedTags, setShowArchivedTags] = useState(false);
   const [contactColumns, setContactColumns] = useState([]); // dynamic custom columns for the contact table
   // STAGE is a custom column like any other, but it's the one piece of
   // pipeline state every list of leads needs to show regardless of
@@ -465,6 +469,7 @@ export default function SimpleCRM() {
           conversations: conversationsData,
           dialLists: dialListsData,
           callLog: callLogData,
+          archivedTags: archivedTagsData,
         } = await api.get("/api/bootstrap");
         if (cancelled) return;
         setClients(clientsData);
@@ -474,6 +479,7 @@ export default function SimpleCRM() {
         setConversations(conversationsData);
         setDialLists(dialListsData);
         setCallLog(callLogData);
+        setArchivedTags(archivedTagsData || []);
       } catch (err) {
         if (!cancelled) {
           // Genuine failure (DB not configured, network issue, …) —
@@ -633,6 +639,23 @@ export default function SimpleCRM() {
   const contactTagNames = Array.from(new Set(contacts.map((c) => c.tag).filter(Boolean))).sort((a, b) =>
     a.localeCompare(b, undefined, { numeric: true })
   );
+  const archivedTagSet = new Set(archivedTags);
+  const sidebarTagNames = contactTagNames.filter((t) => !archivedTagSet.has(t));
+  const sidebarArchivedTagNames = contactTagNames.filter((t) => archivedTagSet.has(t));
+  const setTagArchived = async (tag, archived) => {
+    const prev = archivedTags;
+    setArchivedTags(archived ? [...prev, tag] : prev.filter((t) => t !== tag));
+    if (archived && tagQuickFilter?.op === "is" && tagQuickFilter.value === tag) setTagQuickFilter(null);
+    try {
+      const next = archived
+        ? await api.post("/api/archived-tags", { tag })
+        : await api.delete(`/api/archived-tags?tag=${encodeURIComponent(tag)}`);
+      setArchivedTags(next);
+    } catch (err) {
+      setArchivedTags(prev);
+      alert(err.message || "Couldn't update the tag.");
+    }
+  };
   // Stable color per tag — cycles through the same palette used for
   // client-column select options, keyed by each tag's position in the
   // sorted list so a given tag always gets the same color this session.
@@ -2864,21 +2887,40 @@ export default function SimpleCRM() {
                   <span className="truncate">All contacts</span>
                   <span className="text-xs text-gray-400 shrink-0">{contacts.length}</span>
                 </button>
-                {contactTagNames.map((tag) => (
-                  <button
+                {sidebarTagNames.map((tag) => (
+                  <div
                     key={tag}
-                    onClick={() => setTagQuickFilter("is", tag)}
-                    className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
+                    className={`group relative flex items-center transition-colors ${
                       tagQuickFilter?.op === "is" && tagQuickFilter.value === tag
                         ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
                         : "hover:bg-gray-100"
                     }`}
                   >
-                    <span className={`truncate text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
-                      {tag}
-                    </span>
-                    <span className="text-xs text-gray-400 shrink-0">{contactTagCounts[tag] || 0}</span>
-                  </button>
+                    <button
+                      onClick={() => setTagQuickFilter("is", tag)}
+                      className="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-2 text-sm text-left"
+                    >
+                      <span className={`truncate text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(tag)}`}>
+                        {tag}
+                      </span>
+                      <span
+                        className={`text-xs text-gray-400 shrink-0 ${
+                          authUser?.role !== "client" ? "group-hover:invisible" : ""
+                        }`}
+                      >
+                        {contactTagCounts[tag] || 0}
+                      </span>
+                    </button>
+                    {authUser?.role !== "client" && (
+                      <button
+                        onClick={() => setTagArchived(tag, true)}
+                        title="Archive tag (hides it from this list)"
+                        className="absolute right-2 hidden group-hover:block text-[11px] px-1.5 py-0.5 rounded text-gray-500 hover:text-gray-900 hover:bg-gray-200"
+                      >
+                        Archive
+                      </button>
+                    )}
+                  </div>
                 ))}
                 {contactTagCounts["Untagged"] > 0 && (
                   <button
@@ -2897,6 +2939,47 @@ export default function SimpleCRM() {
                 )}
                 {contactTagNames.length === 0 && !contactTagCounts["Untagged"] && (
                   <div className="px-4 py-2 text-xs text-gray-400">No tags yet</div>
+                )}
+                {sidebarArchivedTagNames.length > 0 && (
+                  <>
+                    <button
+                      onClick={() => setShowArchivedTags((v) => !v)}
+                      className="w-full flex items-center justify-between px-4 pt-4 pb-2 text-xs font-semibold uppercase tracking-wide text-gray-400 hover:text-gray-600"
+                    >
+                      <span>Archived ({sidebarArchivedTagNames.length})</span>
+                      <span>{showArchivedTags ? "−" : "+"}</span>
+                    </button>
+                    {showArchivedTags &&
+                      sidebarArchivedTagNames.map((tag) => (
+                        <div
+                          key={tag}
+                          className={`group relative flex items-center transition-colors ${
+                            tagQuickFilter?.op === "is" && tagQuickFilter.value === tag
+                              ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
+                              : "hover:bg-gray-100"
+                          }`}
+                        >
+                          <button
+                            onClick={() => setTagQuickFilter("is", tag)}
+                            className="flex-1 min-w-0 flex items-center justify-between gap-2 px-4 py-2 text-sm text-left opacity-60"
+                          >
+                            <span className="truncate text-xs px-2.5 py-1 rounded-full border bg-gray-50 text-gray-500 border-gray-200">
+                              {tag}
+                            </span>
+                            <span className="text-xs text-gray-400 shrink-0 group-hover:invisible">
+                              {contactTagCounts[tag] || 0}
+                            </span>
+                          </button>
+                          <button
+                            onClick={() => setTagArchived(tag, false)}
+                            title="Restore tag to the list"
+                            className="absolute right-2 hidden group-hover:block text-[11px] px-1.5 py-0.5 rounded text-gray-500 hover:text-gray-900 hover:bg-gray-200"
+                          >
+                            Restore
+                          </button>
+                        </div>
+                      ))}
+                  </>
                 )}
               </nav>
             </>
