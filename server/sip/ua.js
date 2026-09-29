@@ -40,6 +40,7 @@ export class SipUserAgent extends EventEmitter {
     this.regFromTag = newTag();
     this.regCseq = Math.floor(Math.random() * 1000) + 1;
     this.regTimer = null;
+    this.callerIdIndex = 0;
     this.regFailures = 0;
     this.registering = false;
     this.natContact = null; // { host, port } learned from the registrar's Via received/rport
@@ -297,6 +298,16 @@ export class SipUserAgent extends EventEmitter {
   // Places an outbound call. Throws right away if the trunk isn't
   // registered or every channel is busy; otherwise returns the Call,
   // whose events report ringing/answered/ended from there on.
+  // Next number in the SIP_CALLER_IDS rotation (the one SIP_CALLER_ID
+  // when there's no rotation).
+  nextCallerId() {
+    const ids = this.config.callerIds;
+    if (!ids?.length) return this.config.callerId;
+    const id = ids[this.callerIdIndex % ids.length];
+    this.callerIdIndex = (this.callerIdIndex + 1) % ids.length;
+    return id;
+  }
+
   dial(number, { ringTimeoutSeconds, label } = {}) {
     if (!this.isRegistered) {
       throw new Error(
@@ -309,7 +320,7 @@ export class SipUserAgent extends EventEmitter {
         `All ${this.channels.max} SIP channel${this.channels.max === 1 ? " is" : "s are"} in use — hang up the current call first.`
       );
     }
-    const call = new Call(this, { direction: "outbound", lease, ringTimeoutSeconds });
+    const call = new Call(this, { direction: "outbound", lease, ringTimeoutSeconds, callerId: this.nextCallerId() });
     call.dial(number).catch((err) => call.fail(err.message));
     return call;
   }
@@ -399,6 +410,7 @@ export class SipUserAgent extends EventEmitter {
       channels: this.channels.snapshot(),
       server: `${this.config.server}:${this.config.port}/${this.config.transport}`,
       callerId: this.config.callerId,
+      callerIds: this.config.callerIds,
       contact: this.transport.connected ? this.contactUri() : null,
     };
   }

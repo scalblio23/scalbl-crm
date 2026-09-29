@@ -14,7 +14,11 @@ function num(value, fallback) {
 export function loadSipConfig(env = process.env) {
   const server = env.SIP_SERVER || DEFAULT_SERVER;
   const username = env.SIP_USERNAME || "";
-  const callerId = normalizeCallerId(env.SIP_CALLER_ID || "");
+  // SIP_CALLER_IDS rotates outbound calls across several numbers on the
+  // trunk (needs the trunk's Caller ID set to "Keep originator's caller
+  // ID"); otherwise every call presents SIP_CALLER_ID.
+  const callerIds = parseCallerIds(env.SIP_CALLER_IDS);
+  const callerId = callerIds[0] || normalizeCallerId(env.SIP_CALLER_ID || "");
   const [rtpPortMin, rtpPortMax] = String(env.SIP_RTP_PORTS || "10000-10999")
     .split("-")
     .map((p) => Number(p));
@@ -31,12 +35,19 @@ export function loadSipConfig(env = process.env) {
     authUsername: env.SIP_AUTH_USERNAME || username,
     password: env.SIP_PASSWORD || "",
     callerId,
+    callerIds: callerIds.length ? callerIds : callerId ? [callerId] : [],
+    // How caller IDs are written in From / P-Asserted-Identity — same
+    // choices as SIP_DIAL_FORMAT. Only matters with SIP_CALLER_IDS.
+    callerIdFormat: env.SIP_CALLER_ID_FORMAT || "e164",
+    // With SIP_CALLER_IDS, the provider reads the presented number from
+    // the From header, so each call's caller ID goes there.
+    callerIdInFrom: callerIds.length > 0,
     // The user part of the From header. VoIPcloud identifies the trunk
     // by its SIP username and presents the trunk's configured Caller ID,
     // so the default is the username; the caller ID is still asserted
     // via the display name, P-Asserted-Identity and Remote-Party-ID.
     // Set SIP_FROM_USER=+61480851534 if your provider wants it in From.
-    fromUser: env.SIP_FROM_USER || username,
+    fromUser: env.SIP_FROM_USER || (callerIds.length ? "" : username),
     // How the destination is written into the INVITE's Request-URI:
     //   e164          +61412345678 (default)
     //   e164-no-plus  61412345678
@@ -72,6 +83,14 @@ export function missingSipEnv(env = process.env) {
   const missing = [];
   if (!env.SIP_USERNAME) missing.push("SIP_USERNAME");
   if (!env.SIP_PASSWORD) missing.push("SIP_PASSWORD");
-  if (!env.SIP_CALLER_ID) missing.push("SIP_CALLER_ID");
+  if (!env.SIP_CALLER_ID && !parseCallerIds(env.SIP_CALLER_IDS).length) missing.push("SIP_CALLER_ID");
   return missing;
+}
+
+// "+61480851534, 0485 998 251" → ["+61480851534", "+61485998251"]
+export function parseCallerIds(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((n) => normalizeCallerId(n))
+    .filter(Boolean);
 }

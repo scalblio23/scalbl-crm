@@ -30,7 +30,7 @@ function outcomeForStatus(status) {
 }
 
 export class Call extends EventEmitter {
-  constructor(ua, { direction, lease, ringTimeoutSeconds }) {
+  constructor(ua, { direction, lease, ringTimeoutSeconds, callerId }) {
     super();
     this.ua = ua;
     this.config = ua.config;
@@ -39,6 +39,8 @@ export class Call extends EventEmitter {
     this.direction = direction;
     this.lease = lease;
     this.ringTimeoutSeconds = ringTimeoutSeconds || this.config.ringTimeoutSeconds;
+    // The number this call presents (outbound) — see ua.nextCallerId().
+    this.callerId = callerId || this.config.callerId;
     this.state = "new";
     this.rtp = new RtpSession({ portMin: this.config.rtpPortMin, portMax: this.config.rtpPortMax });
     this.rtp.on("audio", (pcm) => this.emit("audio", pcm));
@@ -131,7 +133,9 @@ export class Call extends EventEmitter {
   // ---------- outbound ----------
 
   async dial(number) {
-    const { domain, callerId, fromUser, dialFormat } = this.config;
+    const { domain, dialFormat } = this.config;
+    const callerId = this.presentedCallerId();
+    const fromUser = this.config.fromUser || callerId;
     if (!isDialable(number)) throw new Error(`"${number}" isn't a dialable phone number.`);
     this.remoteNumber = toE164(number);
     this.requestUri = `sip:${formatForDial(number, dialFormat)}@${domain}`;
@@ -148,8 +152,15 @@ export class Call extends EventEmitter {
     this.sendInvite(null);
   }
 
+  // This call's caller ID as the trunk wants it written.
+  presentedCallerId() {
+    const { callerIdInFrom, callerIdFormat } = this.config;
+    return callerIdInFrom ? formatForDial(this.callerId, callerIdFormat) : this.callerId;
+  }
+
   sendInvite(auth) {
-    const { domain, callerId } = this.config;
+    const { domain } = this.config;
+    const callerId = this.presentedCallerId();
     const req = this.ua.buildRequest("INVITE", this.requestUri, {
       callId: this.callId,
       from: this.localHeader,
@@ -158,9 +169,9 @@ export class Call extends EventEmitter {
     });
     req.set("contact", `<${this.ua.contactUri()}>`);
     req.set("allow", ALLOW);
-    // Assert the trunk's caller ID. VoIPcloud also enforces the Caller
-    // ID configured on the trunk itself, so these just make sure it's
-    // the same number either way.
+    // Assert the call's caller ID. Unless the trunk's Caller ID is set
+    // to "Keep originator's caller ID", VoIPcloud presents its own
+    // configured number instead.
     req.set("p-asserted-identity", `"${callerId}" <sip:${callerId}@${domain}>`);
     req.set("remote-party-id", `"${callerId}" <sip:${callerId}@${domain}>;party=calling;screen=yes;privacy=off`);
     if (auth) req.set(auth.name, auth.value);

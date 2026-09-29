@@ -64,6 +64,15 @@ works over SIP once there are 2 or more channels. The gateway rings each
 lead on its own channel, bridges whoever answers first and cancels the
 others.
 
+### Caller ID rotation
+
+By default every outbound call presents `SIP_CALLER_ID`. To rotate across
+several of the trunk's numbers, list them in `SIP_CALLER_IDS`
+(comma-separated); each call, and each Multi Line leg, takes the next one.
+In VoIPcloud, set the trunk's **Caller ID** to "Keep originator's caller
+ID", or it keeps presenting its own number. If calls then show as
+"Anonymous", try `SIP_CALLER_ID_FORMAT=e164-no-plus` or `national`.
+
 ### Set up locally
 
 1. Fill in the `SIP_*` and `VOICE_GATEWAY_*` values in `.env` (see

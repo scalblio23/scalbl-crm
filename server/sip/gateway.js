@@ -105,7 +105,7 @@ export function createVoiceGateway({ ua, server, path = "/voice", verifyToken, o
       callId: call.id,
       direction: "outbound",
       to: call.remoteNumber,
-      callerId: ua.config.callerId,
+      callerId: call.callerId,
     });
   }
 
@@ -173,7 +173,7 @@ export function createVoiceGateway({ ua, server, path = "/voice", verifyToken, o
               legRef: leg.ref,
               callId: call.id,
               to: call.remoteNumber,
-              callerId: ua.config.callerId,
+              callerId: call.callerId,
             });
           } else {
             call.hangup(); // lost the race

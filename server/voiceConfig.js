@@ -59,11 +59,14 @@ export function verifyGatewayToken(token, env = process.env) {
 
 // Body for GET /api/token when the SIP provider is active.
 export function sipTokenResponse(user, env = process.env) {
-  const callerId = env.SIP_CALLER_ID ? String(env.SIP_CALLER_ID).replace(/[^\d+]/g, "") : "";
+  const callerIds = String(env.SIP_CALLER_IDS || env.SIP_CALLER_ID || "")
+    .split(",")
+    .map((n) => n.replace(/[^\d+]/g, ""))
+    .filter(Boolean);
   return {
     provider: "sip",
     gatewayUrl: voiceGatewayUrl(env),
     token: mintGatewayToken(user, env),
-    callerIds: callerId ? [callerId] : [],
+    callerIds,
   };
 }
