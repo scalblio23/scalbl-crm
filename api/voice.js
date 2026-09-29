@@ -1,7 +1,7 @@
 // Vercel serverless function — this is the URL to paste into the
 // TwiML App's Voice webhook once deployed:
 // https://<your-domain>/api/voice
-import { buildVoiceTwiml, buildConferenceTwiml, getCallerIdPool } from "../server/twilioCore.js";
+import { buildVoiceTwiml, buildConferenceTwiml, getCallerIdPool, recordingOptions } from "../server/twilioCore.js";
 
 export default function handler(req, res) {
   res.setHeader("Content-Type", "text/xml");
@@ -14,7 +14,18 @@ export default function handler(req, res) {
   // bridged to them.
   const conferenceName = req.body?.Conference;
   if (conferenceName) {
-    return res.status(200).send(buildConferenceTwiml({ conferenceName, isRep: true }));
+    return res
+      .status(200)
+      .send(
+        buildConferenceTwiml({
+          conferenceName,
+          isRep: true,
+          // leadId is only ever sent by a live-transfer rejoin (see
+          // joinConference) — a Multi Line join is labelled by its
+          // winner instead, via the conference name.
+          recording: recordingOptions({ conferenceName, leadId: req.body?.leadId }),
+        })
+      );
   }
 
   const to = req.body?.To;
@@ -30,5 +41,8 @@ export default function handler(req, res) {
   const requested = req.body?.callerId;
   const callerId = requested && pool.includes(requested) ? requested : pool[0];
 
-  res.status(200).send(buildVoiceTwiml(to, callerId));
+  // leadId is another custom connect() param from the browser (see
+  // placeCall) — only ever used to label the recording, never trusted
+  // for anything else.
+  res.status(200).send(buildVoiceTwiml(to, callerId, { recording: recordingOptions({ leadId: req.body?.leadId, to }) }));
 }

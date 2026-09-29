@@ -268,6 +268,40 @@ already sends and mixes a clip's audio into that same stream on demand. Clips
 are shared across the whole team (stored as base64 in `soundboard_clips`),
 not per-rep.
 
+### Live transfer
+
+Both dialling tabs' live-call view also has a **Live transfer** section: bring
+a third person into the call (typically the client's own closer) and, once
+they've answered, hand the lead over and drop off, leaving the two of them
+talking. The number is pre-filled from the lead's client's **Transfer number**
+column on the Clients tab (added automatically; edit it like any other client
+field), or the rep can type any number.
+
+Nothing about placing a normal call changes — a Powerdialler call still
+starts as a plain `<Dial>` bridge, and only gets moved into a conference at
+the moment a rep clicks **Start transfer**:
+
+1. The browser picks a fresh conference name and calls `POST
+   /api/transfer-start`, which redirects the *lead's* leg into that
+   conference. That ends the rep's now-empty `<Dial>`, so their browser leg
+   drops — the browser expects this and immediately re-joins the same
+   conference (the same `joinConference` path Multi Line already uses). The
+   lead hears about a second of silence. A Multi Line call is already in a
+   conference, so it skips this step.
+2. The same request dials the transfer target via the REST API with inline
+   TwiML that joins them into the conference (a beep marks their arrival).
+   The browser polls `GET /api/transfer-status` for that leg's status —
+   there's no status callback, so **no `PUBLIC_URL` is needed** and it works
+   identically in local dev and on Vercel.
+3. While it rings, and once they've answered, the rep is still talking to
+   the lead. **Complete transfer & drop off** (`POST /api/transfer-complete`)
+   flips who ends the conference on exit — rep no longer, lead + target yes
+   — then hangs the rep up; the call is logged as transferred and the
+   session moves on as usual. **Cancel transfer** / **Drop** (`POST
+   /api/transfer-cancel`) just hangs the target up and the rep carries on
+   with the lead. Ending the call outright at any point still tears
+   everything down, exactly as before.
+
 ## SMS (Twilio)
 
 Uses the same Twilio account and credentials as calling — no separate setup.
@@ -337,6 +371,12 @@ Check it worked by visiting `/api/health` — the `database` field should say
 
 - `server/db.js` — shared database layer (schema, seed data, queries), used
   by both `server/index.js` (local dev) and the Vercel functions below.
+- The Stage column (the call-outcome choices on the wrap-up screen and the
+  Stage column on every leads list) self-heals on startup: a fresh database
+  gets it created with the default option list, and one whose row was
+  deleted, emptied or retyped gets the defaults restored (plus any stage
+  values already on leads). An existing, non-empty option list is never
+  touched, so edits to it stick.
 - `api/contacts.js`, `api/clients.js`, `api/conversations.js`,
   `api/dial-lists.js`, `api/called-leads.js`, `api/call-log.js` — one
   serverless function per resource, deployed automatically with the app.
@@ -396,3 +436,78 @@ redeploy — the next schema check seeds the row (`password_hash` starts
   `api/auth-me.js` — the four auth endpoints; everything else under `/api`
   requires a valid session cookie except the Twilio webhooks
   (`/api/voice`, `/api/status`, `/api/sms-inbound`) and `/api/health`.
+
+## Calendars (Google Calendar + booking widget)
+
+Sidebar → **Calendars** → **Add Calendar** → name it → lands in that
+calendar's settings, with five sections: **Integrate** (connect a Google
+account), **Timezone**, **Availability** (weekly hours), **Booking rules**
+(call length, buffer, minimum notice, booking window, max per day), and
+**Share & embed** (the public booking link, an iframe embed snippet, and
+the list of bookings on that calendar).
+
+### 1. Connect Google
+
+"Integrate with Google" in Calendar settings is a normal "Sign in with
+Google" button — the only setup required once, ever, is registering the
+app itself with Google (every app that offers Google sign-in needs this):
+
+1. [Google Cloud Console](https://console.cloud.google.com) → create/select
+   a project → **APIs & Services → Library** → enable **Google Calendar
+   API**.
+2. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   → Application type **Web application**.
+3. Add an **Authorized redirect URI**: `{your domain}/api/calendar-google-callback`
+   (add it once for your deployed domain, and once more for local dev if
+   you're using an ngrok/PUBLIC_URL tunnel — see the Calling section above).
+4. While the OAuth consent screen is unverified, add yourself (and anyone
+   else connecting a calendar) as a **Test user** under **OAuth consent
+   screen**, or publish it.
+5. Put the resulting Client ID/Secret in `GOOGLE_CLIENT_ID` /
+   `GOOGLE_CLIENT_SECRET` (see `.env.example`) — locally and in Vercel.
+
+Once connected, a calendar's bookings are created as real Google Calendar
+events (with the booker as an attendee), and existing events on that
+Google Calendar automatically block off time in the booking widget.
+
+### 2. Set up SendGrid (confirmation emails)
+
+Create an API key at [app.sendgrid.com](https://app.sendgrid.com) → Settings
+→ API Keys (Mail Send access is enough), verify a sender/domain under
+Settings → Sender Authentication, then set `SENDGRID_API_KEY`,
+`SENDGRID_FROM_EMAIL`, and `SENDGRID_FROM_NAME`. Every booking sends a
+confirmation email (with a `.ics` calendar file attached) to the booker and
+a notification email to the calendar's owner.
+
+### 3. SMS confirmations
+
+Uses the same Twilio setup as Calling/SMS above — no separate config. A
+booking with a phone number gets a confirmation text via `sendSms()`
+(`server/twilioCore.js`); a missing phone or unconfigured Twilio just skips
+the text rather than failing the booking.
+
+### How it fits together
+
+- `server/db.js` — `calendars` and `calendar_bookings` tables (a partial
+  unique index prevents two people ever double-booking the same slot).
+- `server/googleCalendar.js` — the OAuth flow, token refresh, and
+  freebusy/create/delete event calls, all plain `fetch` (no `googleapis`
+  dependency).
+- `server/calendarAvailability.js` — turns a calendar's weekly availability
+  + booking rules + existing busy time into actual bookable UTC slots,
+  using the runtime's built-in `Intl` for timezone conversion (no
+  date/timezone library).
+- `server/email.js` — SendGrid + a minimal `.ics` builder.
+- `api/calendars.js`, `api/calendar-google-connect.js`,
+  `api/calendar-google-callback.js`, `api/calendar-google-disconnect.js`,
+  `api/calendar-bookings.js` — the authenticated, CRM-side endpoints.
+- `api/calendar-public.js`, `api/calendar-slots.js`, `api/calendar-book.js`,
+  `api/calendar-cancel.js` — the public endpoints the booking widget uses;
+  no login required.
+- `src/BookingWidget.jsx` — the standalone public page at `/book/<slug>`
+  (see the routing check in `src/main.jsx` and the SPA rewrite in
+  `vercel.json`).
+- `src/components/Dropdown.jsx` — a fully custom-rendered dropdown used
+  throughout the Calendars UI in place of native `<select>`, so the open
+  options list is styled like the rest of the app instead of the browser's
+  own popup.

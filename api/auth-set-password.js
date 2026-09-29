@@ -30,7 +30,16 @@ export default async function handler(req, res) {
       return res.status(409).json({ error: "This account already has a password — log in instead." });
     }
 
-    const user = { id: row.id, name: row.name, email: row.email };
+    // Must include role/allowedTags — the frontend gates tabs and
+    // client-side actions off this response until the next reload.
+    // Same shape as server/index.js and getSessionUser.
+    const user = {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      role: row.role || "admin",
+      allowedTags: row.allowed_tags || [],
+    };
     res.setHeader("Set-Cookie", createSessionCookie(user));
     return res.status(200).json({ user });
   } catch (err) {

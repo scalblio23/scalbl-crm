@@ -118,6 +118,12 @@ class SipCall extends Emitter {
     this.answered = false;
     Object.assign(this, props);
   }
+  // Same values the Twilio Call's status() uses where the Powerdialler
+  // checks it: "closed" once this call is over.
+  status() {
+    if (current !== this) return "closed";
+    return this.answered ? "open" : "ringing";
+  }
   sendDigits(digits) {
     send({ type: "dtmf", digits: String(digits) });
   }

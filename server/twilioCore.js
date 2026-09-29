@@ -19,10 +19,10 @@ export function missingTwilioEnv(env = process.env) {
   return missing;
 }
 
-// The pool of numbers outbound calls rotate through as their caller
-// ID. Comma-separate several ("+618700001,+618700002,+618700003,
-// +618700004") to rotate across them, spreading call volume so no
-// single number gets flagged by carriers — or leave just one for a
+// The pool of numbers outbound calls and SMS rotate through as their
+// caller ID. Comma-separate several ("+618700001,+618700002,+618700003,
+// +618700004") to rotate across them, spreading volume so no single
+// number gets flagged by carriers — or leave just one for a
 // single-number setup. Reads TWILIO_CALLER_IDS (plural) if set,
 // otherwise TWILIO_CALLER_ID (singular) — but either name is split
 // the same way, since "the list ended up on the singularly-named var"
@@ -75,11 +75,23 @@ export function mintAccessToken(identity, env = process.env) {
 // rotation — rather than read from env here, since picking it may
 // require a database round-trip this function shouldn't need to know
 // about.
-export function buildVoiceTwiml(to, callerId) {
+export function buildVoiceTwiml(to, callerId, { recording = null } = {}) {
   const twiml = new twilio.twiml.VoiceResponse();
 
   if (to) {
-    const dial = twiml.dial({ callerId });
+    // `recording` (see recordingOptions below) is null when calls
+    // aren't being recorded — the <Dial> is then exactly as before.
+    const dial = twiml.dial({
+      callerId,
+      ...(recording
+        ? {
+            record: "record-from-answer",
+            recordingStatusCallback: recording.statusCallback,
+            recordingStatusCallbackEvent: "completed",
+            recordingStatusCallbackMethod: "POST",
+          }
+        : {}),
+    });
     if (/^client:/.test(to)) {
       dial.client(to.replace(/^client:/, ""));
     } else {
@@ -100,17 +112,22 @@ function restClient(env = process.env) {
 
 // Sends an outbound SMS. Uses TWILIO_MESSAGING_SERVICE_SID if set
 // (recommended by Twilio — better deliverability, required for some
-// inbound routing setups); otherwise falls back to sending straight
-// from the first number in the caller ID pool. SMS doesn't rotate —
-// only outbound calls do, per the caller-ID-flagging concern that
-// rotation exists for.
+// inbound routing setups); otherwise falls back to sending from the
+// caller ID pool. Unlike outbound calls — which rotate sequentially,
+// tracked client-side per browser tab (see src/lib/twilioDevice.js) —
+// each SMS send is its own stateless serverless invocation with no
+// "next in sequence" to pick up, so this rotates by picking a random
+// number from the pool per send instead. Same goal either way:
+// spread volume so no single number gets carrier-flagged (the same
+// concern a spam-filtered "Delivered" message is a symptom of).
 export async function sendSms({ to, body }, env = process.env) {
   const client = restClient(env);
   const params = { to, body };
   if (env.TWILIO_MESSAGING_SERVICE_SID) {
     params.messagingServiceSid = env.TWILIO_MESSAGING_SERVICE_SID;
   } else {
-    params.from = getCallerIdPool(env)[0];
+    const pool = getCallerIdPool(env);
+    params.from = pool[Math.floor(Math.random() * pool.length)];
   }
   const message = await client.messages.create(params);
   return { sid: message.sid, status: message.status };
@@ -127,14 +144,14 @@ export async function sendSms({ to, body }, env = process.env) {
 // even one ringing out to voicemail on its own — never touches the
 // conference itself.
 //
-// There's no participant mute/unmute choreography here — every leg
-// that reaches the conference is audible immediately. In practice the
-// rep's leg (a fast WebRTC connect) is almost always already in place
-// long before any PSTN line rings through, and the moment a second
-// line answers it's cancelled within one status-callback round trip
-// (well under a second) — but a rep dialling several lines at once
-// should know a brief moment of cross-talk between two answered lines
-// is possible before the loser is dropped.
+// Every lead leg joins muted (see buildConferenceTwiml) — a lead's
+// audio never reaches the rep just by answering, only once
+// unmuteConferenceParticipant() below confirms it as the winner. This
+// is what actually prevents cross-talk: a losing leg answering a
+// moment after the winner is claimed is still fully live in the
+// conference (it can hear it) for as long as it takes endOrCancelCall
+// to reach it, but it was never audible to the rep in the first
+// place, muted the instant it joined.
 export function generateMultilineConferenceName() {
   return `ml_${crypto.randomBytes(8).toString("hex")}`;
 }
@@ -153,17 +170,97 @@ export function publicBaseUrl(env = process.env) {
   return "";
 }
 
-export function buildConferenceTwiml({ conferenceName, isRep }) {
+// ---------- Call recording ----------
+// Every outbound call is recorded by default, and Twilio reports each
+// finished recording to /api/recording-status (see that file), which
+// drops it into the lead's conversation as a playable message. Set
+// TWILIO_RECORD_CALLS=false to switch recording off entirely. Needs a
+// public base URL for the callback (same requirement as multi-line
+// dialling); with none — local dev without PUBLIC_URL — calls simply
+// aren't recorded, rather than recorded with nowhere to report to.
+// The ids passed in are baked into the callback URL so the recording
+// can be attributed: leadId for a contact call, `to` (the dialled
+// number) as a fallback for a manual dial, conferenceName for Multi
+// Line. Returns null when not recording.
+export function recordingOptions({ leadId, to, conferenceName } = {}, env = process.env) {
+  if (String(env.TWILIO_RECORD_CALLS || "true").toLowerCase() === "false") return null;
+  const base = publicBaseUrl(env);
+  if (!base) return null;
+  const params = new URLSearchParams();
+  if (leadId) params.set("leadId", String(leadId));
+  if (to) params.set("to", String(to));
+  if (conferenceName) params.set("conf", String(conferenceName));
+  const qs = params.toString();
+  return { statusCallback: `${base}/api/recording-status${qs ? `?${qs}` : ""}` };
+}
+
+// Fetches a recording's MP3 from Twilio, authenticated with the same
+// API Key that mints Voice tokens — the browser never talks to Twilio
+// directly for media (see api/recording-audio.js, which streams this
+// through behind the app's own login). `range` is the browser's Range
+// header, forwarded so seeking in the player works.
+export async function fetchRecordingMedia(recordingSid, { range } = {}, env = process.env) {
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Recordings/${encodeURIComponent(
+    recordingSid
+  )}.mp3`;
+  const auth = Buffer.from(`${env.TWILIO_API_KEY_SID}:${env.TWILIO_API_KEY_SECRET}`).toString("base64");
+  const headers = { Authorization: `Basic ${auth}` };
+  if (range) headers.Range = range;
+  return fetch(url, { headers });
+}
+
+export function buildConferenceTwiml({ conferenceName, isRep, recording = null }) {
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.dial().conference(
     {
       startConferenceOnEnter: isRep,
       endConferenceOnExit: isRep,
+      // Recording is declared on the rep's leg only (it's what starts
+      // the conference) — see recordingOptions below. The finished
+      // recording is attributed to the batch's winning lead by
+      // api/recording-status.js, since which lead that is isn't known
+      // until someone answers.
+      ...(recording && isRep
+        ? {
+            record: "record-from-start",
+            recordingStatusCallback: recording.statusCallback,
+            recordingStatusCallbackEvent: "completed",
+            recordingStatusCallbackMethod: "POST",
+          }
+        : {}),
+      // A lead leg joins muted — it can hear the conference but isn't
+      // heard by the rep — until api/multiline-status.js confirms it
+      // as the winner and explicitly unmutes it. Without this, every
+      // leg that answers is live audio to the rep the instant it's
+      // picked up, regardless of whether the server has decided it's
+      // the winner yet — exactly what let a losing (already-hung-up-
+      // in-Twilio's-eyes-a-moment-later) call's audio bleed through.
+      muted: !isRep,
       beep: false,
     },
     conferenceName
   );
   return twiml.toString();
+}
+
+// Unmutes the winning leg once claimMultilineWinner has confirmed it
+// server-side — this is the only thing that ever makes a lead leg
+// audible to the rep; joining the conference (buildConferenceTwiml
+// above) never does on its own. `conferenceName` accepts the
+// Conference's friendly name in place of its SID for this endpoint
+// (documented Twilio REST API behavior) — tried first since it's one
+// less round trip — falling back to looking the conference up by
+// name (it's always "in-progress" by the time a leg inside it has
+// answered) if that's ever rejected.
+export async function unmuteConferenceParticipant({ conferenceName, callSid }, env = process.env) {
+  const client = restClient(env);
+  try {
+    await client.conferences(conferenceName).participants(callSid).update({ muted: false });
+  } catch (err) {
+    const conferences = await client.conferences.list({ friendlyName: conferenceName, limit: 1 });
+    if (!conferences[0]) throw err;
+    await client.conferences(conferences[0].sid).participants(callSid).update({ muted: false });
+  }
 }
 
 // How long a lead's line is allowed to ring before Twilio gives up on
@@ -231,4 +328,208 @@ export async function endOrCancelCall(sid, env = process.env) {
       // try the next status, or give up silently — see comment above
     }
   }
+}
+
+// ---------- Live transfer ----------
+// Hands a live lead over to a third party (typically the client's own
+// closer) without the rep having to hang up and redial anyone. Built
+// deliberately so the *existing* call paths are untouched: a
+// Powerdialler call still starts as a plain <Dial><Number> bridge
+// (see buildVoiceTwiml) and only gets moved into a conference at the
+// moment a rep actually clicks "Transfer" — so nothing about placing
+// a normal call, or how a normal call ends, is any different from
+// before this existed.
+//
+// How a Powerdialler transfer works (Multi Line calls are already in
+// a conference, so they skip straight to step 3):
+//   1. The browser picks a fresh conference name and asks the server
+//      to start the transfer (see startLiveTransfer below).
+//   2. The server redirects the LEAD's leg (the child call that the
+//      rep's <Dial> created) into that conference. Twilio ends the
+//      rep's now-empty <Dial>, which — with no further TwiML — ends
+//      the rep's browser leg; the browser is expecting that and
+//      immediately re-joins the same conference itself (the same
+//      joinConference() path Multi Line already uses). The lead hears
+//      a second or so of silence while that happens.
+//   3. The server dials the transfer target via the REST API with
+//      TwiML that joins them into the same conference.
+//   4. Once the target has answered, all three can talk. "Complete
+//      transfer" flips who ends the conference on exit (rep: no
+//      longer; lead + target: yes) and the rep hangs up, leaving the
+//      other two connected. "Cancel transfer" just hangs the target up.
+//
+// Nothing here needs PUBLIC_URL or a status callback: the target's
+// TwiML is passed inline, and the browser polls the target call's
+// status directly (getCallStatus) — so this works identically in
+// local dev and on Vercel.
+export const TRANSFER_RING_SECONDS = 30;
+
+// The browser generates the name (so it can rejoin the moment its
+// own leg drops, before the server has even replied) — validated
+// server-side to a fixed shape so it can never be a Multi Line
+// conference someone else is in, or anything weird in TwiML.
+export function isValidTransferConferenceName(name) {
+  return /^xfer_[a-f0-9]{16,32}$/.test(String(name || ""));
+}
+
+export function isValidMultilineConferenceName(name) {
+  return /^ml_[a-f0-9]{16}$/.test(String(name || ""));
+}
+
+function isCallSid(sid) {
+  return /^CA[a-f0-9]{32}$/.test(String(sid || ""));
+}
+
+// The lead's leg of a plain Powerdialler call — the child call that
+// the rep's <Dial> created. Only ever one in-progress child for a
+// given parent.
+export async function findConnectedChildCall(parentCallSid, env = process.env) {
+  if (!isCallSid(parentCallSid)) return null;
+  const client = restClient(env);
+  const calls = await client.calls.list({ parentCallSid, status: "in-progress", limit: 5 });
+  return calls[0] || null;
+}
+
+// Redirects one live call into a conference. Used on the lead's leg
+// — startConferenceOnEnter so they aren't left listening to hold
+// music, endConferenceOnExit false so the conference survives them
+// (it's the rep's leg that owns the conference until a completed
+// transfer hands that over — see handOffConference).
+export async function moveCallToConference(callSid, conferenceName, env = process.env) {
+  const client = restClient(env);
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.dial().conference(
+    { startConferenceOnEnter: true, endConferenceOnExit: false, beep: false },
+    conferenceName
+  );
+  await client.calls(callSid).update({ twiml: twiml.toString() });
+}
+
+// Dials the transfer target straight into the conference. Inline
+// TwiML (no URL Twilio has to fetch from us). beep=onEnter so the rep
+// and lead hear them arrive.
+export async function placeTransferLeg({ to, from, conferenceName }, env = process.env) {
+  const client = restClient(env);
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.dial().conference(
+    { startConferenceOnEnter: false, endConferenceOnExit: false, beep: "onEnter" },
+    conferenceName
+  );
+  const call = await client.calls.create({
+    to: toE164(to),
+    from,
+    twiml: twiml.toString(),
+    timeout: TRANSFER_RING_SECONDS,
+  });
+  return { sid: call.sid, status: call.status };
+}
+
+// One of: queued | ringing | in-progress | completed | busy | failed |
+// no-answer | canceled. Polled by the browser while a transfer is up.
+export async function getCallStatus(callSid, env = process.env) {
+  if (!isCallSid(callSid)) throw Object.assign(new Error("Invalid call"), { status: 400 });
+  const client = restClient(env);
+  const call = await client.calls(callSid).fetch();
+  return call.status;
+}
+
+// "Complete transfer": the rep is about to hang up and leave the
+// lead and the target talking. The rep's leg joined the conference
+// as its owner (endConferenceOnExit=true — the same as any Multi Line
+// call, so hanging up normally still tears everything down), so
+// before they leave, ownership has to move: rep → no longer ends it
+// on exit, everyone else → does (so when either the lead or the
+// target hangs up afterwards, the other isn't left sitting in an
+// empty conference). Refuses unless the target is actually in the
+// conference — completing a transfer to someone who hasn't answered
+// would just strand the lead.
+export async function handOffConference({ conferenceName, repCallSid, targetCallSid }, env = process.env) {
+  if (!isCallSid(repCallSid) || !isCallSid(targetCallSid)) {
+    throw Object.assign(new Error("Invalid call"), { status: 400 });
+  }
+  const client = restClient(env);
+  const confs = await client.conferences.list({ friendlyName: conferenceName, status: "in-progress", limit: 1 });
+  const conf = confs[0];
+  if (!conf) throw Object.assign(new Error("The call isn't in a live conference any more."), { status: 409 });
+  const participants = await client.conferences(conf.sid).participants.list({ limit: 20 });
+  if (!participants.some((p) => p.callSid === targetCallSid)) {
+    throw Object.assign(new Error("The person you're transferring to hasn't answered yet."), { status: 409 });
+  }
+  if (!participants.some((p) => p.callSid === repCallSid)) {
+    throw Object.assign(new Error("Your own line isn't in the conference any more."), { status: 409 });
+  }
+  const others = participants.filter((p) => p.callSid !== repCallSid);
+  // Everyone else first, then the rep — if anything fails partway
+  // the rep still owns the conference, which is the safe state (their
+  // hang-up ends the call for everyone, exactly as before).
+  await Promise.all(
+    others.map((p) => client.conferences(conf.sid).participants(p.callSid).update({ endConferenceOnExit: true }))
+  );
+  await client.conferences(conf.sid).participants(repCallSid).update({ endConferenceOnExit: false });
+  return { participants: participants.length };
+}
+
+// Everything the transfer endpoints share between the local Express
+// server and the Vercel functions — request validation, the Twilio
+// choreography above, and the response shape. Throws errors carrying
+// a `.status` so each thin handler can pass them straight through.
+export async function startLiveTransfer(body, env = process.env) {
+  const missing = missingTwilioEnv(env);
+  if (missing.length) {
+    throw Object.assign(new Error(`Twilio is not configured. Missing: ${missing.join(", ")}`), { status: 500 });
+  }
+  const to = String(body?.to || "").trim();
+  if (!toE164(to) || toE164(to).replace(/\D/g, "").length < 6) {
+    throw Object.assign(new Error("Enter a phone number to transfer to."), { status: 400 });
+  }
+  const conferenceName = String(body?.conferenceName || "");
+  const moveLead = !!body?.moveLead;
+  // A lead only ever gets moved into a fresh transfer conference; a
+  // call that's already in one (Multi Line, or a second transfer
+  // attempt on the same call) just names the conference it's in.
+  const validName =
+    isValidTransferConferenceName(conferenceName) || (!moveLead && isValidMultilineConferenceName(conferenceName));
+  if (!validName) throw Object.assign(new Error("Invalid conference name."), { status: 400 });
+  const pool = getCallerIdPool(env);
+  const requestedFrom = body?.callerId;
+  const from = requestedFrom && pool.includes(requestedFrom) ? requestedFrom : pool[0];
+
+  let leadCallSid = null;
+  if (moveLead) {
+    // Powerdialler: the lead is still on a plain <Dial> bridge with
+    // the rep's browser leg — move them into the conference first.
+    const child = await findConnectedChildCall(body?.callSid, env);
+    if (!child) {
+      throw Object.assign(new Error("There's no connected lead on this call to transfer."), { status: 409 });
+    }
+    leadCallSid = child.sid;
+    await moveCallToConference(child.sid, conferenceName, env);
+  }
+
+  // Everything that can be validated has been, and the lead's leg has
+  // been moved by this point — so a failure to place the target's leg
+  // (Twilio rejecting the number, say) is reported as a *result*, not
+  // thrown: the browser must still know the lead was moved (its own
+  // leg is about to drop and needs rejoining) and can offer another
+  // number from inside the conference. Every error thrown above
+  // means nothing was moved and the call carries on exactly as it was.
+  let target = null;
+  let targetError = null;
+  try {
+    target = await placeTransferLeg({ to, from, conferenceName }, env);
+  } catch (err) {
+    if (!moveLead) throw err;
+    console.error("[twilio] transfer target leg failed after moving the lead", err.message);
+    targetError = err.message || "Could not ring that number.";
+  }
+  return {
+    conferenceName,
+    to: toE164(to),
+    from,
+    leadCallSid,
+    targetCallSid: target ? target.sid : null,
+    targetStatus: target ? target.status : "failed",
+    targetError,
+    ringSeconds: TRANSFER_RING_SECONDS,
+  };
 }

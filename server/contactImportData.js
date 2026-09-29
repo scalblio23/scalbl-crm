@@ -25,79 +25,12 @@
 // - 21 Meta/Facebook Lead Ads automated test submissions ("<test
 //   lead: dummy data for ...>", test@meta.com) were excluded — never
 //   real leads.
-// - `status` is left at the app's default ("New Lead") for every
-//   record — the sheet's own STAGE/STATUS values (which vary wildly
-//   per tab and don't map cleanly onto that fixed pipeline field)
-//   are preserved instead as their own custom column(s).
+// - Each record still carries the sheet's own STAGE (and, on some
+//   tabs, STATUS) value under `fields.stage` / `fields.status`. It is NOT stored as a custom column any more:
+//   insertContactRows (db.js) folds it into the one fixed `status`
+//   field via normalizeLeadStatus (server/leadStatus.js) and drops
+//   the key, so every lead ends up on the same four statuses.
 export const CONTACT_COLUMNS = [
-  {
-    "key": "stage",
-    "label": "STAGE",
-    "type": "select",
-    "options": [
-      { "value": "Booked", "color": "green" },
-      { "value": "Not Interested", "color": "red" },
-      { "value": "No Answer Yet", "color": "amber" },
-      { "value": "New", "color": "blue" },
-      { "value": "No Answer", "color": "gray" },
-      { "value": "Progressed To Close", "color": "green" },
-      { "value": "Disqualified", "color": "red" },
-      { "value": "Callback Requested", "color": "amber" },
-      { "value": "Paid", "color": "green" },
-      { "value": "Under 5%", "color": "purple" },
-      { "value": "5% – 5.5%", "color": "purple" },
-      { "value": "5.5% – 6%", "color": "purple" },
-      { "value": "6% – 6.5%", "color": "purple" },
-      { "value": "6.5% – 7%", "color": "purple" },
-      { "value": "Over 7%", "color": "purple" },
-      { "value": "As soon as possible", "color": "amber" },
-      { "value": "Within 1–3 months", "color": "gray" },
-      { "value": "Within 3–6 months", "color": "gray" },
-      { "value": "Within 6–12 months", "color": "gray" },
-      { "value": "Just exploring options", "color": "gray" },
-      { "value": "THROUGH", "color": "gray" },
-      { "value": "interest", "color": "gray" },
-      { "value": "Pending", "color": "amber" },
-      { "value": "Call Back", "color": "amber" },
-      { "value": "In Talks", "color": "amber" },
-      { "value": "Lead (pleae call)", "color": "amber" },
-      { "value": "Upcoming", "color": "blue" },
-      { "value": "No Show", "color": "red" },
-      { "value": "Cancelled", "color": "red" },
-      { "value": "Lost", "color": "red" }
-    ]
-  },
-  {
-    "key": "status",
-    "label": "STATUS",
-    "type": "select",
-    "options": [
-      { "value": "New", "color": "blue" },
-      { "value": "No Answer", "color": "gray" },
-      { "value": "no answer", "color": "gray" },
-      { "value": "Not Interested", "color": "red" },
-      { "value": "not interested", "color": "red" },
-      { "value": "Booked", "color": "green" },
-      { "value": "booked", "color": "green" },
-      { "value": "yes", "color": "green" },
-      { "value": "no", "color": "red" },
-      { "value": "Lead (pleae call)", "color": "amber" },
-      { "value": "Pending", "color": "amber" },
-      { "value": "Call Back", "color": "amber" },
-      { "value": "In Talks", "color": "amber" },
-      { "value": "Upcoming", "color": "blue" },
-      { "value": "No Show", "color": "red" },
-      { "value": "Disqualified", "color": "red" },
-      { "value": "Cancelled", "color": "red" },
-      { "value": "Won", "color": "green" },
-      { "value": "Lost", "color": "red" },
-      { "value": "Need_more_leads", "color": "purple" },
-      { "value": "better_quality_leads", "color": "purple" },
-      { "value": "Kenilworth St, Bondi Junction", "color": "gray" },
-      { "value": "Mascot", "color": "gray" },
-      { "value": "Status", "color": "gray" }
-    ]
-  },
   {
     "key": "issue",
     "label": "ISSUE",

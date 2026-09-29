@@ -63,13 +63,18 @@ export function getVoiceProvider() {
   return provider;
 }
 
-export async function placeCall(phoneNumber, identity = "rep") {
-  return (await resolveProvider()) === "sip" ? sip.placeCall(phoneNumber) : twilio.placeCall(phoneNumber, identity);
+// `opts.leadId` labels the Twilio call's recording with its contact;
+// the SIP gateway doesn't record, so it has no use for it.
+export async function placeCall(phoneNumber, identity = "rep", opts = {}) {
+  return (await resolveProvider()) === "sip"
+    ? sip.placeCall(phoneNumber)
+    : twilio.placeCall(phoneNumber, identity, opts);
 }
 
 // Twilio multi-line: the rep's leg joins a Twilio Conference.
-export async function joinConference(conferenceName, identity = "rep") {
-  return twilio.joinConference(conferenceName, identity);
+// Also how a live transfer rejoins the rep (Twilio only).
+export async function joinConference(conferenceName, identity = "rep", opts = {}) {
+  return twilio.joinConference(conferenceName, identity, opts);
 }
 
 // SIP multi-line: the gateway rings every leg itself.
