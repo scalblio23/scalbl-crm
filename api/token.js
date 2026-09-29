@@ -2,11 +2,26 @@
 // frontend at /api/token. Requires the same TWILIO_* env vars as
 // local dev, set instead in the Vercel project's Environment Variables.
 import { missingTwilioEnv, mintAccessToken, getCallerIdPool } from "../server/twilioCore.js";
+import { getVoiceProvider, missingVoiceGatewayEnv, sipTokenResponse } from "../server/voiceConfig.js";
 import { requireAuth } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
+
+  // VOICE_PROVIDER=sip: hand the browser the SIP voice gateway's URL
+  // and a signed token instead of a Twilio Access Token — see
+  // server/voiceConfig.js.
+  if (getVoiceProvider() === "sip") {
+    const missingSip = missingVoiceGatewayEnv();
+    if (missingSip.length) {
+      res.status(500).json({ error: `SIP calling is not configured. Missing: ${missingSip.join(", ")}` });
+      return;
+    }
+    res.status(200).json(sipTokenResponse(user));
+    return;
+  }
+
   const missing = missingTwilioEnv();
   if (missing.length) {
     res.status(500).json({

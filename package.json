@@ -7,6 +7,9 @@
     "dev": "vite",
     "server": "node server/index.js",
     "dev:all": "concurrently -n vite,server -c blue,green \"npm:dev\" \"npm:server\"",
+    "voice-gateway": "node server/voiceGateway.js",
+    "dev:sip": "concurrently -n vite,server,voice -c blue,green,magenta \"npm:dev\" \"npm:server\" \"npm:voice-gateway\"",
+    "test:sip": "node --test server/sip/test/*.test.js",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -24,7 +27,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^3.10.1",
-    "twilio": "^5.4.3"
+    "twilio": "^5.4.3",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

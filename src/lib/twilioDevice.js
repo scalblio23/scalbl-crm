@@ -29,6 +29,9 @@ let deviceReady = null;
 // number absorbing all the call volume and getting carrier-flagged.
 let callerIdPool = [];
 let nextCallerIdIndex = 0;
+// The call placed most recently from this device — what sendDigits()
+// sends DTMF tones into.
+let lastCall = null;
 
 async function fetchToken(identity) {
   let res;
@@ -147,6 +150,7 @@ export async function placeCall(phoneNumber, identity = "rep", { leadId } = {}) 
   const call = await dev.connect({
     params: { To: toE164(phoneNumber), callerId, ...(leadId ? { leadId: String(leadId) } : {}) },
   });
+  lastCall = call;
   return { call, callerId };
 }
 
@@ -165,12 +169,19 @@ export async function joinConference(conferenceName, identity = "rep", { leadId 
   const call = await dev.connect({
     params: { Conference: conferenceName, callerId, ...(leadId ? { leadId: String(leadId) } : {}) },
   });
+  lastCall = call;
   return { call, callerId };
 }
 
 // Ends whatever call is currently in progress on this device, if any.
 export function hangUp() {
   device?.disconnectAll();
+}
+
+// Sends DTMF tones (keypad presses) into the live call, e.g. to get
+// through an IVR menu.
+export function sendDigits(digits) {
+  if (lastCall && lastCall.status() === "open") lastCall.sendDigits(String(digits));
 }
 
 // Plays a soundboard clip into whatever call is currently active, so
