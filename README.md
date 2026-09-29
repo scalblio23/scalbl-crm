@@ -17,7 +17,92 @@ Then open the printed local URL in your browser.
 npm run build
 ```
 
+## Calling (SIP trunk — VoIPcloud / VoIPline)
+
+With `VOICE_PROVIDER=sip`, the Powerdialler calls out through a VoIPcloud
+SIP trunk (registered to `sipm5.au.voipcloud.online:7060` over TCP) instead
+of Twilio, presenting `+61480851534` as caller ID. Callbacks to that number
+ring the app too. The dialler workflow is unchanged: same Call button,
+sessions, wrap-up, soundboard, call log and conversation logging. SMS still
+goes through Twilio, because the SIP trunk carries voice only.
+
+```
+browser (mic/speaker) ──WebSocket, PCM 8 kHz──▶ voice gateway ──SIP/TCP + G.711 RTP──▶ VoIPcloud ──▶ PSTN
+```
+
+A SIP registration and its RTP audio need sockets that stay open, and
+serverless functions can't hold those. So SIP calling runs in a separate,
+always-on process, the **voice gateway** (`server/voiceGateway.js`). It:
+
+- registers with the trunk (digest auth), refreshes the registration before
+  it expires, sends TCP keepalives, and reconnects and re-registers if the
+  connection drops;
+- places calls with SIP INVITE, using the destination in E.164
+  (`0412 345 678` → `+61412345678`) and the caller ID;
+- accepts inbound INVITEs on the same registration and offers them to every
+  logged-in rep who isn't already on a call; the first to answer gets it;
+- handles ringing (180/183, including the network's own ringback as early
+  media), answered, busy (486/600), declined (603), no-answer (ring timeout,
+  60s by default), failed and hang-up, whichever side hangs up;
+- sends DTMF as RFC 4733 telephone-events (falling back to SIP INFO if the
+  far end doesn't support them), receives it both ways, and has a keypad on
+  the live call;
+- carries audio as G.711 A-law or u-law RTP, and bridges it to each rep's
+  browser over a WebSocket.
+
+The browser side is `src/lib/sipDevice.js`. It exposes the same call API as
+`twilioDevice.js`, and `src/lib/voiceDevice.js` chooses between the two
+based on the backend's `VOICE_PROVIDER`.
+
+### Channels
+
+`SIP_MAX_CHANNELS` (default 1, matching "SIP Line MAX 1ch") caps
+simultaneous calls, inbound and outbound together. With one channel, a
+callback arriving mid-call gets busy. To add channels, buy them from
+VoIPcloud and raise the number; no code changes. **Multi Line** dialling
+works over SIP once there are 2 or more channels. The gateway rings each
+lead on its own channel, bridges whoever answers first and cancels the
+others.
+
+### Set up locally
+
+1. Fill in the `SIP_*` and `VOICE_GATEWAY_*` values in `.env` (see
+   `.env.example`). `SIP_PASSWORD` is only ever read by the gateway.
+2. `npm run dev:sip` starts the frontend, the API server and the voice
+   gateway together. You can also run `npm run voice-gateway` on its own.
+3. Check `http://localhost:3002/health`. `registration.state` should be
+   `"registered"`.
+
+### Deploying
+
+The Vercel app needs `VOICE_PROVIDER=sip`, `VOICE_GATEWAY_URL` and
+`VOICE_GATEWAY_SECRET` (plus `SIP_CALLER_ID` for display). Run the gateway
+on any always-on host with Node 20+, such as a small VPS:
+
+- give it the full `.env` (the `SIP_*` values, `VOICE_GATEWAY_SECRET`, and
+  `POSTGRES_URL` so missed calls get logged);
+- put its port (3002) behind a TLS reverse proxy (Caddy or nginx) so
+  browsers can reach it at `wss://…/voice`;
+- allow UDP `SIP_RTP_PORTS` (default 10000-10999) inbound for call audio;
+- set `SIP_PUBLIC_IP` if it's behind NAT and audio is one-way.
+
+Missed inbound calls (the caller hung up, or no rep was online) are logged
+onto the matching contact's conversation, the same way inbound SMS are.
+
+Use a headset. Browser echo cancellation is weaker for audio played this
+way than for WebRTC.
+
+### Tests
+
+`npm run test:sip` runs the SIP stack against a fake trunk. It covers
+registration and auth, re-registration after a dropped connection, outbound
+answered/busy/failed/no-answer calls, early media, audio in both directions,
+DTMF, inbound answer/cancel/BYE, the channel limit, multi-line and the
+browser WebSocket bridge.
+
 ## Calling (Twilio)
+
+Used when `VOICE_PROVIDER=twilio` (or no SIP settings are configured).
 
 The Powerdialler's Call button places real calls the same way GoHighLevel's
 dialler does: the browser registers as a Twilio Voice "device" (a softphone),

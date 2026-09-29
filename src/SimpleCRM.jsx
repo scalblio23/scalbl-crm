@@ -47,8 +47,21 @@ import {
   Play,
   Mic,
   Square,
+  Grid3x3,
+  PhoneIncoming,
 } from "lucide-react";
-import { placeCall, hangUp, joinConference, playSoundboardClip } from "./lib/twilioDevice";
+import {
+  placeCall,
+  hangUp,
+  joinConference,
+  placeMultilineCall,
+  playSoundboardClip,
+  sendDigits,
+  initVoice,
+  getVoiceProvider,
+  onIncomingCall,
+  onVoiceStatus,
+} from "./lib/voiceDevice";
 import { api } from "./lib/api";
 
 // ---------- Sample data ----------
@@ -313,6 +326,60 @@ function multilineStatusColor(status) {
   if (status === "in-progress") return "bg-green-100 text-green-700";
   if (status === "placed" || status === "ringing") return "bg-blue-100 text-blue-700";
   return "bg-gray-100 text-gray-500";
+}
+
+// DTMF keypad for the live call — sends tones into the call itself
+// (IVR menus, extensions), over the SIP trunk or Twilio alike.
+const DTMF_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
+function DtmfKeypad({ disabled }) {
+  const [open, setOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  const press = (key) => {
+    sendDigits(key);
+    setTyped((t) => (t + key).slice(-16));
+  };
+  return (
+    <div className="relative shrink-0">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        disabled={disabled}
+        title="Keypad (DTMF tones)"
+        className="flex items-center gap-1.5 border border-green-200 bg-white text-green-800 hover:bg-green-100 disabled:opacity-40 text-sm px-3.5 py-2 rounded-full font-medium"
+      >
+        <Grid3x3 size={15} /> Keypad
+      </button>
+      {open && !disabled && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-full mt-2 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-3 w-48">
+            <div className="h-6 mb-2 text-center font-mono text-sm text-gray-700 tracking-widest truncate">
+              {typed || <span className="text-gray-300">—</span>}
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {DTMF_KEYS.map((k) => (
+                <button
+                  key={k}
+                  onClick={() => press(k)}
+                  className="h-10 rounded-lg bg-gray-50 hover:bg-gray-100 active:bg-gray-200 text-base font-semibold text-gray-800"
+                >
+                  {k}
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Same Australia-first matching as server/db.js's findContactByPhone —
+// "+61412345678", "0412 345 678" and "61412345678" all compare equal.
+function auPhoneKey(raw) {
+  const digits = String(raw || "").replace(/\D/g, "");
+  if (digits.startsWith("61")) return digits.slice(2);
+  if (digits.startsWith("0")) return digits.slice(1);
+  return digits;
 }
 
 // ---------- Sidebar ----------
@@ -1751,7 +1818,7 @@ export default function SimpleCRM() {
   // Live calling — same model as GoHighLevel's power dialler: the
   // browser registers as a Twilio Voice "device" and calls ring
   // through the rep's mic/speakers via the backend in /server.
-  const [callStatus, setCallStatus] = useState("idle"); // idle | connecting | in-progress
+  const [callStatus, setCallStatus] = useState("idle"); // idle | connecting | ringing | in-progress
   const [callError, setCallError] = useState("");
   const [activeCallerId, setActiveCallerId] = useState(""); // which of the rotated Twilio numbers is placing the current call
   // The number actually being dialled for the live call — usually
@@ -1767,6 +1834,115 @@ export default function SimpleCRM() {
   const activeCallRef = useRef(null);
   const callStartRef = useRef(null); // when the current call was placed, for duration
   const callEndedRef = useRef(false); // guards against double-processing one call's end
+
+  // ----- Inbound calls (SIP trunk) -----
+  // Calls to the trunk's number (+61 480 851 534) — usually a lead
+  // calling back — ring every logged-in rep who isn't already on a
+  // call; the first to answer gets it. Matched to a contact by phone
+  // number so it's logged against the right lead.
+  const [incomingCall, setIncomingCall] = useState(null); // { call, from, name, lead } while ringing
+  const [inboundCall, setInboundCall] = useState(null); // { call, from, name, lead, status, startedAt } once answered
+  const inboundCallRef = useRef(null);
+  useEffect(() => {
+    inboundCallRef.current = inboundCall;
+  }, [inboundCall]);
+  const [voiceStatus, setVoiceStatus] = useState(null); // SIP trunk status — see onVoiceStatus
+  const contactsRef = useRef(contacts);
+  useEffect(() => {
+    contactsRef.current = contacts;
+  }, [contacts]);
+
+  useEffect(() => {
+    // Only roles that can dial get a phone line (and inbound calls).
+    if (!authUser || authUser.role === "client") return;
+    initVoice();
+    const offStatus = onVoiceStatus(setVoiceStatus);
+    const offIncoming = onIncomingCall((call) => {
+      const key = auPhoneKey(call.from);
+      const lead = key ? contactsRef.current.find((c) => auPhoneKey(c.phone) === key) || null : null;
+      setIncomingCall({ call, from: call.from, name: call.name, lead });
+      call.on("cancel", () => setIncomingCall((cur) => (cur?.call === call ? null : cur)));
+    });
+    return () => {
+      offStatus();
+      offIncoming();
+    };
+  }, [authUser]);
+
+  // Logs an answered inbound call the same way outgoing calls are:
+  // onto the lead's conversation and into the call log (Reports).
+  const logInboundCall = (lead, from, durationMs) => {
+    const durationSeconds = Math.round((durationMs || 0) / 1000);
+    if (lead) {
+      const timeLabel = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      logSystemMessageToConversation(lead, {
+        type: "call",
+        text: `Incoming call · ${timeLabel} · ${formatCallDuration(durationMs)} · answered by ${authUser?.name || "You"}`,
+      });
+    }
+    const entry = {
+      leadId: lead?.id ?? null,
+      name: lead?.name || from || "Unknown caller",
+      phone: lead?.phone || from,
+      client: lead?.client ?? null,
+      tag: lead?.tag ?? null,
+      status: lead ? lead.fields?.stage || lead.status : "Inbound call",
+      notes: lead?.notes || "",
+      durationSeconds,
+    };
+    const tempLogId = `inbound-${Date.now()}`;
+    setCallLog((log) => [
+      { id: tempLogId, ...entry, userName: authUser?.name, calledAt: new Date().toISOString() },
+      ...log,
+    ]);
+    api
+      .post("/api/call-log", entry)
+      .then((saved) => {
+        if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
+      })
+      .catch((err) => setDbError(err.message || "Could not save the call log entry."));
+  };
+
+  const answerIncomingCall = async () => {
+    const offer = incomingCall;
+    if (!offer) return;
+    if (calling) {
+      setCallError("Finish your current call before answering.");
+      return;
+    }
+    setIncomingCall(null);
+    const { call, lead, from, name } = offer;
+    setInboundCall({ call, lead, from, name, status: "connecting", startedAt: null });
+    let answeredAt = null;
+    let ended = false;
+    const finish = (err) => {
+      if (ended) return;
+      ended = true;
+      setInboundCall((cur) => (cur?.call === call ? null : cur));
+      if (err) {
+        setCallError(err.message || "The call failed.");
+        return;
+      }
+      if (answeredAt) logInboundCall(lead, from, Date.now() - answeredAt);
+    };
+    call.on("accept", () => {
+      answeredAt = Date.now();
+      setInboundCall((cur) => (cur?.call === call ? { ...cur, status: "in-progress", startedAt: answeredAt } : cur));
+    });
+    call.on("disconnect", () => finish());
+    call.on("cancel", () => finish());
+    call.on("error", (err) => finish(err));
+    try {
+      await call.accept();
+    } catch (err) {
+      finish(err);
+    }
+  };
+
+  const declineIncomingCall = () => {
+    incomingCall?.call.reject();
+    setIncomingCall(null);
+  };
 
   // Multi-line dialling (Multi Line tab only — Powerdialler always
   // dials one at a time) — how many leads to ring simultaneously per
@@ -2425,6 +2601,11 @@ export default function SimpleCRM() {
   }, [wrapUp, sessionPaused]);
 
   const startCall = async (lead) => {
+    if (inboundCallRef.current) {
+      setCallError("Finish the inbound call before dialling out.");
+      if (sessionRef.current) setSessionPaused(true);
+      return;
+    }
     setCallError("");
     setActiveLeadId(lead.id);
     setCalling(true);
@@ -2472,12 +2653,19 @@ export default function SimpleCRM() {
         handleCallEnded(lead, durationMs);
       };
 
+      call.on("ringing", () => setCallStatus((s) => (s === "connecting" ? "ringing" : s)));
       call.on("accept", () => setCallStatus("in-progress"));
-      call.on("disconnect", () => onCallEnded());
+      call.on("disconnect", (info) => {
+        // SIP calls say why a call that never connected ended (busy,
+        // no answer, declined). It's still a real dial attempt — logged
+        // and wrapped up as usual — just with the reason shown.
+        if (info?.outcomeMessage) setCallError(info.outcomeMessage);
+        onCallEnded();
+      });
       call.on("cancel", () => onCallEnded());
       call.on("error", (err) => onCallEnded(err));
     } catch (err) {
-      setCallError(err.message || "Could not start the call — check your Twilio setup.");
+      setCallError(err.message || "Could not start the call — check your calling setup.");
       setCalling(false);
       setCallStatus("idle");
       setActiveCallerId("");
@@ -2583,6 +2771,16 @@ export default function SimpleCRM() {
     setLastAdHocCall(null);
     multilineWinnerRef.current = null;
     callEndedRef.current = false;
+    if (getVoiceProvider() === "sip") {
+      if (inboundCallRef.current) {
+        setCalling(false);
+        setCallStatus("idle");
+        setCallError("Finish the inbound call before dialling out.");
+        if (sessionRef.current) setSessionPaused(true);
+        return;
+      }
+      return startSipMultilineCall(leadsToTry);
+    }
 
     let batchId;
     try {
@@ -2649,6 +2847,91 @@ export default function SimpleCRM() {
       setMultilineBatch(null);
       if (batchId) cancelMultilineBatch(batchId);
       multilineBatchIdRef.current = null;
+    }
+  };
+
+  // SIP trunk version of startMultilineCall — the voice gateway rings
+  // every lead on its own SIP channel and bridges whoever answers
+  // first, so there's no conference or polling: per-line progress
+  // arrives as events on the call. Needs SIP_MAX_CHANNELS of 2 or more.
+  const startSipMultilineCall = async (leadsToTry) => {
+    const ringSeconds = 25;
+    const startedAt = Date.now();
+    setMultilineBatch({
+      id: `sip-${startedAt}`,
+      candidates: leadsToTry.map((l) => ({ leadId: l.id, name: l.name, phone: l.phone, status: "placed" })),
+      startedAt,
+      ringSeconds,
+    });
+    // Nothing polls here, so re-render once a second for the countdown.
+    stopMultilinePolling();
+    multilinePollRef.current = setInterval(() => setMultilineBatch((b) => (b ? { ...b } : b)), 1000);
+    try {
+      const { call, callerId } = await placeMultilineCall(
+        leadsToTry.map((l) => ({ ref: l.id, phone: l.phone })),
+        { ringSeconds }
+      );
+      activeCallRef.current = call;
+      setActiveCallerId(callerId);
+      call.on("legs", (legs) =>
+        setMultilineBatch((b) =>
+          b
+            ? {
+                ...b,
+                candidates: b.candidates.map((c) => {
+                  const leg = legs.find((l) => l.ref === c.leadId);
+                  return leg ? { ...c, status: leg.status, errorMessage: leg.error, fromNumber: callerId } : c;
+                }),
+              }
+            : b
+        )
+      );
+      call.on("accept", ({ legRef }) => {
+        const winnerLead =
+          dialQueueRef.current.find((l) => l.id === legRef) || leadsToTry.find((l) => l.id === legRef);
+        if (!winnerLead) return;
+        stopMultilinePolling();
+        multilineWinnerRef.current = winnerLead;
+        callStartRef.current = Date.now();
+        setActiveLeadId(winnerLead.id);
+        setActiveCallPhone(winnerLead.phone);
+        setCallStatus("in-progress");
+        setMultilineBatch(null);
+      });
+      const onCallEnded = (err, info) => {
+        if (callEndedRef.current) return;
+        callEndedRef.current = true;
+        setCalling(false);
+        setCallStatus("idle");
+        setActiveCallerId("");
+        activeCallRef.current = null;
+        stopMultilinePolling();
+        setMultilineBatch(null);
+        const winner = multilineWinnerRef.current;
+        multilineWinnerRef.current = null;
+        const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
+        callStartRef.current = null;
+        if (err) {
+          setCallError(err.message || "The call failed.");
+          if (sessionRef.current) setSessionPaused(true);
+          return;
+        }
+        if (!winner) {
+          if (info?.outcomeMessage) setCallError(info.outcomeMessage);
+          return;
+        }
+        logCallToConversation(winner, durationMs);
+        handleCallEnded(winner, durationMs);
+      };
+      call.on("disconnect", (info) => onCallEnded(null, info));
+      call.on("cancel", () => onCallEnded());
+      call.on("error", (err) => onCallEnded(err));
+    } catch (err) {
+      stopMultilinePolling();
+      setCallError(err.message || "Could not start multi-line dialling.");
+      setCalling(false);
+      setCallStatus("idle");
+      setMultilineBatch(null);
     }
   };
 
@@ -2807,6 +3090,93 @@ export default function SimpleCRM() {
 
   return (
     <div className="flex h-screen bg-white text-gray-900" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      {/* Phone line status + inbound calls (SIP trunk) — shown on every
+          page, since a callback can come in whatever the rep is doing. */}
+      {(incomingCall ||
+        inboundCall ||
+        (voiceStatus &&
+          getVoiceProvider() === "sip" &&
+          (["failed", "unregistered"].includes(voiceStatus.registration?.state) ||
+            (!voiceStatus.connected && voiceStatus.lastError)))) && (
+        <div className="fixed bottom-5 right-5 z-50 flex flex-col items-end gap-2 w-80">
+          {voiceStatus &&
+            getVoiceProvider() === "sip" &&
+            (["failed", "unregistered"].includes(voiceStatus.registration?.state) ||
+              (!voiceStatus.connected && voiceStatus.lastError)) && (
+              <div className="w-full flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-3.5 py-2.5 text-xs shadow-sm">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                <div>
+                  <div className="font-semibold">Phone line offline</div>
+                  <div className="text-amber-700/80 mt-0.5">
+                    {voiceStatus.connected
+                      ? voiceStatus.registration?.error || "The SIP trunk isn't registered — retrying."
+                      : voiceStatus.lastError}
+                  </div>
+                </div>
+              </div>
+            )}
+          {incomingCall && (
+            <div className="w-full bg-white border border-blue-200 rounded-2xl shadow-lg px-4 py-3.5">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-blue-700">
+                <PhoneIncoming size={14} className="animate-pulse" /> Incoming call
+              </div>
+              <div className="mt-1.5 text-base font-bold truncate">
+                {incomingCall.lead?.name || incomingCall.name || incomingCall.from || "Unknown caller"}
+              </div>
+              <div className="text-xs text-gray-500 truncate">
+                {incomingCall.from}
+                {incomingCall.lead?.client && <span> · {incomingCall.lead.client}</span>}
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={answerIncomingCall}
+                  className="flex-1 flex items-center justify-center gap-1.5 bg-green-600 hover:bg-green-700 text-white text-sm py-2 rounded-full font-semibold"
+                >
+                  <PhoneCall size={14} /> Answer
+                </button>
+                <button
+                  onClick={declineIncomingCall}
+                  className="flex-1 flex items-center justify-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm py-2 rounded-full font-semibold"
+                >
+                  <PhoneOff size={14} /> Decline
+                </button>
+              </div>
+            </div>
+          )}
+          {inboundCall && (
+            <div className="w-full bg-green-50 border border-green-200 rounded-2xl shadow-lg px-4 py-3.5">
+              <div
+                className={`text-xs font-semibold uppercase tracking-widest ${
+                  inboundCall.status === "in-progress" ? "text-green-700" : "text-amber-700"
+                }`}
+              >
+                {inboundCall.status === "in-progress" ? "Inbound call · live" : "Connecting…"}
+              </div>
+              <div className="mt-1.5 text-base font-bold truncate">
+                {inboundCall.lead?.name || inboundCall.name || inboundCall.from || "Unknown caller"}
+              </div>
+              <div className="text-xs text-gray-500 truncate">
+                {inboundCall.from}
+                {inboundCall.lead?.client && <span> · {inboundCall.lead.client}</span>}
+              </div>
+              {inboundCall.lead?.notes && (
+                <div className="mt-2 bg-white/70 border border-green-100 rounded-lg px-2.5 py-1.5 text-xs text-gray-600 line-clamp-3">
+                  {inboundCall.lead.notes}
+                </div>
+              )}
+              <div className="mt-3 flex items-center justify-end gap-2">
+                <DtmfKeypad disabled={inboundCall.status !== "in-progress"} />
+                <button
+                  onClick={() => hangUp()}
+                  className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold"
+                >
+                  <PhoneOff size={15} /> End call
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {/* Sidebar */}
       <aside className="w-56 border-r border-gray-200 flex flex-col shrink-0">
         <div className="px-5 py-5 border-b border-gray-100">
@@ -3971,21 +4341,21 @@ export default function SimpleCRM() {
                       <span className="relative flex h-3 w-3 shrink-0">
                         <span
                           className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                            callStatus === "connecting" ? "bg-amber-400" : "bg-green-400"
+                            callStatus !== "in-progress" ? "bg-amber-400" : "bg-green-400"
                           }`}
                         />
                         <span
                           className={`relative inline-flex rounded-full h-3 w-3 ${
-                            callStatus === "connecting" ? "bg-amber-500" : "bg-green-600"
+                            callStatus !== "in-progress" ? "bg-amber-500" : "bg-green-600"
                           }`}
                         />
                       </span>
                       <div
                         className={`text-xs font-semibold uppercase tracking-widest ${
-                          callStatus === "connecting" ? "text-amber-700" : "text-green-700"
+                          callStatus !== "in-progress" ? "text-amber-700" : "text-green-700"
                         }`}
                       >
-                        {callStatus === "connecting" ? "Connecting…" : "Live call"}
+                        {callStatus === "in-progress" ? "Live call" : callStatus === "ringing" ? "Ringing…" : "Connecting…"}
                       </div>
                       {activeCallerId && (
                         <div className="flex items-center gap-1 text-xs text-gray-500 bg-white/70 border border-green-100 rounded-full px-2.5 py-1">
@@ -3993,12 +4363,15 @@ export default function SimpleCRM() {
                         </div>
                       )}
                     </div>
-                    <button
-                      onClick={endCall}
-                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
-                    >
-                      <PhoneOff size={15} /> End call
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <DtmfKeypad disabled={callStatus !== "in-progress"} />
+                      <button
+                        onClick={endCall}
+                        className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
+                      >
+                        <PhoneOff size={15} /> End call
+                      </button>
+                    </div>
                   </div>
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-[1fr_1.3fr] gap-6 md:items-center">
@@ -4790,21 +5163,21 @@ export default function SimpleCRM() {
                       <span className="relative flex h-3 w-3 shrink-0">
                         <span
                           className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                            callStatus === "connecting" ? "bg-amber-400" : "bg-green-400"
+                            callStatus !== "in-progress" ? "bg-amber-400" : "bg-green-400"
                           }`}
                         />
                         <span
                           className={`relative inline-flex rounded-full h-3 w-3 ${
-                            callStatus === "connecting" ? "bg-amber-500" : "bg-green-600"
+                            callStatus !== "in-progress" ? "bg-amber-500" : "bg-green-600"
                           }`}
                         />
                       </span>
                       <div
                         className={`text-xs font-semibold uppercase tracking-widest ${
-                          callStatus === "connecting" ? "text-amber-700" : "text-green-700"
+                          callStatus !== "in-progress" ? "text-amber-700" : "text-green-700"
                         }`}
                       >
-                        {callStatus === "connecting" ? "Connecting…" : "Live call"}
+                        {callStatus === "in-progress" ? "Live call" : callStatus === "ringing" ? "Ringing…" : "Connecting…"}
                       </div>
                       {activeCallerId && (
                         <div className="flex items-center gap-1 text-xs text-gray-500 bg-white/70 border border-green-100 rounded-full px-2.5 py-1">
@@ -4812,12 +5185,15 @@ export default function SimpleCRM() {
                         </div>
                       )}
                     </div>
-                    <button
-                      onClick={endCall}
-                      className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
-                    >
-                      <PhoneOff size={15} /> End call
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <DtmfKeypad disabled={callStatus !== "in-progress"} />
+                      <button
+                        onClick={endCall}
+                        className="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-sm px-4 py-2 rounded-full font-semibold shrink-0"
+                      >
+                        <PhoneOff size={15} /> End call
+                      </button>
+                    </div>
                   </div>
 
                   <div className="mt-4 grid grid-cols-1 md:grid-cols-[1fr_1.3fr] gap-6 md:items-center">
