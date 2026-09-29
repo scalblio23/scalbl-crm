@@ -86,6 +86,36 @@ on any always-on host with Node 20+, such as a small VPS:
 - allow UDP `SIP_RTP_PORTS` (default 10000-10999) inbound for call audio;
 - set `SIP_PUBLIC_IP` if it's behind NAT and audio is one-way.
 
+**On DigitalOcean**, `deploy/voice-gateway/` automates this. Use one of
+two scripts:
+
+- **`setup.sh`**: run it as root on a fresh Ubuntu 24.04 Droplet, e.g.
+  from the Droplet's web Console. It installs Node and Caddy, fetches the
+  app, prompts for the SIP password, `VOICE_GATEWAY_SECRET` and
+  `POSTGRES_URL`, runs the gateway as the `scalbl-voice` systemd service,
+  sets up HTTPS and opens the firewall. Afterwards it prints the Vercel
+  variables to set.
+
+  ```bash
+  bash <(curl -fsSL -H "Authorization: token <GITHUB_TOKEN>" \
+    https://raw.githubusercontent.com/scalblio23/scalbl-crm/refs/heads/<BRANCH>/deploy/voice-gateway/setup.sh)
+  ```
+
+- **`provision-do.mjs`**: does the whole thing through the DigitalOcean
+  API. It creates the Droplet (Sydney, $6/mo) and runs `setup.sh` on it
+  unattended on first boot, adds a Cloud Firewall and sets the DNS A record
+  if the domain's DNS is on DigitalOcean. It then waits for `/health` to
+  report `registered`. Pass `--replace` to rebuild an existing Droplet of
+  the same name.
+
+  ```bash
+  DIGITALOCEAN_TOKEN=... VOICE_DOMAIN=voice.example.com SIP_PASSWORD=... \
+  GITHUB_TOKEN=... POSTGRES_URL=... node deploy/voice-gateway/provision-do.mjs
+  ```
+
+On the Droplet, `journalctl -u scalbl-voice -f` shows the gateway's logs
+and `/var/log/scalbl-setup.log` has the setup output.
+
 Missed inbound calls (the caller hung up, or no rep was online) are logged
 onto the matching contact's conversation, the same way inbound SMS are.
 
