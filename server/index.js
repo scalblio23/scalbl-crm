@@ -18,6 +18,7 @@ import {
   publicBaseUrl,
   MULTILINE_RING_SECONDS,
 } from "./twilioCore.js";
+import { getVoiceProvider, missingVoiceGatewayEnv, sipTokenResponse } from "./voiceConfig.js";
 import {
   isDbConfigured,
   ensureSchema,
@@ -188,10 +189,12 @@ function dbRoute(fn) {
 }
 
 app.get("/api/health", (req, res) => {
-  const missing = missingTwilioEnv();
+  const voiceProvider = getVoiceProvider();
+  const missing = voiceProvider === "sip" ? missingVoiceGatewayEnv() : missingTwilioEnv();
   const dbConfigured = isDbConfigured();
   res.json({
     ok: missing.length === 0 && dbConfigured,
+    voiceProvider,
     missing,
     database: dbConfigured ? "connected" : "not configured — set POSTGRES_URL",
   });
@@ -410,6 +413,15 @@ app.get(
 // Twilio Voice device (the same softphone model GoHighLevel uses),
 // scoped to place outgoing calls through our TwiML App.
 app.get("/api/token", (req, res) => {
+  // VOICE_PROVIDER=sip: the browser talks to the SIP voice gateway
+  // (npm run voice-gateway) instead — see server/voiceConfig.js.
+  if (getVoiceProvider() === "sip") {
+    const missingSip = missingVoiceGatewayEnv();
+    if (missingSip.length) {
+      return res.status(500).json({ error: `SIP calling is not configured. Missing: ${missingSip.join(", ")}` });
+    }
+    return res.json(sipTokenResponse(req.user));
+  }
   const missing = missingTwilioEnv();
   if (missing.length) {
     return res.status(500).json({
@@ -1071,11 +1083,12 @@ app.post(
 );
 
 app.listen(PORT, () => {
-  const missing = missingTwilioEnv();
-  console.log(`Local backend listening on http://localhost:${PORT}`);
+  const voiceProvider = getVoiceProvider();
+  const missing = voiceProvider === "sip" ? missingVoiceGatewayEnv() : missingTwilioEnv();
+  console.log(`Local backend listening on http://localhost:${PORT} (voice: ${voiceProvider})`);
   if (missing.length) {
     console.warn(
-      `⚠ Twilio env vars not set yet, calls will fail until you add them to .env: ${missing.join(", ")}`
+      `⚠ ${voiceProvider === "sip" ? "SIP" : "Twilio"} env vars not set yet, calls will fail until you add them to .env: ${missing.join(", ")}`
     );
   }
   if (!isDbConfigured()) {
