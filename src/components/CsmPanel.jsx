@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronDown, Loader2, Plus, Search, Send, Trash2, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Loader2, MessageCircle, Plus, Search, Send, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 
 // CSM tab — client success. Left: every client, with its retention
@@ -7,6 +7,47 @@ import { api } from "../lib/api";
 // timeline (comments, plus a line for each confidence / mood change),
 // with the confidence and mood controls above it and a comment box
 // at the bottom. Backed by api/csm.js.
+//
+// WhatsApp (UI only for now — not connected yet): a client can be
+// linked to a WhatsApp chat/group from the header; its messages will
+// sit in the same timeline as entries of kind "whatsapp" (value "in" |
+// "out", author = sender), filterable, and the box at the bottom
+// switches between an internal comment and a WhatsApp message. Until
+// the connection exists, "Show example messages" previews the look.
+
+const WHATSAPP_GREEN = "#25D366";
+
+function WhatsAppIcon({ size = 14 }) {
+  return <MessageCircle size={size} style={{ color: WHATSAPP_GREEN }} fill={WHATSAPP_GREEN} fillOpacity={0.15} />;
+}
+
+// Sample conversation for the preview — never saved.
+function exampleWhatsAppEntries(client) {
+  const at = (minutesAgo) => new Date(Date.now() - minutesAgo * 60000).toISOString();
+  const lines = [
+    [95, "in", client.name, "Morning! Quick one — how many appointments got booked this week?"],
+    [90, "out", "You", "Morning! 14 so far, 3 more pencilled in for Thursday. I'll send the full report this afternoon."],
+    [88, "in", client.name, "Great. The two from Tuesday didn't show though 😕"],
+    [80, "out", "You", "Thanks for flagging — we'll add an SMS reminder the morning of each appointment from tomorrow."],
+    [12, "in", client.name, "Perfect, thanks team 👍"],
+  ];
+  return lines.map(([minutesAgo, dir, author, text], i) => ({
+    id: `example-${client.id}-${i}`,
+    clientId: client.id,
+    kind: "whatsapp",
+    value: dir,
+    author,
+    text,
+    createdAt: at(minutesAgo),
+    example: true,
+  }));
+}
+
+const TIMELINE_FILTERS = [
+  { key: "all", label: "All" },
+  { key: "comments", label: "Comments & updates" },
+  { key: "whatsapp", label: "WhatsApp" },
+];
 
 const CONFIDENCE_STEPS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
 
@@ -64,6 +105,10 @@ export default function CsmPanel() {
   const [showAddClient, setShowAddClient] = useState(false);
   const [moodOpen, setMoodOpen] = useState(false);
   const [error, setError] = useState("");
+  const [composeMode, setComposeMode] = useState("comment"); // comment | whatsapp
+  const [timelineFilter, setTimelineFilter] = useState("all");
+  const [showExample, setShowExample] = useState(false);
+  const [waOpen, setWaOpen] = useState(false);
   const timelineEndRef = useRef(null);
 
   const selected = clients.find((c) => c.id === selectedId) || null;
@@ -92,6 +137,7 @@ export default function CsmPanel() {
     let cancelled = false;
     setLoadingEntries(true);
     setMoodOpen(false);
+    setWaOpen(false);
     api
       .get(`/api/csm?clientId=${selectedId}`)
       .then(({ entries: list }) => !cancelled && setEntries(list || []))
@@ -105,23 +151,36 @@ export default function CsmPanel() {
   // Keep the newest entry in view, next to the comment box.
   useEffect(() => {
     timelineEndRef.current?.scrollIntoView({ block: "end" });
-  }, [entries]);
+  }, [entries, showExample, timelineFilter]);
 
   const filteredClients = useMemo(() => {
     const q = search.trim().toLowerCase();
     return q ? clients.filter((c) => c.name.toLowerCase().includes(q)) : clients;
   }, [clients, search]);
 
+  const visibleEntries = useMemo(() => {
+    let list = entries;
+    if (showExample && selected) {
+      list = [...entries, ...exampleWhatsAppEntries(selected)].sort(
+        (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
+      );
+    }
+    if (timelineFilter === "whatsapp") return list.filter((e) => e.kind === "whatsapp");
+    if (timelineFilter === "comments") return list.filter((e) => e.kind !== "whatsapp");
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, showExample, timelineFilter, selected?.id]);
+
   // Entries grouped by day, oldest first.
   const days = useMemo(() => {
     const groups = [];
-    for (const e of entries) {
+    for (const e of visibleEntries) {
       const label = formatDay(e.createdAt);
       if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, items: [] });
       groups[groups.length - 1].items.push(e);
     }
     return groups;
-  }, [entries]);
+  }, [visibleEntries]);
 
   // A POST that returns { client, entry } — refresh both views from it.
   const applyResult = ({ client, entry }) => {
@@ -312,6 +371,48 @@ export default function CsmPanel() {
                 <div className="text-xs text-gray-400">
                   {selected.lastActivityAt ? `Last update ${formatDay(selected.lastActivityAt).toLowerCase()} at ${formatTime(selected.lastActivityAt)}` : "No activity yet"}
                 </div>
+                <div className="relative mt-1.5">
+                  <button
+                    onClick={() => setWaOpen((o) => !o)}
+                    className="h-7 flex items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium bg-white text-gray-500 border-gray-200 hover:border-gray-400"
+                  >
+                    <WhatsAppIcon size={13} /> WhatsApp: not linked
+                    <ChevronDown size={13} />
+                  </button>
+                  {waOpen && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setWaOpen(false)} />
+                      <div className="absolute left-0 top-full mt-1 z-50 w-80 bg-white border border-gray-200 rounded-xl shadow-lg p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <WhatsAppIcon size={16} />
+                          <span className="text-sm font-semibold text-gray-900">Link a WhatsApp chat</span>
+                          <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">
+                            Coming soon
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-500 mb-2.5">
+                          Once WhatsApp is connected, pick {selected.name}'s chat or group here and its messages will appear
+                          in this timeline.
+                        </p>
+                        <select
+                          disabled
+                          className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm text-gray-400 bg-gray-50 mb-2.5"
+                        >
+                          <option>Choose a chat or group…</option>
+                        </select>
+                        <button
+                          onClick={() => {
+                            setShowExample((v) => !v);
+                            setWaOpen(false);
+                          }}
+                          className="w-full text-xs font-medium text-gray-700 border border-gray-200 hover:bg-gray-50 rounded-lg px-2.5 py-1.5"
+                        >
+                          {showExample ? "Hide example messages" : "Show example messages"}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -385,16 +486,55 @@ export default function CsmPanel() {
               </button>
             </header>
 
+            {/* Timeline filters */}
+            <div className="px-6 pt-3 flex items-center gap-1.5 flex-wrap">
+              {TIMELINE_FILTERS.map((f) => (
+                <button
+                  key={f.key}
+                  onClick={() => setTimelineFilter(f.key)}
+                  className={`flex items-center gap-1 text-xs font-medium rounded-full px-3 py-1 border ${
+                    timelineFilter === f.key
+                      ? "bg-gray-900 text-white border-gray-900"
+                      : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                  }`}
+                >
+                  {f.key === "whatsapp" && <WhatsAppIcon size={12} />} {f.label}
+                </button>
+              ))}
+              {showExample && (
+                <span className="ml-auto flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-3 py-1">
+                  Showing example WhatsApp messages — not real, nothing is saved.
+                  <button onClick={() => setShowExample(false)} className="font-semibold underline">
+                    Hide
+                  </button>
+                </span>
+              )}
+            </div>
+
             {/* Timeline */}
             <div className="flex-1 overflow-y-auto px-6 py-5">
               {loadingEntries ? (
                 <div className="flex items-center gap-2 text-sm text-gray-400">
                   <Loader2 size={14} className="animate-spin" /> Loading timeline…
                 </div>
-              ) : !entries.length ? (
-                <div className="text-sm text-gray-400 text-center mt-10">
-                  Nothing here yet. Add the first comment below, or set a confidence and mood.
-                </div>
+              ) : !visibleEntries.length ? (
+                timelineFilter === "whatsapp" ? (
+                  <div className="text-sm text-gray-400 text-center mt-10">
+                    <div className="flex justify-center mb-2">
+                      <WhatsAppIcon size={28} />
+                    </div>
+                    WhatsApp isn't connected yet, so there are no messages to show.
+                    <div className="mt-2">
+                      <button onClick={() => setShowExample(true)} className="text-gray-700 font-medium underline">
+                        Show example messages
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-gray-400 text-center mt-10">
+                    Nothing here yet. Add the first comment below, or set a confidence and mood.
+                  </div>
+                )
               ) : (
                 <ol className="relative border-l border-gray-200 ml-2">
                   {days.map((day) => (
@@ -415,6 +555,33 @@ export default function CsmPanel() {
             {/* Comment box — right padding keeps Send clear of the
                 floating dial button in the page's bottom-right corner. */}
             <div className="border-t border-gray-100 pl-6 pr-24 py-3">
+              <div className="flex items-center gap-1 mb-2">
+                <button
+                  onClick={() => setComposeMode("comment")}
+                  className={`text-xs font-medium rounded-full px-3 py-1 border ${
+                    composeMode === "comment"
+                      ? "bg-gray-900 text-white border-gray-900"
+                      : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                  }`}
+                >
+                  Internal comment
+                </button>
+                <button
+                  onClick={() => setComposeMode("whatsapp")}
+                  className={`flex items-center gap-1 text-xs font-medium rounded-full px-3 py-1 border ${
+                    composeMode === "whatsapp"
+                      ? "bg-green-50 text-green-800 border-green-300"
+                      : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                  }`}
+                >
+                  <WhatsAppIcon size={12} /> WhatsApp
+                </button>
+                <span className="text-xs text-gray-400 ml-2">
+                  {composeMode === "comment"
+                    ? "Only your team sees comments."
+                    : "WhatsApp isn't connected yet — messages can't be sent from here yet."}
+                </span>
+              </div>
               <div className="flex items-end gap-2">
                 <textarea
                   value={comment}
@@ -422,20 +589,39 @@ export default function CsmPanel() {
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      sendComment();
+                      if (composeMode === "comment") sendComment();
                     }
                   }}
                   rows={2}
-                  placeholder={`Add a comment about ${selected.name}… (Enter to send, Shift+Enter for a new line)`}
-                  className="flex-1 resize-none border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-gray-400"
+                  placeholder={
+                    composeMode === "comment"
+                      ? `Add a comment about ${selected.name}… (Enter to send, Shift+Enter for a new line)`
+                      : `Message ${selected.name} on WhatsApp…`
+                  }
+                  className={`flex-1 resize-none border rounded-xl px-3 py-2 text-sm outline-none ${
+                    composeMode === "whatsapp"
+                      ? "border-green-200 focus:border-green-400 bg-green-50/30"
+                      : "border-gray-200 focus:border-gray-400"
+                  }`}
                 />
-                <button
-                  onClick={sendComment}
-                  disabled={!comment.trim() || sending}
-                  className="h-10 flex items-center gap-1.5 bg-gray-900 hover:bg-black text-white text-sm font-semibold rounded-xl px-4 disabled:opacity-40"
-                >
-                  {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />} Send
-                </button>
+                {composeMode === "comment" ? (
+                  <button
+                    onClick={sendComment}
+                    disabled={!comment.trim() || sending}
+                    className="h-10 flex items-center gap-1.5 bg-gray-900 hover:bg-black text-white text-sm font-semibold rounded-xl px-4 disabled:opacity-40"
+                  >
+                    {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />} Send
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    title="WhatsApp isn't connected yet"
+                    style={{ backgroundColor: WHATSAPP_GREEN }}
+                    className="h-10 flex items-center gap-1.5 text-white text-sm font-semibold rounded-xl px-4 opacity-40 cursor-not-allowed"
+                  >
+                    <Send size={15} /> Send
+                  </button>
+                )}
               </div>
             </div>
           </>
@@ -447,6 +633,37 @@ export default function CsmPanel() {
 
 function TimelineItem({ entry }) {
   const time = formatTime(entry.createdAt);
+  if (entry.kind === "whatsapp") {
+    const out = entry.value === "out";
+    return (
+      <div className={`relative pl-6 mb-3 flex ${out ? "justify-end" : ""}`}>
+        <span
+          className="absolute -left-[5px] top-3 w-2.5 h-2.5 rounded-full ring-4 ring-white"
+          style={{ backgroundColor: WHATSAPP_GREEN }}
+        />
+        <div
+          className={`max-w-xl rounded-2xl px-3.5 py-2 shadow-sm border ${
+            out ? "bg-[#d9fdd3] border-[#c3eebb] rounded-br-md" : "bg-white border-gray-200 rounded-bl-md"
+          }`}
+        >
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <WhatsAppIcon size={12} />
+            <span className="text-xs font-semibold text-gray-800">{entry.author || (out ? "You" : "Client")}</span>
+            {entry.example && (
+              <span className="text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-700 rounded px-1">
+                Example
+              </span>
+            )}
+          </div>
+          <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">{entry.text}</div>
+          <div className="text-[11px] text-gray-500 text-right mt-0.5">
+            {time}
+            {out && <span className="ml-1 text-sky-500">✓✓</span>}
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (entry.kind === "comment") {
     return (
       <div className="relative pl-6 mb-4">
