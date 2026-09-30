@@ -160,6 +160,10 @@ export async function ensureSchema() {
         AND to_regclass('public.csm_files') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'csm_entries' AND column_name = 'wa_id'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
           WHERE table_name = 'messages' AND column_name = 'recording_sid'
         )
         AND EXISTS (
@@ -629,6 +633,15 @@ export async function ensureSchema() {
       )
     `);
     await query(`CREATE INDEX IF NOT EXISTS csm_files_entry_idx ON csm_files (entry_id)`);
+    // WhatsApp: the chat/group a CSM client is linked to, and each
+    // synced message's WhatsApp id so it's only ever stored once per
+    // client (see server/whatsapp/).
+    await query(`ALTER TABLE csm_clients ADD COLUMN IF NOT EXISTS whatsapp_chat_id TEXT`);
+    await query(`ALTER TABLE csm_clients ADD COLUMN IF NOT EXISTS whatsapp_chat_name TEXT`);
+    await query(`ALTER TABLE csm_entries ADD COLUMN IF NOT EXISTS wa_id TEXT`);
+    await query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS csm_entries_wa_idx ON csm_entries (client_id, wa_id) WHERE wa_id IS NOT NULL`
+    );
     // The starting client list — only into an empty table, so a client
     // removed later doesn't come back.
     await query(
@@ -2732,6 +2745,8 @@ function csmClientFromRow(r) {
     mood: r.mood || null,
     lastActivityAt: r.last_activity_at || null,
     commentCount: Number(r.comment_count || 0),
+    whatsappChatId: r.whatsapp_chat_id || null,
+    whatsappChatName: r.whatsapp_chat_name || null,
   };
 }
 
@@ -2744,6 +2759,7 @@ function csmEntryFromRow(r) {
     value: r.value,
     author: r.author || "",
     createdAt: r.created_at,
+    waId: r.wa_id || null,
   };
 }
 
@@ -2843,4 +2859,62 @@ export async function setCsmMood(clientId, mood, author) {
   if (!rows[0]) return null;
   const entry = await addCsmEntry(clientId, { kind: "mood", value: mood, author });
   return { entry, client: await getCsmClient(clientId) };
+}
+
+// ---------- CSM ↔ WhatsApp ----------
+
+export async function getCsmClientById(id) {
+  return getCsmClient(id);
+}
+
+// Links a client to a WhatsApp chat/group (chatId null unlinks it).
+export async function linkCsmWhatsApp(clientId, chatId, chatName, author) {
+  const rows = await query(
+    "UPDATE csm_clients SET whatsapp_chat_id = $2, whatsapp_chat_name = $3 WHERE id = $1 RETURNING id",
+    [clientId, chatId || null, chatId ? chatName || null : null]
+  );
+  if (!rows[0]) return null;
+  const entry = await addCsmEntry(clientId, {
+    kind: "whatsapp-link",
+    text: chatId ? `linked the WhatsApp chat "${chatName || chatId}"` : "unlinked WhatsApp",
+    author,
+  });
+  return { entry, client: await getCsmClient(clientId) };
+}
+
+// The CSM clients linked to a WhatsApp chat (usually one).
+export async function getCsmClientIdsForChat(chatId) {
+  const rows = await query("SELECT id FROM csm_clients WHERE whatsapp_chat_id = $1", [chatId]);
+  return rows.map((r) => r.id);
+}
+
+// Every linked chat id — so the WhatsApp service knows which chats to
+// keep (it stores nothing for the rest).
+export async function getLinkedWhatsAppChatIds() {
+  const rows = await query("SELECT DISTINCT whatsapp_chat_id FROM csm_clients WHERE whatsapp_chat_id IS NOT NULL");
+  return rows.map((r) => r.whatsapp_chat_id);
+}
+
+// Stores one WhatsApp message on a client's timeline. Returns the new
+// entry, or null if it was already there (same client + message id).
+// files: [{ name, mimeType, data: Buffer }]
+export async function addCsmWhatsAppMessage({ clientId, waId, direction, author, text, createdAt, files = [] }) {
+  const rows = await query(
+    `INSERT INTO csm_entries (client_id, kind, text, value, author, created_at, wa_id)
+     VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6)
+     ON CONFLICT (client_id, wa_id) WHERE wa_id IS NOT NULL DO NOTHING
+     RETURNING *`,
+    [clientId, text || "", direction, author || "", createdAt || new Date(), waId]
+  );
+  if (!rows[0]) return null;
+  const entry = csmEntryFromRow(rows[0]);
+  entry.files = [];
+  for (const f of files) {
+    const saved = await query(
+      "INSERT INTO csm_files (entry_id, name, mime_type, size, data) VALUES ($1,$2,$3,$4,$5) RETURNING id, name, mime_type, size",
+      [entry.id, f.name, f.mimeType, f.data.length, f.data]
+    );
+    entry.files.push(csmFileMeta(saved[0]));
+  }
+  return entry;
 }
