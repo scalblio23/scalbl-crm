@@ -64,6 +64,21 @@ works over SIP once there are 2 or more channels. The gateway rings each
 lead on its own channel, bridges whoever answers first and cancels the
 others.
 
+### Call recording
+
+The gateway records every answered call: the rep and the lead, mixed to
+one MP3 with `ffmpeg` (a WAV if ffmpeg is missing). That covers
+Powerdialler calls, the floating dialler, the answered line of a Multi
+Line round and answered inbound calls. Files are saved under
+`SIP_RECORDINGS_DIR` (default `recordings/` in the app directory). Each
+one is added to the matching contact's conversation, where the usual
+player streams it through `/api/recording-audio`. That endpoint fetches
+the file from the gateway with a short-lived token signed with
+`VOICE_GATEWAY_SECRET`. Recordings older than
+`SIP_RECORDING_RETENTION_DAYS` (default 45) are deleted, and their
+conversation entries lose the player. Set `SIP_RECORDING=off` to stop
+recording. Calls that match no contact aren't kept.
+
 ### Caller ID rotation
 
 By default every outbound call presents `SIP_CALLER_ID`. To rotate across

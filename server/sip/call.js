@@ -43,7 +43,13 @@ export class Call extends EventEmitter {
     this.callerId = callerId || this.config.callerId;
     this.state = "new";
     this.rtp = new RtpSession({ portMin: this.config.rtpPortMin, portMax: this.config.rtpPortMax });
-    this.rtp.on("audio", (pcm) => this.emit("audio", pcm));
+    this.rtp.on("audio", (pcm) => {
+      if (this.recorder && this.state === "answered") this.recorder.write("remote", pcm);
+      this.emit("audio", pcm);
+    });
+    // Set by the gateway once the call is answered and belongs to a rep
+    // (see sip/recorder.js); both sides of the audio are fed to it.
+    this.recorder = null;
     this.rtp.on("dtmf", (digit) => this.emit("dtmf", digit));
     this.rtp.on("error", (err) => this.log.warn(`[rtp] ${err.message}`));
     this.sessionId = Math.floor(Math.random() * 1e9);
@@ -517,7 +523,9 @@ export class Call extends EventEmitter {
   }
 
   pushAudio(pcm) {
-    if (this.state === "answered") this.rtp.pushAudio(pcm);
+    if (this.state !== "answered") return;
+    this.recorder?.write("local", pcm);
+    this.rtp.pushAudio(pcm);
   }
 
   fail(message) {

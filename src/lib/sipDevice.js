@@ -530,10 +530,11 @@ async function begin(call, message) {
 }
 
 // Returns { call, callerId } like twilioDevice.placeCall.
-export function placeCall(phoneNumber) {
+// `leadId` labels the call's recording with its contact.
+export function placeCall(phoneNumber, { leadId } = {}) {
   const to = toE164(phoneNumber);
   const ref = nextRef++;
-  return begin(new SipCall("outbound", { to }), { type: "dial", ref, to });
+  return begin(new SipCall("outbound", { to }), { type: "dial", ref, to, ...(leadId ? { leadId } : {}) });
 }
 
 // Rings several leads at once on separate SIP channels; the first to

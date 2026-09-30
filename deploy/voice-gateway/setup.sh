@@ -43,7 +43,7 @@ ask GH_TOKEN "GitHub token with read access to $REPO (blank if the repo is publi
 echo "== Installing Node.js 22, Caddy, git and the firewall =="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl git ufw ca-certificates gnupg debian-keyring debian-archive-keyring apt-transport-https >/dev/null
+apt-get install -y -qq curl git ufw ffmpeg ca-certificates gnupg debian-keyring debian-archive-keyring apt-transport-https >/dev/null
 if ! command -v node >/dev/null || [[ "$(node -p 'process.versions.node.split(".")[0]')" -lt 20 ]]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
   apt-get install -y -qq nodejs >/dev/null

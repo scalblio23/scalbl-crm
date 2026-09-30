@@ -59,7 +59,19 @@ function legStatusForEnd(reason) {
   return "completed";
 }
 
-export function createVoiceGateway({ ua, server, path = "/voice", verifyToken, onMissedCall = () => {}, log = console }) {
+// `record`: optional (call) => CallRecorder — when given, every call a
+// rep is on is recorded from the moment it's answered, and
+// onRecording({ id, file, seconds, call, rep }) runs once it's saved.
+export function createVoiceGateway({
+  ua,
+  server,
+  path = "/voice",
+  verifyToken,
+  onMissedCall = () => {},
+  record = null,
+  onRecording = () => {},
+  log = console,
+}) {
   const wss = new WebSocketServer({ server, path });
   const reps = new Set();
   const pendingIncoming = new Map(); // call.id → { call, offeredTo: Set<rep>, taken: rep|null }
@@ -74,10 +86,30 @@ export function createVoiceGateway({ ua, server, path = "/voice", verifyToken, o
 
   ua.on("registration", (registration) => broadcast({ type: "registration", ...registration }));
 
+  function startRecording(rep, call) {
+    if (!record || call.recorder) return;
+    try {
+      call.recorder = record(call);
+    } catch (err) {
+      log.warn(`[recording] couldn't start for ${call.remoteNumber}: ${err.message}`);
+      return;
+    }
+    call.once("ended", () => {
+      call.recorder
+        .finish()
+        .then((saved) => saved && onRecording({ ...saved, call, rep }))
+        .catch((err) => log.warn(`[recording] couldn't save ${call.recorder.id}: ${err.message}`));
+    });
+  }
+
   // Wires a live call's audio/DTMF/state to one rep's socket.
   function attachCall(rep, call) {
     rep.call = call;
-    call.on("state", (state) => send(rep, { type: "call-state", callId: call.id, state }));
+    if (call.state === "answered") startRecording(rep, call);
+    call.on("state", (state) => {
+      if (state === "answered") startRecording(rep, call);
+      send(rep, { type: "call-state", callId: call.id, state });
+    });
     call.on("audio", (pcm) => {
       const { ws } = rep;
       if (rep.call !== call || ws.readyState !== ws.OPEN || ws.bufferedAmount > MAX_WS_BUFFER) return;
@@ -95,6 +127,8 @@ export function createVoiceGateway({ ua, server, path = "/voice", verifyToken, o
     let call;
     try {
       call = ua.dial(msg.to, { ringTimeoutSeconds: Number(msg.ringSeconds) || undefined, label: `${rep.name} → ${msg.to}` });
+      // The CRM lead this call is for — labels its recording.
+      call.leadId = Number(msg.leadId) || null;
     } catch (err) {
       return send(rep, { type: "dial-error", ref: msg.ref, message: err.message, busy: err instanceof ChannelsBusyError });
     }
@@ -157,6 +191,7 @@ export function createVoiceGateway({ ua, server, path = "/voice", verifyToken, o
         return;
       }
       const call = leg.call;
+      call.leadId = Number(legIn.ref) || null; // Multi Line legs are keyed by lead id
       call.on("state", (state) => {
         if (state === "calling") leg.status = "initiated";
         else if (state === "ringing") leg.status = "ringing";
