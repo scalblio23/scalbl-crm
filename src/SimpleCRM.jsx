@@ -10642,7 +10642,7 @@ export default function SimpleCRM() {
         )}
 
         {page === "ai-voice" && <AIVoicePanel />}
-        {page === "csm" && <CsmPanel />}
+        {page === "csm" && <CsmPanel canManageWhatsApp={canManageUsers} />}
       </main>
 
       {/* Manual dial — floating softphone button, available on every

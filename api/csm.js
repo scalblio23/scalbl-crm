@@ -25,7 +25,7 @@ import {
   linkCsmWhatsApp,
   CSM_MOODS,
 } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidClientRole, canManageWhatsApp } from "../server/auth.js";
 import { callWhatsAppGateway } from "../server/voiceConfig.js";
 
 const MAX_COMMENT_LENGTH = 5000;
@@ -120,6 +120,11 @@ export default async function handler(req, res) {
       }
 
       if (action === "link-whatsapp") {
+        // A client's chat is locked once assigned: only a super admin can
+        // assign, change or remove it.
+        if (!canManageWhatsApp(user.role)) {
+          return res.status(403).json({ error: "Only a super admin can assign or change a client's WhatsApp chat." });
+        }
         const chatId = req.body?.chatId ? String(req.body.chatId) : null;
         const chatName = String(req.body?.chatName || "").slice(0, 200);
         const result = await linkCsmWhatsApp(clientId, chatId, chatName, author);
