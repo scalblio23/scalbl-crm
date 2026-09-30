@@ -46,6 +46,7 @@ import {
   RefreshCw,
   Send,
   Layers,
+  HeartHandshake,
   Play,
   Mic,
   Square,
@@ -89,6 +90,7 @@ import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
 import AIVoicePanel from "./components/AIVoicePanel";
+import CsmPanel from "./components/CsmPanel";
 import RecordingPlayer from "./components/RecordingPlayer";
 import {
   timezoneOptions,
@@ -883,6 +885,7 @@ const navItems = [
   { key: "portal", label: "Portal", icon: Globe },
   { key: "working-hours", label: "Working Hours", icon: Clock },
   { key: "clients", label: "Clients", icon: Briefcase },
+  { key: "csm", label: "CSM", icon: HeartHandshake },
   { key: "calendars", label: "Calendars", icon: Calendar },
   { key: "automations", label: "Automations", icon: Zap },
   { key: "ai-voice", label: "AI Voice", icon: Bot },
@@ -10639,6 +10642,7 @@ export default function SimpleCRM() {
         )}
 
         {page === "ai-voice" && <AIVoicePanel />}
+        {page === "csm" && <CsmPanel />}
       </main>
 
       {/* Manual dial — floating softphone button, available on every
