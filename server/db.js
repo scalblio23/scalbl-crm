@@ -157,6 +157,7 @@ export async function ensureSchema() {
         AND to_regclass('public.ai_voice_settings') IS NOT NULL
         AND to_regclass('public.tag_booking_links') IS NOT NULL
         AND to_regclass('public.csm_entries') IS NOT NULL
+        AND to_regclass('public.csm_files') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'messages' AND column_name = 'recording_sid'
@@ -613,6 +614,21 @@ export async function ensureSchema() {
       )
     `);
     await query(`CREATE INDEX IF NOT EXISTS csm_entries_client_idx ON csm_entries (client_id, created_at)`);
+    // Files and pictures attached to a CSM comment, stored in the
+    // database (kept small: pictures are shrunk in the browser first,
+    // and each file is capped — see api/csm.js).
+    await query(`
+      CREATE TABLE IF NOT EXISTS csm_files (
+        id SERIAL PRIMARY KEY,
+        entry_id INTEGER NOT NULL REFERENCES csm_entries(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        data BYTEA NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS csm_files_entry_idx ON csm_files (entry_id)`);
     // The starting client list — only into an empty table, so a client
     // removed later doesn't come back.
     await query(
@@ -2747,9 +2763,34 @@ async function getCsmClient(id) {
   return clients.find((c) => c.id === Number(id)) || null;
 }
 
+function csmFileMeta(r) {
+  return { id: r.id, name: r.name, mimeType: r.mime_type, size: r.size };
+}
+
 export async function getCsmEntries(clientId) {
   const rows = await query("SELECT * FROM csm_entries WHERE client_id = $1 ORDER BY created_at, id", [clientId]);
-  return rows.map(csmEntryFromRow);
+  const entries = rows.map(csmEntryFromRow);
+  const files = await query(
+    `SELECT f.id, f.entry_id, f.name, f.mime_type, f.size
+       FROM csm_files f JOIN csm_entries e ON e.id = f.entry_id
+      WHERE e.client_id = $1
+      ORDER BY f.id`,
+    [clientId]
+  );
+  const byEntry = new Map();
+  for (const f of files) {
+    if (!byEntry.has(f.entry_id)) byEntry.set(f.entry_id, []);
+    byEntry.get(f.entry_id).push(csmFileMeta(f));
+  }
+  for (const e of entries) e.files = byEntry.get(e.id) || [];
+  return entries;
+}
+
+// One attached file's bytes, for GET /api/csm?fileId=.
+export async function getCsmFile(id) {
+  const rows = await query("SELECT id, name, mime_type, size, data FROM csm_files WHERE id = $1", [id]);
+  if (!rows[0]) return null;
+  return { ...csmFileMeta(rows[0]), data: rows[0].data };
 }
 
 async function addCsmEntry(clientId, { kind, text = "", value = null, author = "" }) {
@@ -2774,8 +2815,17 @@ export async function deleteCsmClient(id) {
   await query("DELETE FROM csm_clients WHERE id = $1", [id]);
 }
 
-export async function addCsmComment(clientId, text, author) {
+// files: [{ name, mimeType, data: Buffer }]
+export async function addCsmComment(clientId, text, author, files = []) {
   const entry = await addCsmEntry(clientId, { kind: "comment", text, author });
+  entry.files = [];
+  for (const f of files) {
+    const rows = await query(
+      "INSERT INTO csm_files (entry_id, name, mime_type, size, data) VALUES ($1,$2,$3,$4,$5) RETURNING id, name, mime_type, size",
+      [entry.id, f.name, f.mimeType, f.data.length, f.data]
+    );
+    entry.files.push(csmFileMeta(rows[0]));
+  }
   return { entry, client: await getCsmClient(clientId) };
 }
 
