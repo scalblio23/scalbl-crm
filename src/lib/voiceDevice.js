@@ -107,3 +107,21 @@ export function onIncomingCall(listener) {
 export function onVoiceStatus(listener) {
   return sip.onStatus(listener);
 }
+
+// Live transfer over the SIP trunk — the gateway does the bridging
+// (Twilio transfers go through the backend's conference API instead).
+export function startSipTransfer(to) {
+  sip.startTransfer(to);
+}
+
+export function cancelSipTransfer() {
+  sip.cancelTransfer();
+}
+
+export function completeSipTransfer() {
+  sip.completeTransfer();
+}
+
+export function onSipTransferState(listener) {
+  return sip.onTransferState(listener);
+}

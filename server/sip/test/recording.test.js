@@ -172,10 +172,11 @@ test("gateway records an answered call and reports it with the lead id", async (
   trunk.reply(invite, 200, "OK", { toTag, body: media.sdp(["PCMA"]), headers: { contact: "<sip:callee@127.0.0.1>" } });
   await nextMsg((m) => m.type === "call-state" && m.state === "answered");
 
-  // 2.2 s from the rep, and some audio from the lead.
-  for (const f of frames(110, 5000)) ws.send(Buffer.from(f.buffer));
-  for (let i = 0; i < 10; i++) media.sendTo(invite.body, 8, encode("PCMA", new Int16Array(160).fill(4000)));
-  await new Promise((r) => setTimeout(r, 200));
+  // 2.2 s from the lead (recorded as it arrives), and some from the rep
+  // (recorded as it's sent, at real-time pace).
+  for (let i = 0; i < 110; i++) media.sendTo(invite.body, 8, encode("PCMA", new Int16Array(160).fill(4000)));
+  for (const f of frames(10, 5000)) ws.send(Buffer.from(f.buffer));
+  await new Promise((r) => setTimeout(r, 400));
 
   const byePromise = trunk.next("bye");
   ws.send(JSON.stringify({ type: "hangup" }));

@@ -44,12 +44,19 @@ export class Call extends EventEmitter {
     this.state = "new";
     this.rtp = new RtpSession({ portMin: this.config.rtpPortMin, portMax: this.config.rtpPortMax });
     this.rtp.on("audio", (pcm) => {
-      if (this.recorder && this.state === "answered") this.recorder.write("remote", pcm);
+      if (this.isRecording()) this.recorder.write("remote", pcm);
       this.emit("audio", pcm);
     });
+    // What we send — the rep's mic, plus the third party during a live
+    // transfer — is the recording's other side.
+    this.rtp.on("sent", (pcm) => {
+      if (this.isRecording()) this.recorder.write("local", pcm);
+    });
     // Set by the gateway once the call is answered and belongs to a rep
-    // (see sip/recorder.js); both sides of the audio are fed to it.
+    // (see sip/recorder.js). recordingStopped ends it early — when the
+    // rep hands the call over in a live transfer and drops off.
     this.recorder = null;
+    this.recordingStopped = false;
     this.rtp.on("dtmf", (digit) => this.emit("dtmf", digit));
     this.rtp.on("error", (err) => this.log.warn(`[rtp] ${err.message}`));
     this.sessionId = Math.floor(Math.random() * 1e9);
@@ -522,10 +529,18 @@ export class Call extends EventEmitter {
     }
   }
 
-  pushAudio(pcm) {
-    if (this.state !== "answered") return;
-    this.recorder?.write("local", pcm);
-    this.rtp.pushAudio(pcm);
+  // `source` keeps separate streams (the rep's mic, the other side of a
+  // live transfer) mixed rather than queued one after another.
+  pushAudio(pcm, source = "main") {
+    if (this.state === "answered") this.rtp.pushAudio(pcm, source);
+  }
+
+  dropAudioSource(source) {
+    this.rtp.dropSource(source);
+  }
+
+  isRecording() {
+    return !!this.recorder && !this.recordingStopped && this.state === "answered";
   }
 
   fail(message) {

@@ -10,10 +10,10 @@ import dgram from "dgram";
 import crypto from "crypto";
 import { EventEmitter } from "events";
 import { encode, decode, silenceByte } from "./g711.js";
+import { FrameMixer } from "./mixer.js";
 
 const SAMPLES_PER_FRAME = 160; // 20 ms at 8 kHz
 const FRAME_MS = 20;
-const MAX_QUEUED_SAMPLES = 8000 * 0.4; // cap mic backlog at 400 ms
 const DTMF_EVENTS = "0123456789*#ABCD";
 
 export class RtpSession extends EventEmitter {
@@ -31,7 +31,9 @@ export class RtpSession extends EventEmitter {
     this.seq = crypto.randomBytes(2).readUInt16BE(0);
     this.timestamp = crypto.randomBytes(4).readUInt32BE(0);
     this.marker = true;
-    this.queue = new Int16Array(0);
+    // Outgoing audio, one queue per source ("main" = the rep's mic; a
+    // live transfer adds the other call's audio), summed per frame.
+    this.mixer = new FrameMixer();
     this.dtmfQueue = [];
     this.dtmfActive = null;
     this.lastRxDtmfTs = null;
@@ -109,14 +111,15 @@ export class RtpSession extends EventEmitter {
     tick();
   }
 
-  // Microphone audio in, as 16-bit 8 kHz mono samples of any length.
-  pushAudio(samples) {
-    if (!samples.length) return;
-    let merged = new Int16Array(this.queue.length + samples.length);
-    merged.set(this.queue, 0);
-    merged.set(samples, this.queue.length);
-    if (merged.length > MAX_QUEUED_SAMPLES) merged = merged.subarray(merged.length - MAX_QUEUED_SAMPLES);
-    this.queue = merged;
+  // Audio in, as 16-bit 8 kHz mono samples of any length, from
+  // `source` (the rep's mic unless said otherwise).
+  pushAudio(samples, source = "main") {
+    this.mixer.push(samples, source);
+  }
+
+  // Stops mixing in a source (e.g. the other side of a transfer hung up).
+  dropSource(source) {
+    this.mixer.drop(source);
   }
 
   sendDtmf(digits) {
@@ -146,11 +149,9 @@ export class RtpSession extends EventEmitter {
   sendFrame() {
     // Take this frame's audio off the queue either way, so the mic
     // doesn't fall behind while DTMF is playing.
-    let frame;
-    if (this.queue.length >= SAMPLES_PER_FRAME) {
-      frame = this.queue.subarray(0, SAMPLES_PER_FRAME);
-      this.queue = this.queue.subarray(SAMPLES_PER_FRAME);
-    }
+    const frame = this.mixer.take();
+    // What actually goes to the far end — the call recording's "local" side.
+    if (frame) this.emit("sent", frame);
 
     if (!this.codec || this.paused) {
       this.timestamp = (this.timestamp + SAMPLES_PER_FRAME) >>> 0;

@@ -14,6 +14,8 @@
 //   { type: "hangup" }
 //   { type: "answer", callId }   { type: "reject", callId }
 //   { type: "dtmf", digits }
+//   { type: "transfer-start", to }   { type: "transfer-cancel" }
+//   { type: "transfer-complete" }
 // Gateway → browser:
 //   { type: "hello", registration, channels, callerId }
 //   { type: "registration", ... }
@@ -26,8 +28,20 @@
 //   { type: "multi-answered", ref, legRef, callId }
 //   { type: "multi-ended", ref }
 //   { type: "dtmf", callId, digit }
+//   { type: "transfer-state", status, to, message }
+//       placing | ringing | connected | no-answer | busy | failed |
+//       left | cancelled | completed | error (a request that
+//       couldn't be carried out; the transfer itself is unchanged)
+//
+// Live transfer: the rep's call stays up while the gateway rings a
+// third party on another channel. Once they answer, all three hear
+// each other (the gateway mixes the audio — each person hears the
+// other two). "Complete" hands the lead over: the two outside calls
+// are bridged directly and the rep drops off; when either of them
+// hangs up, the other is hung up too.
 import { WebSocketServer } from "ws";
 import { ChannelsBusyError } from "./ua.js";
+import { TimedMixer } from "./mixer.js";
 
 const MAX_WS_BUFFER = 64 * 1024; // drop outbound audio rather than build latency
 
@@ -111,15 +125,148 @@ export function createVoiceGateway({
       send(rep, { type: "call-state", callId: call.id, state });
     });
     call.on("audio", (pcm) => {
-      const { ws } = rep;
-      if (rep.call !== call || ws.readyState !== ws.OPEN || ws.bufferedAmount > MAX_WS_BUFFER) return;
-      ws.send(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength), { binary: true });
+      if (rep.call !== call) return;
+      if (rep.earMixer) rep.earMixer.push(pcm, "lead");
+      else sendAudio(rep, pcm);
     });
     call.on("dtmf", (digit) => send(rep, { type: "dtmf", callId: call.id, digit }));
     call.once("ended", (info) => {
+      if (call.handedOver) return; // the rep already left it (live transfer)
       if (rep.call === call) rep.call = null;
+      endTransfer(rep, "hangup");
       send(rep, { type: "call-ended", callId: call.id, ...info, message: endedMessage(info) });
     });
+  }
+
+  function sendAudio(rep, pcm) {
+    const { ws } = rep;
+    if (ws.readyState !== ws.OPEN || ws.bufferedAmount > MAX_WS_BUFFER) return;
+    ws.send(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength), { binary: true });
+  }
+
+  // ---------- live transfer ----------
+
+  function sendTransfer(rep, status, message = "") {
+    send(rep, { type: "transfer-state", status, to: rep.transfer?.to || "", message });
+  }
+
+  function handleTransferStart(rep, msg) {
+    const lead = rep.call;
+    if (!lead || lead.state !== "answered") {
+      return send(rep, { type: "transfer-state", status: "failed", to: msg.to || "", message: "The call isn't connected yet." });
+    }
+    if (rep.transfer) return; // one at a time
+    let target;
+    try {
+      target = ua.dial(msg.to, { label: `${rep.name} transfer → ${msg.to}` });
+    } catch (err) {
+      const message =
+        err instanceof ChannelsBusyError ? "No free line to ring them on — every SIP channel is in use." : err.message;
+      return send(rep, { type: "transfer-state", status: "failed", to: msg.to || "", message });
+    }
+    const transfer = { call: target, lead, to: target.remoteNumber || msg.to, status: "placing", unwire: [] };
+    rep.transfer = transfer;
+    sendTransfer(rep, "placing");
+    target.on("state", (state) => {
+      if (rep.transfer !== transfer) return;
+      if (state === "ringing" && transfer.status === "placing") {
+        transfer.status = "ringing";
+        sendTransfer(rep, "ringing");
+      } else if (state === "answered") {
+        transfer.status = "connected";
+        startThreeWay(rep, transfer);
+        sendTransfer(rep, "connected");
+      }
+    });
+    target.once("ended", (info) => {
+      if (rep.transfer !== transfer) return; // handed over, or already torn down
+      const status = transfer.cancelled
+        ? "cancelled"
+        : transfer.status === "connected"
+        ? "left"
+        : info.reason === "busy" || info.reason === "declined"
+        ? "busy"
+        : info.reason === "no-answer" || info.reason === "cancelled"
+        ? "no-answer"
+        : "failed";
+      stopThreeWay(rep, transfer);
+      rep.transfer = null;
+      send(rep, {
+        type: "transfer-state",
+        status,
+        to: transfer.to,
+        message: status === "failed" ? endedMessage(info) : "",
+      });
+    });
+  }
+
+  // Everyone hears the other two: the lead gets the rep + third party,
+  // the third party gets the rep + lead, the rep gets lead + third party.
+  function startThreeWay(rep, transfer) {
+    const { lead, call: target } = transfer;
+    const leadAudio = (pcm) => target.pushAudio(pcm, "bridge");
+    const targetAudio = (pcm) => {
+      lead.pushAudio(pcm, "bridge");
+      if (rep.earMixer && rep.transfer === transfer) rep.earMixer.push(pcm, "transfer");
+    };
+    lead.on("audio", leadAudio);
+    target.on("audio", targetAudio);
+    transfer.unwire.push(() => lead.off("audio", leadAudio), () => target.off("audio", targetAudio));
+    rep.earMixer = new TimedMixer((frame) => sendAudio(rep, frame));
+  }
+
+  function stopThreeWay(rep, transfer) {
+    for (const fn of transfer.unwire) fn();
+    transfer.unwire = [];
+    transfer.lead.dropAudioSource("bridge");
+    transfer.call.dropAudioSource("bridge");
+    rep.earMixer?.stop();
+    rep.earMixer = null;
+  }
+
+  // Ends a transfer in flight along with the rep's call (the call ended,
+  // or the rep hung up / disconnected) — the third party's leg goes too.
+  function endTransfer(rep) {
+    const transfer = rep.transfer;
+    if (!transfer) return;
+    stopThreeWay(rep, transfer);
+    rep.transfer = null;
+    transfer.call.hangup();
+  }
+
+  function handleTransferCancel(rep) {
+    const transfer = rep.transfer;
+    if (!transfer) return;
+    transfer.cancelled = true;
+    transfer.call.hangup(); // its "ended" reports "cancelled"
+  }
+
+  // Hands the lead over to the third party and takes the rep out.
+  function handleTransferComplete(rep) {
+    const transfer = rep.transfer;
+    if (!transfer || transfer.status !== "connected" || rep.call !== transfer.lead) {
+      return send(rep, { type: "transfer-state", status: "error", to: transfer?.to || "", message: "They aren't on the line yet." });
+    }
+    const { lead, call: target } = transfer;
+    // Keep the lead ↔ third party audio; drop the rep's ear and mic.
+    rep.earMixer?.stop();
+    rep.earMixer = null;
+    lead.dropAudioSource("main");
+    target.dropAudioSource("main");
+    lead.recordingStopped = true; // the recording covers up to the handover
+    lead.handedOver = true;
+    rep.transfer = null;
+    rep.call = null;
+    // From here the two calls live on their own: when one hangs up, so
+    // does the other (and both channels are released).
+    lead.once("ended", () => target.hangup());
+    target.once("ended", () => {
+      for (const fn of transfer.unwire) fn();
+      lead.hangup();
+    });
+    log.log(`[gateway] ${rep.name} handed ${lead.remoteNumber} over to ${transfer.to}`);
+    send(rep, { type: "transfer-state", status: "completed", to: transfer.to, message: "" });
+    send(rep, { type: "call-ended", callId: lead.id, reason: "transferred", status: 0, sipReason: "", message: "", durationMs: 0 });
   }
 
   function handleDial(rep, msg) {
@@ -230,6 +377,7 @@ export function createVoiceGateway({
   }
 
   function hangupAll(rep) {
+    endTransfer(rep);
     rep.call?.hangup();
     if (rep.multi) {
       const multi = rep.multi;
@@ -322,6 +470,7 @@ export function createVoiceGateway({
         const copy = new Int16Array(data.length >> 1);
         Buffer.from(copy.buffer).set(data.subarray(0, copy.length * 2));
         rep.call.pushAudio(copy);
+        if (rep.transfer?.status === "connected") rep.transfer.call.pushAudio(copy);
         return;
       }
       let msg;
@@ -343,6 +492,12 @@ export function createVoiceGateway({
           return withdrawOffer(rep, msg.callId);
         case "dtmf":
           return rep.call?.sendDtmf(msg.digits);
+        case "transfer-start":
+          return handleTransferStart(rep, msg);
+        case "transfer-cancel":
+          return handleTransferCancel(rep);
+        case "transfer-complete":
+          return handleTransferComplete(rep);
         case "ping":
           return send(rep, { type: "pong" });
         default:

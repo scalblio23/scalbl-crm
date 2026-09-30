@@ -9,7 +9,7 @@
     "dev:all": "concurrently -n vite,server -c blue,green \"npm:dev\" \"npm:server\"",
     "voice-gateway": "node server/voiceGateway.js",
     "dev:sip": "concurrently -n vite,server,voice -c blue,green,magenta \"npm:dev\" \"npm:server\" \"npm:voice-gateway\"",
-    "test:sip": "node --test server/sip/test/*.test.js",
+    "test:sip": "node --test --test-timeout=30000 server/sip/test/*.test.js",
     "build": "vite build",
     "preview": "vite preview"
   },

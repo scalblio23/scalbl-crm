@@ -153,6 +153,7 @@ let pending = null; // { ref, call, resolve, reject } — a dial waiting on the 
 let nextRef = 1;
 const incomingOffers = new Map(); // callId → SipCall
 const incomingListeners = new Set();
+const transferListeners = new Set();
 const statusListeners = new Set();
 
 function send(obj) {
@@ -311,6 +312,9 @@ function handleMessage(msg) {
     }
     case "dtmf":
       current?.emit("dtmf", msg.digit);
+      return;
+    case "transfer-state":
+      for (const fn of transferListeners) fn({ status: msg.status, to: msg.to, message: msg.message || "" });
       return;
     case "incoming": {
       const offer = new SipCall("inbound", { callId: msg.callId, from: msg.from, name: msg.name });
@@ -573,6 +577,30 @@ export function hangUp() {
 
 export function sendDigits(digits) {
   current?.sendDigits(digits);
+}
+
+// ---------- live transfer ----------
+// The gateway rings `to` on another channel while this call carries
+// on; progress arrives through onTransferState as { status, to,
+// message } — placing | ringing | connected | no-answer | busy |
+// failed | left | cancelled | completed.
+export function startTransfer(to) {
+  send({ type: "transfer-start", to: toE164(to) });
+}
+
+export function cancelTransfer() {
+  send({ type: "transfer-cancel" });
+}
+
+// Hands the lead to the third party; this call then ends (reason
+// "transferred") while the two of them stay connected.
+export function completeTransfer() {
+  send({ type: "transfer-complete" });
+}
+
+export function onTransferState(listener) {
+  transferListeners.add(listener);
+  return () => transferListeners.delete(listener);
 }
 
 export function onIncomingCall(listener) {
