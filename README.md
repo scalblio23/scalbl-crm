@@ -64,6 +64,25 @@ works over SIP once there are 2 or more channels. The gateway rings each
 lead on its own channel, bridges whoever answers first and cancels the
 others.
 
+### Live transfer
+
+The live-call card's **Transfer this call** works over the SIP trunk too,
+with the same panel and states as the Twilio version (described under
+Calling (Twilio) below). The voice gateway does the work itself
+(`transfer-start` / `transfer-cancel` / `transfer-complete` over the
+browser's WebSocket; see `server/sip/gateway.js`):
+
+- it rings the number on another channel while the rep stays on with the
+  lead;
+- once they answer, it mixes the audio so each of the three hears the
+  other two;
+- **Complete transfer & drop off** bridges the lead and the third party
+  directly and ends the rep's call as "transferred". When either of them
+  hangs up, the other is hung up too.
+
+A transfer uses a second channel for as long as the third party is on the
+line, and the call recording stops at the handover.
+
 ### Call recording
 
 The gateway records every answered call: the rep and the lead, mixed to

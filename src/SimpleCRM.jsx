@@ -80,6 +80,10 @@ import {
   getVoiceProvider,
   onIncomingCall,
   onVoiceStatus,
+  startSipTransfer,
+  cancelSipTransfer,
+  completeSipTransfer,
+  onSipTransferState,
 } from "./lib/voiceDevice";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
@@ -666,10 +670,6 @@ function LiveTransferPanel({ transfer, defaultNumber, clientName, live, onStart,
     setOpen(false);
     onStart(n);
   };
-
-  // Transfers bridge the lead through a Twilio Conference, which the
-  // SIP trunk (VOICE_PROVIDER=sip) doesn't have.
-  if (getVoiceProvider() === "sip") return null;
 
   let body;
   if (active) {
@@ -4658,6 +4658,24 @@ export default function SimpleCRM() {
     const existing = transferRef.current;
     if (!call || !calling || callEndedRef.current) return;
     if (existing && TRANSFER_ACTIVE_STATUSES.includes(existing.targetStatus)) return; // one at a time
+    // VoIPline: the voice gateway rings the third party and bridges
+    // everyone itself — progress comes back through onSipTransferState
+    // (see the effect below), not by polling.
+    if (getVoiceProvider() === "sip") {
+      setTransferState({
+        sip: true,
+        leadId: lead?.id || existing?.leadId || null,
+        to: toNumber,
+        phase: "in-conference",
+        targetStatus: "placing",
+        targetCallSid: null,
+        completed: false,
+        completing: false,
+        error: "",
+      });
+      startSipTransfer(toNumber);
+      return;
+    }
     // Already in a conference — a Multi Line call, or a second attempt
     // on a call an earlier transfer already moved — just dial the
     // third party straight into it. Otherwise (a plain Powerdialler
@@ -4732,6 +4750,11 @@ export default function SimpleCRM() {
   const cancelTransfer = () => {
     const t = transferRef.current;
     if (!t) return;
+    if (t.sip) {
+      cancelSipTransfer();
+      updateTransfer({ targetStatus: "cancelled", error: "" });
+      return;
+    }
     stopTransferPolling();
     if (t.targetCallSid) api.post("/api/transfer-cancel", { targetCallSid: t.targetCallSid }).catch(() => {});
     updateTransfer({ targetStatus: "cancelled", targetCallSid: null, error: "" });
@@ -4746,6 +4769,13 @@ export default function SimpleCRM() {
     const call = activeCallRef.current;
     if (!t || t.targetStatus !== "connected" || !call || t.completing) return;
     updateTransfer({ completing: true, error: "" });
+    if (t.sip) {
+      // The gateway confirms ("completed"), then ends this call with
+      // reason "transferred" — the normal end-of-call handling logs it
+      // as transferred and moves on.
+      completeSipTransfer();
+      return;
+    }
     try {
       await api.post("/api/transfer-complete", {
         conferenceName: t.conferenceName,
@@ -4759,6 +4789,24 @@ export default function SimpleCRM() {
       updateTransfer({ completing: false, error: err.message || "Could not complete the transfer." });
     }
   };
+
+  // VoIPline transfer progress, pushed by the voice gateway.
+  useEffect(
+    () =>
+      onSipTransferState(({ status, to, message }) => {
+        const t = transferRef.current;
+        if (!t?.sip) return;
+        if (status === "completed") {
+          updateTransfer({ completed: true, completing: false });
+        } else if (status === "error") {
+          updateTransfer({ completing: false, error: message || "That didn't work — try again." });
+        } else {
+          updateTransfer({ targetStatus: status, to: to || t.to, completing: false, error: status === "failed" ? message : "" });
+        }
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   // Clears a finished (failed/cancelled/no-answer) attempt off the
   // card, remembering only whether this call's already in a conference
@@ -5131,6 +5179,7 @@ export default function SimpleCRM() {
       const onCallEnded = (err, info) => {
         if (callEndedRef.current) return;
         callEndedRef.current = true;
+        const transferredTo = finishTransferOnCallEnd();
         setCalling(false);
         setCallStatus("idle");
         setActiveCallerId("");
@@ -5150,7 +5199,7 @@ export default function SimpleCRM() {
           if (info?.outcomeMessage) setCallError(info.outcomeMessage);
           return;
         }
-        logCallToConversation(winner, durationMs);
+        logCallToConversation(winner, durationMs, transferredTo);
         handleCallEnded(winner, durationMs);
       };
       call.on("disconnect", (info) => onCallEnded(null, info));
