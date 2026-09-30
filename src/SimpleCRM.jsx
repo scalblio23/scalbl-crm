@@ -4286,7 +4286,7 @@ export default function SimpleCRM() {
   // countdown reaching zero, or manually via "Next lead".
   const finishWrapUp = () => {
     if (!wrapUp) return;
-    const { lead, notes, durationMs, batchLeadIds } = wrapUp;
+    const { lead, notes, durationMs, batchLeadIds, error } = wrapUp;
     const status = LEAD_STATUSES.includes(wrapUp.status) ? wrapUp.status : lead.status || "New Lead";
     const durationSeconds = Math.round((durationMs || 0) / 1000);
 
@@ -4336,7 +4336,11 @@ export default function SimpleCRM() {
         if (saved?.id) setCallLog((log) => log.map((e) => (e.id === tempLogId ? saved : e)));
       })
       .catch((err) => setDbError(err.message || "Could not save the call log entry."));
-    removeLeadFromLists(lead.id);
+    // A call that failed before reaching the lead (the trunk rejected
+    // it, a network error, …) wasn't a real attempt: the lead stays in
+    // its Powerlists so it gets called again. Only this session moves
+    // past it (below).
+    if (!error) removeLeadFromLists(lead.id);
 
     if (!session) return;
     // Every lead actually dialled this round comes off the queue, not
@@ -5197,10 +5201,28 @@ export default function SimpleCRM() {
         }
         if (!winner) {
           if (info?.outcomeMessage) setCallError(info.outcomeMessage);
+          // Same as the Twilio round above: nobody answered, so this
+          // round's leads leave the session queue and the next round
+          // dials — otherwise the session would sit idle.
+          if (sessionRef.current) {
+            const dialledIds = new Set(leadsToTry.map((l) => l.id));
+            const remainingQueue = sessionRef.current.queue.filter((id) => !dialledIds.has(id));
+            if (!remainingQueue.length) {
+              setSession(null);
+              setSessionPaused(false);
+            } else {
+              setSession((s) => (s ? { ...s, queue: remainingQueue } : s));
+              if (!sessionPausedRef.current) dialNextInQueue(remainingQueue, sessionRef.current.lines);
+            }
+          }
           return;
         }
         logCallToConversation(winner, durationMs, transferredTo);
-        handleCallEnded(winner, durationMs);
+        handleCallEnded(
+          winner,
+          durationMs,
+          leadsToTry.map((l) => l.id)
+        );
       };
       call.on("disconnect", (info) => onCallEnded(null, info));
       call.on("cancel", () => onCallEnded());
