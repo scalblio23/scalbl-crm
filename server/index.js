@@ -119,6 +119,7 @@ import tagFoldersHandler from "../api/tag-folders.js";
 import tagBookingLinksHandler from "../api/tag-booking-links.js";
 import recordingStatusHandler from "../api/recording-status.js";
 import recordingAudioHandler from "../api/recording-audio.js";
+import csmHandler from "../api/csm.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
 import {
@@ -1469,6 +1470,8 @@ app.all("/api/tag-folders", tagFoldersHandler);
 app.all("/api/tag-booking-links", tagBookingLinksHandler);
 app.all("/api/recording-status", recordingStatusHandler);
 app.all("/api/recording-audio", recordingAudioHandler);
+// CSM tab — does its own auth and client-role check (see api/csm.js).
+app.all("/api/csm", csmHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
 app.listen(PORT, () => {

@@ -156,6 +156,7 @@ export async function ensureSchema() {
       SELECT to_regclass('public.tag_folders') IS NOT NULL
         AND to_regclass('public.ai_voice_settings') IS NOT NULL
         AND to_regclass('public.tag_booking_links') IS NOT NULL
+        AND to_regclass('public.csm_entries') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'messages' AND column_name = 'recording_sid'
@@ -586,6 +587,40 @@ export async function ensureSchema() {
     // api/recording-status.js / api/recording-audio.js). Null on every
     // other message type.
     await query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS recording_sid TEXT`);
+    // ---------- CSM (client success) tab ----------
+    // One row per client being looked after, with the current
+    // retention confidence (0.1–1.0) and mood; csm_entries is that
+    // client's timeline — comments, plus a line for every confidence /
+    // mood change so the history of both is kept.
+    await query(`
+      CREATE TABLE IF NOT EXISTS csm_clients (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        confidence NUMERIC(2,1),
+        mood TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS csm_entries (
+        id SERIAL PRIMARY KEY,
+        client_id INTEGER NOT NULL REFERENCES csm_clients(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'comment',
+        text TEXT,
+        value TEXT,
+        author TEXT,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS csm_entries_client_idx ON csm_entries (client_id, created_at)`);
+    // The starting client list — only into an empty table, so a client
+    // removed later doesn't come back.
+    await query(
+      `INSERT INTO csm_clients (name)
+       SELECT unnest($1::text[]) WHERE NOT EXISTS (SELECT 1 FROM csm_clients)
+       ON CONFLICT (name) DO NOTHING`,
+      [CSM_SEED_CLIENTS]
+    );
     }
     // Deliberately OUTSIDE the fast path above: a production database
     // that already has every table still needs these once, and they're
@@ -2651,4 +2686,111 @@ export async function setTagBookingLink(tagName, bookingLink) {
     );
   }
   return getTagBookingLinks();
+}
+
+// ---------- CSM (client success) ----------
+
+const CSM_SEED_CLIENTS = [
+  "Cable Co",
+  "Elecsol",
+  "Anil",
+  "Imran",
+  "Wilco",
+  "Unitree",
+  "Veralba",
+  "Integral Marketing",
+  "Keevo",
+  "Loncinis",
+  "Edara Systems",
+  "Solar Battery Rebate",
+  "Fundd",
+];
+
+export const CSM_MOODS = ["happy", "satisfied", "neutral", "concerned", "frustrated"];
+
+function csmClientFromRow(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    confidence: r.confidence === null || r.confidence === undefined ? null : Number(r.confidence),
+    mood: r.mood || null,
+    lastActivityAt: r.last_activity_at || null,
+    commentCount: Number(r.comment_count || 0),
+  };
+}
+
+function csmEntryFromRow(r) {
+  return {
+    id: r.id,
+    clientId: r.client_id,
+    kind: r.kind,
+    text: r.text || "",
+    value: r.value,
+    author: r.author || "",
+    createdAt: r.created_at,
+  };
+}
+
+export async function getCsmClients() {
+  const rows = await query(`
+    SELECT c.*,
+           (SELECT max(e.created_at) FROM csm_entries e WHERE e.client_id = c.id) AS last_activity_at,
+           (SELECT count(*) FROM csm_entries e WHERE e.client_id = c.id AND e.kind = 'comment') AS comment_count
+      FROM csm_clients c
+     ORDER BY lower(c.name)
+  `);
+  return rows.map(csmClientFromRow);
+}
+
+async function getCsmClient(id) {
+  const clients = await getCsmClients();
+  return clients.find((c) => c.id === Number(id)) || null;
+}
+
+export async function getCsmEntries(clientId) {
+  const rows = await query("SELECT * FROM csm_entries WHERE client_id = $1 ORDER BY created_at, id", [clientId]);
+  return rows.map(csmEntryFromRow);
+}
+
+async function addCsmEntry(clientId, { kind, text = "", value = null, author = "" }) {
+  const rows = await query(
+    "INSERT INTO csm_entries (client_id, kind, text, value, author) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+    [clientId, kind, text, value === null ? null : String(value), author]
+  );
+  return csmEntryFromRow(rows[0]);
+}
+
+// Returns { client } or { error } (name missing / already taken).
+export async function createCsmClient(name, author) {
+  const rows = await query("INSERT INTO csm_clients (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING id", [
+    name,
+  ]);
+  if (!rows[0]) return { error: `There's already a client called "${name}".` };
+  await addCsmEntry(rows[0].id, { kind: "created", text: "Client added", author });
+  return { client: await getCsmClient(rows[0].id) };
+}
+
+export async function deleteCsmClient(id) {
+  await query("DELETE FROM csm_clients WHERE id = $1", [id]);
+}
+
+export async function addCsmComment(clientId, text, author) {
+  const entry = await addCsmEntry(clientId, { kind: "comment", text, author });
+  return { entry, client: await getCsmClient(clientId) };
+}
+
+// Confidence (0.1–1.0) or mood changes update the client and leave a
+// line on its timeline. Returns null if the client doesn't exist.
+export async function setCsmConfidence(clientId, confidence, author) {
+  const rows = await query("UPDATE csm_clients SET confidence = $2 WHERE id = $1 RETURNING id", [clientId, confidence]);
+  if (!rows[0]) return null;
+  const entry = await addCsmEntry(clientId, { kind: "confidence", value: confidence.toFixed(1), author });
+  return { entry, client: await getCsmClient(clientId) };
+}
+
+export async function setCsmMood(clientId, mood, author) {
+  const rows = await query("UPDATE csm_clients SET mood = $2 WHERE id = $1 RETURNING id", [clientId, mood]);
+  if (!rows[0]) return null;
+  const entry = await addCsmEntry(clientId, { kind: "mood", value: mood, author });
+  return { entry, client: await getCsmClient(clientId) };
 }
