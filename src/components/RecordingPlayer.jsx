@@ -26,6 +26,7 @@ export default function RecordingPlayer({ recordingSid }) {
   const [state, setState] = useState("idle"); // idle | loading | ready | error
   const [error, setError] = useState("");
   const [blobUrl, setBlobUrl] = useState("");
+  const [blobType, setBlobType] = useState("audio/mpeg");
   const audioRef = useRef(null);
 
   // Release the object URL when the message unmounts or is reloaded.
@@ -49,7 +50,10 @@ export default function RecordingPlayer({ recordingSid }) {
       if (!raw.size) throw new Error("The recording came back empty.");
       // Pin the type: the browser picks its decoder from the Blob's
       // type, not from sniffing, and a proxy hop can lose the header.
-      const blob = raw.type === "audio/mpeg" ? raw : new Blob([raw], { type: "audio/mpeg" });
+      // (A VoIPline recording can be WAV if the voice server had no
+      // MP3 encoder — keep that type rather than mislabelling it.)
+      const blob = raw.type === "audio/mpeg" || raw.type === "audio/wav" ? raw : new Blob([raw], { type: "audio/mpeg" });
+      setBlobType(blob.type);
       setBlobUrl(URL.createObjectURL(blob));
       setState("ready");
     } catch (err) {
@@ -109,7 +113,7 @@ export default function RecordingPlayer({ recordingSid }) {
       />
       <a
         href={blobUrl}
-        download={`recording-${recordingSid}.mp3`}
+        download={`recording-${recordingSid}.${blobType === "audio/wav" ? "wav" : "mp3"}`}
         title="Download recording"
         className="p-1.5 rounded-full text-gray-500 hover:text-gray-800 hover:bg-white"
       >

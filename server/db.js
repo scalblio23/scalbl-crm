@@ -1575,6 +1575,15 @@ export async function logRecordingMessage({ leadId, name, text, time, recordingS
   return conversationId;
 }
 
+// A SIP recording the gateway deleted after its retention period:
+// the conversation keeps the entry, minus the player.
+export async function expireRecordingMessage(recordingSid, days) {
+  await query(
+    "UPDATE messages SET recording_sid = NULL, text = text || $2 WHERE recording_sid = $1",
+    [recordingSid, ` · deleted after ${days} days`]
+  );
+}
+
 // Which lead a Multi Line conference recording belongs to — the
 // batch's winner, once one leg answered. Null if nobody did (the
 // recording is just ringing, not worth keeping in a conversation).

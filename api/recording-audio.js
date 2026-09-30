@@ -9,6 +9,19 @@ import { Readable } from "node:stream";
 import { ensureSchema, getRecordingLeadTag } from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 import { fetchRecordingMedia } from "../server/twilioCore.js";
+import { mintRecordingToken, voiceGatewayHttpUrl } from "../server/voiceConfig.js";
+
+// VoIPline calls are recorded by the SIP voice gateway and kept on its
+// server (see server/sip/recorder.js), under ids like "sip-3f9a…".
+const SIP_RECORDING_RE = /^sip-[a-f0-9]{16,64}$/;
+
+async function fetchSipRecording(sid) {
+  const base = voiceGatewayHttpUrl();
+  if (!base) throw new Error("VOICE_GATEWAY_URL isn't set, so SIP recordings can't be fetched.");
+  return fetch(`${base}/recordings/${sid}`, {
+    headers: { Authorization: `Bearer ${mintRecordingToken(sid)}` },
+  });
+}
 
 export const config = {
   // Lets Vercel stream the response instead of buffering it — a long
@@ -36,7 +49,8 @@ export default async function handler(req, res) {
   }
   try {
     const sid = String(req.query?.sid || "");
-    if (!/^RE[0-9a-f]{32}$/i.test(sid)) return res.status(400).json({ error: "Invalid recording id" });
+    const isSip = SIP_RECORDING_RE.test(sid);
+    if (!isSip && !/^RE[0-9a-f]{32}$/i.test(sid)) return res.status(400).json({ error: "Invalid recording id" });
 
     const allowedTags = scopeTagsForUser(user);
     if (allowedTags) {
@@ -54,7 +68,19 @@ export default async function handler(req, res) {
     // fits under the platform's buffered-response ceiling goes that
     // way; only a long call's file is streamed, and even then without
     // a Content-Length so the bridge frames it itself.
-    const upstream = await fetchRecordingMedia(sid);
+    const upstream = isSip ? await fetchSipRecording(sid) : await fetchRecordingMedia(sid);
+    if (upstream.status !== 200 && isSip) {
+      const detail = await upstream.text().catch(() => "");
+      console.error(`[api/recording-audio] voice gateway returned ${upstream.status} for ${sid}`, detail.slice(0, 300));
+      const notFound = upstream.status === 404;
+      return res.status(notFound ? 404 : 502).json({
+        error: notFound
+          ? "This recording is no longer on the voice server."
+          : `Recording unavailable — the voice server returned ${upstream.status}${
+              upstream.status === 401 ? " (check VOICE_GATEWAY_SECRET matches on Vercel and the droplet)" : ""
+            }.`,
+      });
+    }
     if (upstream.status !== 200) {
       // The reason goes to the function logs in full and to the
       // browser in short — the player shows it in place of a dead
@@ -75,9 +101,12 @@ export default async function handler(req, res) {
           : `Recording unavailable — Twilio returned ${upstream.status}.`,
       });
     }
+    // SIP recordings are MP3 unless the gateway had to fall back to WAV.
+    const contentType = isSip ? upstream.headers.get("content-type") || "audio/mpeg" : "audio/mpeg";
+    const ext = contentType === "audio/wav" ? "wav" : "mp3";
     res.status(200);
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Content-Disposition", `inline; filename="recording-${sid}.mp3"`);
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `inline; filename="recording-${sid}.${ext}"`);
     res.setHeader("Cache-Control", "private, max-age=3600");
     res.setHeader("Accept-Ranges", "none");
     if (req.method === "HEAD" || !upstream.body) return res.end();

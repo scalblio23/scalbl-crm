@@ -63,11 +63,11 @@ export function getVoiceProvider() {
   return provider;
 }
 
-// `opts.leadId` labels the Twilio call's recording with its contact;
-// the SIP gateway doesn't record, so it has no use for it.
+// `opts.leadId` labels the call's recording with its contact (Twilio
+// and the SIP gateway both record).
 export async function placeCall(phoneNumber, identity = "rep", opts = {}) {
   return (await resolveProvider()) === "sip"
-    ? sip.placeCall(phoneNumber)
+    ? sip.placeCall(phoneNumber, opts)
     : twilio.placeCall(phoneNumber, identity, opts);
 }
 

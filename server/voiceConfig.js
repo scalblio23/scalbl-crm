@@ -57,6 +57,37 @@ export function verifyGatewayToken(token, env = process.env) {
   }
 }
 
+// ---------- recordings ----------
+// SIP call recordings live on the gateway (see server/sip/recorder.js).
+// The CRM backend fetches them on a logged-in user's behalf with a
+// short-lived token scoped to one recording, signed with the same
+// shared secret.
+const RECORDING_AUDIENCE = "voice-recording";
+
+export function mintRecordingToken(recordingId, env = process.env) {
+  return jwt.sign({ sub: String(recordingId) }, gatewaySecret(env), { audience: RECORDING_AUDIENCE, expiresIn: "2m" });
+}
+
+// True if `token` grants access to `recordingId`.
+export function verifyRecordingToken(token, recordingId, env = process.env) {
+  try {
+    const claims = jwt.verify(String(token || ""), gatewaySecret(env), { audience: RECORDING_AUDIENCE });
+    return claims.sub === String(recordingId);
+  } catch {
+    return false;
+  }
+}
+
+// The gateway's HTTP(S) base, from its WebSocket URL:
+// wss://voice.example.com/voice → https://voice.example.com
+export function voiceGatewayHttpUrl(env = process.env) {
+  const wsUrl = voiceGatewayUrl(env);
+  if (!wsUrl) return "";
+  const url = new URL(wsUrl);
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  return url.origin;
+}
+
 // Body for GET /api/token when the SIP provider is active.
 export function sipTokenResponse(user, env = process.env) {
   const callerIds = String(env.SIP_CALLER_IDS || env.SIP_CALLER_ID || "")
