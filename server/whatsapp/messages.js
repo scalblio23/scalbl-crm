@@ -1,5 +1,7 @@
 // Turns raw WhatsApp (Baileys) messages into the small shape the CRM
-// stores: { id, chatId, fromMe, sender, text, timestamp, media }.
+// stores: { id, chatId, fromMe, sender, senderJid, senderAltJid, text,
+// timestamp, media }. `sender` is "" when no name is known yet — the
+// service resolves it (contacts, group members, phone number).
 // Kept free of any connection state so it can be tested on its own.
 import { getContentType, normalizeMessageContent } from "baileys";
 
@@ -84,8 +86,11 @@ export function normalizeMessage(msg, names = () => "") {
   }
 
   const fromMe = Boolean(msg.key.fromMe);
+  // WhatsApp increasingly identifies people by a private id (…@lid);
+  // the key's *Alt field then carries their phone-number id, or vice versa.
   const senderJid = fromMe ? "" : msg.key.participant || msg.participant || chatId;
-  const sender = fromMe ? "" : msg.pushName || names(senderJid) || phoneFromJid(senderJid) || "Client";
+  const senderAltJid = fromMe ? "" : (msg.key.participant ? msg.key.participantAlt : msg.key.remoteJidAlt) || "";
+  const sender = fromMe ? "" : msg.pushName || names(senderJid, senderAltJid) || "";
   const label =
     MEDIA_LABELS[type] && type === "documentMessage" && inner.fileName ? `📄 ${inner.fileName}` : MEDIA_LABELS[type];
 
@@ -96,6 +101,8 @@ export function normalizeMessage(msg, names = () => "") {
     chatId,
     fromMe,
     sender,
+    senderJid,
+    senderAltJid,
     text: finalText,
     placeholder: label || "",
     timestamp: toSeconds(msg.messageTimestamp) || Math.floor(Date.now() / 1000),
