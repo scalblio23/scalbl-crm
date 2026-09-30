@@ -1,6 +1,108 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronDown, Loader2, MessageCircle, Plus, Search, Send, Trash2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  Download,
+  FileText,
+  Loader2,
+  MessageCircle,
+  Paperclip,
+  Plus,
+  Search,
+  Send,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import { api } from "../lib/api";
+
+// Same base-URL convention as lib/api.js — attached files are loaded
+// straight into <img>/<a> tags, which don't go through api.get.
+const API_BASE = import.meta.env.VITE_CALL_SERVER_URL || "";
+const fileUrl = (id, { download = false } = {}) => `${API_BASE}/api/csm?fileId=${id}${download ? "&download=1" : ""}`;
+
+// ---------- attachments ----------
+// Kept under the server's 3MB-per-comment cap: pictures are shrunk in
+// the browser, and a batch that's too big for one comment goes out as
+// several.
+const MAX_FILE_BYTES = 3 * 1024 * 1024;
+const BATCH_BYTES = 2.8 * 1024 * 1024;
+const MAX_IMAGE_SIDE = 1920;
+
+const isImage = (mimeType) => /^image\/(png|jpe?g|gif|webp|avif)$/.test(mimeType || "");
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Photos straight off a phone are several MB; resize anything large
+// to at most 1920px on its longest side as a JPEG. GIFs are left alone
+// (they'd lose their animation).
+async function shrinkImage(file) {
+  if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return file;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return file;
+  }
+  const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(bitmap.width, bitmap.height));
+  if (scale === 1 && file.size <= 1.5 * 1024 * 1024) return file;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff"; // transparent PNGs get a white background as JPEG
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+  if (!blob || blob.size >= file.size) return file;
+  return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+}
+
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(new Error(`Couldn't read ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+// ---------- client list sorting ----------
+const SORTS = [
+  { key: "name", label: "Name (A–Z)" },
+  { key: "confidence-asc", label: "Confidence — lowest first" },
+  { key: "confidence-desc", label: "Confidence — highest first" },
+  { key: "mood", label: "Mood — unhappiest first" },
+  { key: "recent", label: "Recent activity" },
+];
+const MOOD_RANK = { frustrated: 0, concerned: 1, neutral: 2, satisfied: 3, happy: 4 };
+const SORT_STORAGE_KEY = "csm.clientSort";
+
+// Clients with nothing set for the sorted field go to the bottom;
+// ties fall back to name.
+function sortClients(list, key) {
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const nullsLast = (get, dir) => (a, b) => {
+    const va = get(a);
+    const vb = get(b);
+    if (va === null && vb === null) return byName(a, b);
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    return (va - vb) * dir || byName(a, b);
+  };
+  const sorted = [...list];
+  if (key === "confidence-asc") sorted.sort(nullsLast((c) => c.confidence, 1));
+  else if (key === "confidence-desc") sorted.sort(nullsLast((c) => c.confidence, -1));
+  else if (key === "mood") sorted.sort(nullsLast((c) => (c.mood in MOOD_RANK ? MOOD_RANK[c.mood] : null), 1));
+  else if (key === "recent")
+    sorted.sort(nullsLast((c) => (c.lastActivityAt ? new Date(c.lastActivityAt).getTime() : null), -1));
+  else sorted.sort(byName);
+  return sorted;
+}
 
 // CSM tab — client success. Left: every client, with its retention
 // confidence and mood at a glance. Right: the selected client's
@@ -99,6 +201,20 @@ export default function CsmPanel() {
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [search, setSearch] = useState("");
   const [comment, setComment] = useState("");
+  // Files waiting to go with the next comment: { key, name, mimeType,
+  // size, data (base64), previewUrl }.
+  const [attachments, setAttachments] = useState([]);
+  const [preparingFiles, setPreparingFiles] = useState(0);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef(null);
+  const [sortKey, setSortKey] = useState(() => {
+    try {
+      const saved = localStorage.getItem(SORT_STORAGE_KEY);
+      return SORTS.some((s) => s.key === saved) ? saved : "name";
+    } catch {
+      return "name";
+    }
+  });
   const [newClientName, setNewClientName] = useState("");
   const [addingClient, setAddingClient] = useState(false);
   const [showAddClient, setShowAddClient] = useState(false);
@@ -152,10 +268,19 @@ export default function CsmPanel() {
     timelineEndRef.current?.scrollIntoView({ block: "end" });
   }, [entries, showExample, timelineFilter]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(SORT_STORAGE_KEY, sortKey);
+    } catch {
+      // private mode / storage blocked — the sort just isn't remembered
+    }
+  }, [sortKey]);
+
   const filteredClients = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return q ? clients.filter((c) => c.name.toLowerCase().includes(q)) : clients;
-  }, [clients, search]);
+    const matching = q ? clients.filter((c) => c.name.toLowerCase().includes(q)) : clients;
+    return sortClients(matching, sortKey);
+  }, [clients, search, sortKey]);
 
   const visibleEntries = useMemo(() => {
     let list = entries;
@@ -188,7 +313,7 @@ export default function CsmPanel() {
   // overwrite the client, so an older reply can't flip it back.
   const latestRequest = useRef({});
 
-  const saveInBackground = async ({ client, field, value, body, entry, errorMessage, onFail }) => {
+  const saveInBackground = async ({ client, field, value, body, entry, errorMessage, onFail, onSaved }) => {
     const key = `${client.id}:${field}`;
     const seq = (latestRequest.current[key] || 0) + 1;
     latestRequest.current[key] = seq;
@@ -203,6 +328,7 @@ export default function CsmPanel() {
     try {
       const result = await api.post("/api/csm", body);
       setEntries((list) => list.map((e) => (e.id === tempId ? result.entry : e)));
+      onSaved?.();
       if (latestRequest.current[key] === seq && result.client) {
         setClients((list) => list.map((c) => (c.id === result.client.id ? result.client : c)));
       }
@@ -216,18 +342,86 @@ export default function CsmPanel() {
     }
   };
 
+  const addFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setError("");
+    setPreparingFiles((n) => n + files.length);
+    for (const original of files) {
+      try {
+        const file = isImage(original.type) ? await shrinkImage(original) : original;
+        if (file.size > MAX_FILE_BYTES) {
+          setError(`${original.name} is too big (${formatBytes(file.size)}) — files can be up to 3 MB.`);
+          continue;
+        }
+        const data = await readAsBase64(file);
+        setAttachments((list) => [
+          ...list,
+          {
+            key: `${Date.now()}-${Math.random()}`,
+            name: file.name,
+            mimeType: file.type || "application/octet-stream",
+            size: file.size,
+            data,
+            previewUrl: isImage(file.type) ? URL.createObjectURL(file) : null,
+          },
+        ]);
+      } catch (err) {
+        setError(err.message || `Couldn't attach ${original.name}.`);
+      } finally {
+        setPreparingFiles((n) => n - 1);
+      }
+    }
+  };
+
+  const removeAttachment = (key) =>
+    setAttachments((list) => {
+      const gone = list.find((a) => a.key === key);
+      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+      return list.filter((a) => a.key !== key);
+    });
+
   const sendComment = () => {
     const text = comment.trim();
-    if (!text || !selected) return;
+    if ((!text && !attachments.length) || !selected || preparingFiles) return;
+    // Split the files into comments small enough for the server; the
+    // text goes with the first one.
+    const batches = [];
+    for (const a of attachments) {
+      const last = batches[batches.length - 1];
+      if (last && last.size + a.size <= BATCH_BYTES) {
+        last.files.push(a);
+        last.size += a.size;
+      } else batches.push({ files: [a], size: a.size });
+    }
+    if (!batches.length) batches.push({ files: [], size: 0 });
     setComment("");
-    saveInBackground({
-      client: selected,
-      field: "comment",
-      body: { action: "comment", clientId: selected.id, text },
-      entry: { kind: "comment", text, author: "You" },
-      errorMessage: "Could not add the comment.",
-      // Put the text back so it isn't lost.
-      onFail: () => setComment((current) => current || text),
+    setAttachments([]);
+    batches.forEach((batch, i) => {
+      const batchText = i === 0 ? text : "";
+      saveInBackground({
+        client: selected,
+        field: "comment",
+        body: {
+          action: "comment",
+          clientId: selected.id,
+          text: batchText,
+          files: batch.files.map(({ name, mimeType, data }) => ({ name, mimeType, data })),
+        },
+        entry: {
+          kind: "comment",
+          text: batchText,
+          author: "You",
+          files: batch.files.map((a) => ({ id: a.key, name: a.name, mimeType: a.mimeType, size: a.size, localUrl: a.previewUrl })),
+        },
+        errorMessage: "Could not add the comment.",
+        onSaved: () => batch.files.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl)),
+        // Put the text and files back so nothing is lost.
+        onFail: () => {
+          if (batchText) setComment((current) => current || batchText);
+          setAttachments((list) => [...batch.files, ...list]);
+        },
+      });
     });
   };
 
@@ -333,6 +527,20 @@ export default function CsmPanel() {
               className="w-full border border-gray-200 rounded-lg pl-8 pr-2.5 py-1.5 text-sm outline-none focus:border-gray-400 bg-white"
             />
           </div>
+          <label className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+            Sort
+            <select
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value)}
+              className="flex-1 min-w-0 border border-gray-200 rounded-lg px-2 py-1 text-xs text-gray-700 bg-white outline-none focus:border-gray-400"
+            >
+              {SORTS.map((s) => (
+                <option key={s.key} value={s.key}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-4">
           {loadingClients && (
@@ -381,7 +589,31 @@ export default function CsmPanel() {
       </aside>
 
       {/* Selected client */}
-      <section className="flex-1 flex flex-col min-w-0 min-h-0">
+      <section
+        className="relative flex-1 flex flex-col min-w-0 min-h-0"
+        onDragOver={(e) => {
+          if (!selected || !Array.from(e.dataTransfer?.types || []).includes("Files")) return;
+          e.preventDefault();
+          setDragActive(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget)) setDragActive(false);
+        }}
+        onDrop={(e) => {
+          if (!selected) return;
+          e.preventDefault();
+          setDragActive(false);
+          setComposeMode("comment");
+          addFiles(e.dataTransfer?.files);
+        }}
+      >
+        {dragActive && (
+          <div className="absolute inset-3 z-30 rounded-2xl border-2 border-dashed border-gray-400 bg-white/90 flex flex-col items-center justify-center gap-2 text-gray-600 pointer-events-none">
+            <Upload size={28} />
+            <div className="text-sm font-semibold">Drop files or pictures to attach them</div>
+            <div className="text-xs text-gray-400">Up to 3 MB each — big photos are shrunk automatically</div>
+          </div>
+        )}
         {error && (
           <div className="mx-6 mt-4 flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
             <AlertTriangle size={15} className="shrink-0 mt-0.5" />
@@ -617,9 +849,71 @@ export default function CsmPanel() {
                     : "WhatsApp isn't connected yet — messages can't be sent from here yet."}
                 </span>
               </div>
+              {composeMode === "comment" && (attachments.length > 0 || preparingFiles > 0) && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {attachments.map((a) => (
+                    <div
+                      key={a.key}
+                      className="relative group border border-gray-200 rounded-lg bg-white overflow-hidden"
+                      title={`${a.name} · ${formatBytes(a.size)}`}
+                    >
+                      {a.previewUrl ? (
+                        <img src={a.previewUrl} alt={a.name} className="h-16 w-16 object-cover" />
+                      ) : (
+                        <div className="h-16 w-44 flex items-center gap-2 px-2.5">
+                          <FileText size={20} className="text-gray-400 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-xs font-medium text-gray-700 truncate">{a.name}</div>
+                            <div className="text-[11px] text-gray-400">{formatBytes(a.size)}</div>
+                          </div>
+                        </div>
+                      )}
+                      <button
+                        onClick={() => removeAttachment(a.key)}
+                        title="Remove"
+                        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-gray-900/70 text-white flex items-center justify-center hover:bg-gray-900"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                  {preparingFiles > 0 && (
+                    <div className="h-16 px-3 flex items-center gap-2 text-xs text-gray-500 border border-dashed border-gray-200 rounded-lg">
+                      <Loader2 size={14} className="animate-spin" /> Preparing…
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="flex items-end gap-2">
+                {composeMode === "comment" && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => {
+                        addFiles(e.target.files);
+                        e.target.value = "";
+                      }}
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      title="Attach files or pictures (or drag them in, or paste a screenshot)"
+                      className="h-10 w-10 shrink-0 flex items-center justify-center rounded-xl border border-gray-200 text-gray-500 hover:text-gray-900 hover:border-gray-400"
+                    >
+                      <Paperclip size={16} />
+                    </button>
+                  </>
+                )}
                 <textarea
                   value={comment}
+                  onPaste={(e) => {
+                    const files = Array.from(e.clipboardData?.files || []);
+                    if (composeMode !== "comment" || !files.length) return;
+                    e.preventDefault();
+                    addFiles(files);
+                  }}
                   onChange={(e) => setComment(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
@@ -642,7 +936,7 @@ export default function CsmPanel() {
                 {composeMode === "comment" ? (
                   <button
                     onClick={sendComment}
-                    disabled={!comment.trim()}
+                    disabled={(!comment.trim() && !attachments.length) || preparingFiles > 0}
                     className="h-10 flex items-center gap-1.5 bg-gray-900 hover:bg-black text-white text-sm font-semibold rounded-xl px-4 disabled:opacity-40"
                   >
                     <Send size={15} /> Send
@@ -708,7 +1002,8 @@ function TimelineItem({ entry }) {
             <span className="text-sm font-semibold text-gray-900">{entry.author || "Someone"}</span>
             <span className="text-xs text-gray-400">{time}</span>
           </div>
-          <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">{entry.text}</div>
+          {entry.text && <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">{entry.text}</div>}
+          {entry.files?.length > 0 && <Attachments files={entry.files} />}
         </div>
       </div>
     );
@@ -743,6 +1038,59 @@ function TimelineItem({ entry }) {
       <span className="absolute -left-[4px] top-1.5 w-2 h-2 rounded-full bg-gray-300 ring-4 ring-white" />
       <span className="font-medium text-gray-700">{entry.author || "Someone"}</span> {body}
       <span className="text-xs text-gray-400 ml-2">{time}</span>
+    </div>
+  );
+}
+
+// Pictures show inline (click for full size); other files as cards.
+function Attachments({ files }) {
+  const images = files.filter((f) => isImage(f.mimeType));
+  const others = files.filter((f) => !isImage(f.mimeType));
+  const saved = (f) => typeof f.id === "number";
+  return (
+    <div className="mt-2 space-y-2">
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {images.map((f) => {
+            const src = f.localUrl || fileUrl(f.id);
+            const img = (
+              <img
+                src={src}
+                alt={f.name}
+                loading="lazy"
+                className="max-h-64 max-w-full sm:max-w-sm rounded-lg border border-gray-200 object-contain bg-gray-50"
+              />
+            );
+            return saved(f) ? (
+              <a key={f.id} href={fileUrl(f.id)} target="_blank" rel="noreferrer" title={`${f.name} — open full size`}>
+                {img}
+              </a>
+            ) : (
+              <span key={f.id}>{img}</span>
+            );
+          })}
+        </div>
+      )}
+      {others.map((f) => (
+        <div key={f.id} className="flex items-center gap-3 border border-gray-200 rounded-lg px-3 py-2 max-w-sm bg-gray-50">
+          <FileText size={22} className="text-gray-400 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-medium text-gray-800 truncate">{f.name}</div>
+            <div className="text-xs text-gray-400">{formatBytes(f.size)}</div>
+          </div>
+          {saved(f) ? (
+            <a
+              href={fileUrl(f.id, { download: true })}
+              title="Download"
+              className="w-8 h-8 flex items-center justify-center rounded-md text-gray-500 hover:text-gray-900 hover:bg-white"
+            >
+              <Download size={16} />
+            </a>
+          ) : (
+            <Loader2 size={16} className="animate-spin text-gray-400" />
+          )}
+        </div>
+      ))}
     </div>
   );
 }
