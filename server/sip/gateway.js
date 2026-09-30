@@ -54,8 +54,37 @@ const END_MESSAGES = {
   "hangup-remote": "",
 };
 
-export function endedMessage({ reason, status, sipReason }) {
+// What common Q.850 cause codes mean for a rep.
+const CAUSE_MESSAGES = {
+  1: "That number doesn't exist — it's disconnected or mistyped",
+  3: "The network has no route to that number",
+  22: "That number has changed",
+  27: "That phone is out of service",
+  28: "That number isn't in a valid format",
+  29: "The network refused this call (facility rejected)",
+  31: "The network couldn't connect the call",
+  34: "No line was free on the network — try again",
+  38: "The network is out of order — try again",
+  41: "A temporary network failure — try again",
+  42: "The network is congested — try again",
+  44: "No line was free on the network — try again",
+  47: "No line was free on the network — try again",
+  50: "This trunk isn't subscribed to that kind of call",
+  55: "Calls like this are barred on this trunk",
+  57: "This trunk isn't allowed to make that call",
+  58: "That service isn't available right now",
+  63: "That service isn't available on this trunk",
+  65: "That service isn't supported",
+  88: "The destination can't take this kind of call",
+  102: "The network timed out — try again",
+  111: "The carrier rejected the call (protocol error)",
+  127: "The carrier couldn't connect the call (interworking)",
+};
+
+export function endedMessage({ reason, status, sipReason, cause }) {
   if (reason in END_MESSAGES) return END_MESSAGES[reason];
+  if (cause && CAUSE_MESSAGES[cause]) return `${CAUSE_MESSAGES[cause]} (${status} ${sipReason}, cause ${cause}).`;
+  if (cause) return `The call failed (${status} ${sipReason}, cause ${cause}).`;
   if (status === 404 || status === 484 || status === 604) return `That number couldn't be reached (${status} ${sipReason}).`;
   if (status === 403) return `The SIP trunk refused the call (403 ${sipReason}) — check the trunk's caller ID and outbound permissions.`;
   if (status === 503) return `The SIP trunk is unavailable or out of channels (503 ${sipReason}).`;

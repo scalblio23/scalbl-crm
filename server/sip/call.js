@@ -21,7 +21,17 @@ import { toE164, formatForDial, isDialable, callerNumberFromUser } from "./phone
 
 const ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, UPDATE, NOTIFY";
 
-function outcomeForStatus(status) {
+// The ISDN cause code a carrier puts in a failure's Reason header
+// ("Q.850;cause=21;text=…") — far more specific than a generic 500.
+export function parseQ850(header) {
+  const m = /Q\.850\s*;[^,]*?cause\s*=\s*(\d+)/i.exec(String(header || ""));
+  return m ? Number(m[1]) : 0;
+}
+
+function outcomeForStatus(status, cause = 0) {
+  if (cause === 17) return "busy";
+  if (cause === 18 || cause === 19) return "no-answer";
+  if (cause === 21) return "declined";
   if (status === 486 || status === 600) return "busy";
   if (status === 603) return "declined";
   if (status === 408 || status === 480) return "no-answer";
@@ -266,7 +276,13 @@ export class Call extends EventEmitter {
       this.end(this.cancelReason, { status: res.status, sipReason: res.reason });
       return;
     }
-    this.end(outcomeForStatus(res.status), { status: res.status, sipReason: res.reason });
+    const cause = parseQ850(res.get("reason"));
+    this.end(outcomeForStatus(res.status, cause), {
+      status: res.status,
+      sipReason: res.reason,
+      cause,
+      detail: [res.get("reason"), res.get("warning")].filter(Boolean).join(" | "),
+    });
   }
 
   sendAck2xx(res) {
@@ -549,7 +565,7 @@ export class Call extends EventEmitter {
     this.end("failed", { sipReason: message });
   }
 
-  end(reason, { status = 0, sipReason = "" } = {}) {
+  end(reason, { status = 0, sipReason = "", cause = 0, detail = "" } = {}) {
     if (this.isEnded) return;
     this.endReason = reason;
     this.state = "ended";
@@ -565,8 +581,11 @@ export class Call extends EventEmitter {
     }, 10000).unref();
     const durationMs = this.answeredAt ? Date.now() - this.answeredAt : 0;
     this.log.log(
-      `[sip] call ${this.direction} ${this.remoteNumber || "?"} ended: ${reason}${status ? ` (${status} ${sipReason})` : sipReason ? ` (${sipReason})` : ""}`
+      `[sip] call ${this.direction} ${this.remoteNumber || "?"}` +
+        (this.direction === "outbound" ? ` from ${this.callerId}` : "") +
+        ` ended: ${reason}${status ? ` (${status} ${sipReason})` : sipReason ? ` (${sipReason})` : ""}` +
+        (detail ? ` [${detail}]` : "")
     );
-    this.emit("ended", { reason, status, sipReason, durationMs });
+    this.emit("ended", { reason, status, sipReason, cause, durationMs });
   }
 }
