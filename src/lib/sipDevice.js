@@ -185,6 +185,9 @@ function ensureConnected() {
     let settled = false;
     socket.onmessage = (ev) => {
       if (typeof ev.data !== "string") {
+        // Real audio from the network before answer (early media) is
+        // its own ringback or an announcement — let that play instead.
+        if (ringback && hasSound(ev.data)) stopRingback();
         playbackNode?.port.postMessage(ev.data, [ev.data]);
         return;
       }
@@ -288,8 +291,12 @@ function handleMessage(msg) {
       return;
     case "call-state":
       if (!current || current.callId !== msg.callId) return;
-      if (msg.state === "ringing") current.emit("ringing");
+      if (msg.state === "ringing") {
+        startRingback();
+        current.emit("ringing");
+      }
       if (msg.state === "answered" && !current.answered) {
+        stopRingback();
         current.answered = true;
         current.emit("accept", current);
       }
@@ -331,10 +338,14 @@ function handleMessage(msg) {
         pending.resolve({ call: pending.call, callerId: status.callerId });
         pending = null;
       }
-      if (current?.multi && current.ref === msg.ref) current.emit("legs", msg.legs);
+      if (current?.multi && current.ref === msg.ref) {
+        if (!current.answered && msg.legs?.some((l) => l.status === "ringing")) startRingback();
+        current.emit("legs", msg.legs);
+      }
       return;
     case "multi-answered":
       if (!current?.multi || current.ref !== msg.ref) return;
+      stopRingback();
       current.callId = msg.callId;
       current.answered = true;
       current.emit("accept", { legRef: msg.legRef, to: msg.to });
@@ -426,7 +437,69 @@ function stopAudio() {
 
 function finishCall() {
   current = null;
+  stopRingback();
   stopAudio();
+}
+
+// ---------- ringback ----------
+// VoIPcloud signals ringing (SIP 180) without sending any audio, so
+// without this the rep hears silence while the lead's phone rings.
+// Plays the Australian ringback tone locally instead — 400 + 450 Hz,
+// 0.4 s on, 0.2 s off, 0.4 s on, 2 s off — until the call is answered
+// or ends, or the network sends its own early media.
+const RINGBACK_LEVEL = 0.06;
+const RINGBACK_CYCLE = 3;
+let ringback = null; // { gain, oscillators, timer }
+
+function startRingback() {
+  if (ringback || !audioCtx) return;
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0;
+  gain.connect(audioCtx.destination);
+  const oscillators = [400, 450].map((freq) => {
+    const osc = audioCtx.createOscillator();
+    osc.frequency.value = freq;
+    osc.connect(gain);
+    osc.start();
+    return osc;
+  });
+  let next = audioCtx.currentTime + 0.05;
+  const scheduleAhead = () => {
+    while (next < audioCtx.currentTime + RINGBACK_CYCLE + 0.5) {
+      gain.gain.setValueAtTime(RINGBACK_LEVEL, next);
+      gain.gain.setValueAtTime(0, next + 0.4);
+      gain.gain.setValueAtTime(RINGBACK_LEVEL, next + 0.6);
+      gain.gain.setValueAtTime(0, next + 1.0);
+      next += RINGBACK_CYCLE;
+    }
+  };
+  scheduleAhead();
+  ringback = { gain, oscillators, timer: setInterval(scheduleAhead, 500) };
+}
+
+function stopRingback() {
+  if (!ringback) return;
+  const { gain, oscillators, timer } = ringback;
+  ringback = null;
+  clearInterval(timer);
+  for (const osc of oscillators) {
+    try {
+      osc.stop();
+      osc.disconnect();
+    } catch {
+      // already stopped
+    }
+  }
+  gain.disconnect();
+}
+
+// Whether a frame of 16-bit PCM from the gateway is more than silence.
+function hasSound(buffer) {
+  const samples = new Int16Array(buffer);
+  for (let i = 0; i < samples.length; i += 4) {
+    if (Math.abs(samples[i]) > 600) return true;
+  }
+  return false;
 }
 
 // ---------- calls ----------
