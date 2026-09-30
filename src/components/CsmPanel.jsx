@@ -99,7 +99,6 @@ export default function CsmPanel() {
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [search, setSearch] = useState("");
   const [comment, setComment] = useState("");
-  const [sending, setSending] = useState(false);
   const [newClientName, setNewClientName] = useState("");
   const [addingClient, setAddingClient] = useState(false);
   const [showAddClient, setShowAddClient] = useState(false);
@@ -182,46 +181,79 @@ export default function CsmPanel() {
     return groups;
   }, [visibleEntries]);
 
-  // A POST that returns { client, entry } — refresh both views from it.
-  const applyResult = ({ client, entry }) => {
-    if (client) setClients((list) => list.map((c) => (c.id === client.id ? client : c)));
-    if (entry && entry.clientId === selectedId) setEntries((list) => [...list, entry]);
+  // Confidence, mood and comments update the screen straight away and
+  // save in the background (the round trip can take a second or two);
+  // a failed save puts things back and says why. For rapid changes to
+  // the same field, only the newest request's response is allowed to
+  // overwrite the client, so an older reply can't flip it back.
+  const latestRequest = useRef({});
+
+  const saveInBackground = async ({ client, field, value, body, entry, errorMessage, onFail }) => {
+    const key = `${client.id}:${field}`;
+    const seq = (latestRequest.current[key] || 0) + 1;
+    latestRequest.current[key] = seq;
+    const previous = client[field];
+    const tempId = `pending-${key}-${seq}-${Date.now()}`;
+    const now = new Date().toISOString();
+    setError("");
+    if (field !== "comment") {
+      setClients((list) => list.map((c) => (c.id === client.id ? { ...c, [field]: value, lastActivityAt: now } : c)));
+    }
+    setEntries((list) => [...list, { ...entry, id: tempId, clientId: client.id, createdAt: now, pending: true }]);
+    try {
+      const result = await api.post("/api/csm", body);
+      setEntries((list) => list.map((e) => (e.id === tempId ? result.entry : e)));
+      if (latestRequest.current[key] === seq && result.client) {
+        setClients((list) => list.map((c) => (c.id === result.client.id ? result.client : c)));
+      }
+    } catch (err) {
+      setEntries((list) => list.filter((e) => e.id !== tempId));
+      if (field !== "comment" && latestRequest.current[key] === seq) {
+        setClients((list) => list.map((c) => (c.id === client.id ? { ...c, [field]: previous } : c)));
+      }
+      onFail?.();
+      setError(err.message || errorMessage);
+    }
   };
 
-  const sendComment = async () => {
+  const sendComment = () => {
     const text = comment.trim();
-    if (!text || !selected || sending) return;
-    setSending(true);
-    setError("");
-    try {
-      applyResult(await api.post("/api/csm", { action: "comment", clientId: selected.id, text }));
-      setComment("");
-    } catch (err) {
-      setError(err.message || "Could not add the comment.");
-    } finally {
-      setSending(false);
-    }
+    if (!text || !selected) return;
+    setComment("");
+    saveInBackground({
+      client: selected,
+      field: "comment",
+      body: { action: "comment", clientId: selected.id, text },
+      entry: { kind: "comment", text, author: "You" },
+      errorMessage: "Could not add the comment.",
+      // Put the text back so it isn't lost.
+      onFail: () => setComment((current) => current || text),
+    });
   };
 
-  const setConfidence = async (value) => {
+  const setConfidence = (value) => {
     if (!selected || selected.confidence === value) return;
-    setError("");
-    try {
-      applyResult(await api.post("/api/csm", { action: "confidence", clientId: selected.id, value }));
-    } catch (err) {
-      setError(err.message || "Could not update confidence.");
-    }
+    saveInBackground({
+      client: selected,
+      field: "confidence",
+      value,
+      body: { action: "confidence", clientId: selected.id, value },
+      entry: { kind: "confidence", value: value.toFixed(1), author: "You" },
+      errorMessage: "Could not update confidence.",
+    });
   };
 
-  const setMood = async (mood) => {
+  const setMood = (mood) => {
     setMoodOpen(false);
     if (!selected || selected.mood === mood) return;
-    setError("");
-    try {
-      applyResult(await api.post("/api/csm", { action: "mood", clientId: selected.id, mood }));
-    } catch (err) {
-      setError(err.message || "Could not update the mood.");
-    }
+    saveInBackground({
+      client: selected,
+      field: "mood",
+      value: mood,
+      body: { action: "mood", clientId: selected.id, mood },
+      entry: { kind: "mood", value: mood, author: "You" },
+      errorMessage: "Could not update the mood.",
+    });
   };
 
   const addClient = async (e) => {
@@ -543,7 +575,10 @@ export default function CsmPanel() {
                         {day.label}
                       </div>
                       {day.items.map((e) => (
-                        <TimelineItem key={e.id} entry={e} />
+                        // Faded until the server has saved it.
+                        <div key={e.id} className={e.pending ? "opacity-60" : ""}>
+                          <TimelineItem entry={e} />
+                        </div>
                       ))}
                     </li>
                   ))}
@@ -607,10 +642,10 @@ export default function CsmPanel() {
                 {composeMode === "comment" ? (
                   <button
                     onClick={sendComment}
-                    disabled={!comment.trim() || sending}
+                    disabled={!comment.trim()}
                     className="h-10 flex items-center gap-1.5 bg-gray-900 hover:bg-black text-white text-sm font-semibold rounded-xl px-4 disabled:opacity-40"
                   >
-                    {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />} Send
+                    <Send size={15} /> Send
                   </button>
                 ) : (
                   <button
