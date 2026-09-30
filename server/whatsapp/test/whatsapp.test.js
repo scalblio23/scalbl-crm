@@ -65,7 +65,15 @@ function fakeDb(links) {
   };
 }
 
-const settle = () => new Promise((r) => setTimeout(r, 30));
+// Waits until `check()` is true — generous, so a slow machine (e.g. the
+// 1-vCPU droplet generating a QR image) doesn't fail the tests.
+async function until(check, what = "condition", timeoutMs = 5000) {
+  const started = Date.now();
+  while (!(await check())) {
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 async function startService() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "wa-test-"));
@@ -102,12 +110,12 @@ test("QR → connected, chat list with names, and syncing only linked chats", as
   service.downloadMedia = async (n) => ({ name: n.media.fileName, mimeType: n.media.mimeType, data: Buffer.from("img") });
 
   sock.ev.emit("connection.update", { qr: "2@abc,def" });
-  await settle();
+  await until(() => service.status().state === "qr", "the QR code");
   assert.equal(service.status().state, "qr");
   assert.match(service.status().qr, /^data:image\/png;base64,/);
 
   sock.ev.emit("connection.update", { connection: "open" });
-  await settle();
+  await until(() => service.status().state === "connected" && service.chats.has(GROUP), "connected + groups");
   assert.equal(service.status().state, "connected");
   assert.equal(service.status().me.number, "+61480000000");
   assert.equal(service.status().qr, null);
@@ -120,7 +128,7 @@ test("QR → connected, chat list with names, and syncing only linked chats", as
       { key: { remoteJid: GROUP, fromMe: false, id: "H1", participant: JANE }, pushName: "Jane", message: { conversation: "Old message" }, messageTimestamp: 1789999500 },
     ],
   });
-  await settle();
+  await until(() => db.stored.length === 1, "history stored");
   const chats = service.listChats();
   assert.deepEqual(chats.map((c) => c.name), ["Cable Co × Scalbl", "Jane Client"]);
   assert.equal(chats[0].isGroup, true);
@@ -136,7 +144,7 @@ test("QR → connected, chat list with names, and syncing only linked chats", as
       { key: { remoteJid: GROUP, fromMe: false, id: "M3", participant: JANE }, pushName: "Jane", message: { imageMessage: { mimetype: "image/png", fileLength: 3 } }, messageTimestamp: 1790000002 },
     ],
   });
-  await settle();
+  await until(() => db.stored.length === 3, "live messages stored");
   const live = db.stored.filter((s) => s.waId !== "H1");
   assert.deepEqual(live.map((s) => [s.waId, s.direction, s.author, s.text]), [
     ["M1", "in", "Jane", "Leads look great this week"],
@@ -147,7 +155,7 @@ test("QR → connected, chat list with names, and syncing only linked chats", as
 
   // Sending from the CRM: goes to WhatsApp and is stored under the sender's name.
   const { messageId } = await sync.send({ chatId: GROUP, text: "Thanks Jane!", author: "Henry" });
-  await settle();
+  await until(() => db.stored.some((s) => s.waId === messageId), "sent message stored");
   assert.equal(sock.sent[0].jid, GROUP);
   assert.equal(sock.sent[0].opts.messageId, messageId);
   const out = db.stored.find((s) => s.waId === messageId);
@@ -165,9 +173,9 @@ test("QR → connected, chat list with names, and syncing only linked chats", as
 test("logged out from the phone → forgets the login and offers a new QR", async () => {
   const { service, sock } = await startService();
   sock.ev.emit("connection.update", { connection: "open" });
-  await settle();
+  await until(() => service.status().state === "connected", "connected");
   sock.ev.emit("connection.update", { connection: "close", lastDisconnect: { error: { output: { statusCode: 401 }, message: "logged out" } } });
-  await settle();
+  await until(() => service.status().state === "disconnected", "disconnected");
   assert.equal(service.status().state, "disconnected");
   assert.equal(service.status().me, null);
   assert.equal(fs.existsSync(service.authDir), false);
@@ -177,7 +185,7 @@ test("logged out from the phone → forgets the login and offers a new QR", asyn
 test("HTTP API: token required; status, chats, send, backfill", async () => {
   const { service, sock } = await startService();
   sock.ev.emit("connection.update", { connection: "open" });
-  await settle();
+  await until(() => service.status().state === "connected" && service.chats.has(GROUP), "connected + groups");
   const db = fakeDb({ [GROUP]: [3] });
   const sync = createWhatsAppSync({ service, db, log: quiet });
   const server = createWhatsAppServer({ service, sync, verifyToken: (t) => t === "good", log: quiet });
@@ -190,11 +198,10 @@ test("HTTP API: token required; status, chats, send, backfill", async () => {
     assert.equal((await fetch(`${base}/status`)).status, 401);
     assert.equal((await fetch(`${base}/status`, { headers: { Authorization: "Bearer bad" } })).status, 401);
     assert.equal((await (await call("/status")).json()).state, "connected");
-    await settle();
     assert.ok((await (await call("/chats")).json()).chats.some((c) => c.id === GROUP));
     const sent = await (await call("/send", { method: "POST", body: JSON.stringify({ chatId: GROUP, text: "Hello", author: "Jem" }) })).json();
     assert.ok(sent.messageId);
-    await settle();
+    await until(() => db.stored.some((s) => s.waId === sent.messageId), "sent message stored");
     assert.equal(db.stored.find((s) => s.waId === sent.messageId)?.author, "Jem");
     assert.equal((await call("/send", { method: "POST", body: JSON.stringify({ chatId: GROUP }) })).status, 400);
     const bf = await (await call("/backfill", { method: "POST", body: JSON.stringify({ clientId: 5, chatId: GROUP }) })).json();
