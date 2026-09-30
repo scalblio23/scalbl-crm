@@ -143,15 +143,39 @@ Environment=NODE_ENV=production
 [Install]
 WantedBy=multi-user.target
 EOF
+# WhatsApp service (team WhatsApp linked by QR for the CSM tab) — its
+# own service so restarting it never drops a call, and vice versa.
+cat >/etc/systemd/system/scalbl-whatsapp.service <<EOF
+[Unit]
+Description=Scalbl CRM WhatsApp service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$APP_USER
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/node server/whatsappGateway.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+EOF
 systemctl daemon-reload
-systemctl enable -q "$SERVICE"
-systemctl restart "$SERVICE"
+systemctl enable -q "$SERVICE" scalbl-whatsapp
+systemctl restart "$SERVICE" scalbl-whatsapp
 
 # ---------- HTTPS ----------
 echo "== Configuring HTTPS for $DOMAIN =="
 cat >/etc/caddy/Caddyfile <<EOF
 $DOMAIN {
-  reverse_proxy localhost:3002
+  handle /whatsapp/* {
+    reverse_proxy localhost:3003
+  }
+  handle {
+    reverse_proxy localhost:3002
+  }
 }
 EOF
 systemctl enable -q caddy

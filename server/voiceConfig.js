@@ -101,3 +101,57 @@ export function sipTokenResponse(user, env = process.env) {
     callerIds,
   };
 }
+
+// ---------- WhatsApp service (server/whatsappGateway.js) ----------
+// Runs next to the voice gateway on the same server, reached at
+// <gateway origin>/whatsapp/* (Caddy routes that path to it). The CRM
+// backend calls it with short-lived tokens signed with the same secret.
+const WHATSAPP_AUDIENCE = "whatsapp";
+
+export function whatsappGatewayUrl(env = process.env) {
+  if (env.WHATSAPP_GATEWAY_URL) return env.WHATSAPP_GATEWAY_URL.replace(/\/+$/, "");
+  if (env.VOICE_GATEWAY_URL) return voiceGatewayHttpUrl(env);
+  if (env.VERCEL) return "";
+  return `http://localhost:${env.WHATSAPP_GATEWAY_PORT || 3003}`;
+}
+
+export function mintWhatsAppToken(env = process.env) {
+  return jwt.sign({}, gatewaySecret(env), { audience: WHATSAPP_AUDIENCE, expiresIn: "2m" });
+}
+
+export function verifyWhatsAppToken(token, env = process.env) {
+  try {
+    jwt.verify(String(token || ""), gatewaySecret(env), { audience: WHATSAPP_AUDIENCE });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Calls the WhatsApp service; resolves to its JSON, or throws with its
+// error message (or a plain one if it can't be reached).
+export async function callWhatsAppGateway(pathname, { method = "GET", body } = {}, env = process.env) {
+  const base = whatsappGatewayUrl(env);
+  if (!base) throw new Error("The WhatsApp service isn't set up (VOICE_GATEWAY_URL is missing).");
+  let res;
+  try {
+    res = await fetch(`${base}${pathname}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${mintWhatsAppToken(env)}`,
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new Error("Can't reach the WhatsApp service on the voice server — is it running?");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `The WhatsApp service returned ${res.status}.`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}

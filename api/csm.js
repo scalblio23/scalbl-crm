@@ -10,6 +10,7 @@
 //   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }] }
 //   POST { action: "confidence", clientId, value }   0.1 … 1.0
 //   POST { action: "mood", clientId, mood }          see CSM_MOODS
+//   POST { action: "link-whatsapp", clientId, chatId, chatName }   chatId null unlinks
 //   DELETE ?clientId=
 import {
   ensureSchema,
@@ -21,9 +22,11 @@ import {
   addCsmComment,
   setCsmConfidence,
   setCsmMood,
+  linkCsmWhatsApp,
   CSM_MOODS,
 } from "../server/db.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { callWhatsAppGateway } from "../server/voiceConfig.js";
 
 const MAX_COMMENT_LENGTH = 5000;
 // The whole request has to fit under the platform's ~4.5MB body limit
@@ -113,6 +116,22 @@ export default async function handler(req, res) {
         if (!(value >= 0.1 && value <= 1)) return res.status(400).json({ error: "Confidence goes from 0.1 to 1." });
         const result = await setCsmConfidence(clientId, value, author);
         if (!result) return res.status(404).json({ error: "Client not found" });
+        return res.status(200).json(result);
+      }
+
+      if (action === "link-whatsapp") {
+        const chatId = req.body?.chatId ? String(req.body.chatId) : null;
+        const chatName = String(req.body?.chatName || "").slice(0, 200);
+        const result = await linkCsmWhatsApp(clientId, chatId, chatName, author);
+        if (!result) return res.status(404).json({ error: "Client not found" });
+        // Fill the timeline with the chat's recent messages. Best effort:
+        // the link itself is saved either way, and new messages arrive
+        // regardless.
+        if (chatId) {
+          result.backfilled = await callWhatsAppGateway("/whatsapp/backfill", { method: "POST", body: { clientId, chatId } })
+            .then((r) => r.stored || 0)
+            .catch(() => 0);
+        }
         return res.status(200).json(result);
       }
 

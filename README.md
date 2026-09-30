@@ -83,6 +83,33 @@ browser's WebSocket; see `server/sip/gateway.js`):
 A transfer uses a second channel for as long as the third party is on the
 line, and the call recording stops at the handover.
 
+### WhatsApp (CSM tab)
+
+The team's shared WhatsApp number is linked to the CRM the way WhatsApp
+Web is, by scanning a QR code once. After that, each CSM client can be
+linked to its WhatsApp chat or group: the chat's messages (pictures and
+documents too, up to 3 MB) appear in that client's timeline, and replies
+can be sent from the CSM tab.
+
+This needs an always-on connection, so it runs on the voice server as
+its own service, `server/whatsappGateway.js` (`npm run whatsapp-gateway`,
+systemd unit `scalbl-whatsapp`, port 3003). Caddy routes
+`https://<voice domain>/whatsapp/*` to it. The CRM reaches it through
+`api/whatsapp.js` with short-lived tokens signed with
+`VOICE_GATEWAY_SECRET`, at `VOICE_GATEWAY_URL`'s address (override with
+`WHATSAPP_GATEWAY_URL`). It needs `VOICE_GATEWAY_SECRET` and
+`POSTGRES_URL` in its `.env`. The login is kept in `whatsapp-data/`
+(`WHATSAPP_DATA_DIR`), so a restart reconnects without a new QR code.
+
+Only chats linked to a CSM client are stored in the database. The
+service keeps the chat list and the last few messages of each chat in
+memory, so a newly linked client gets recent history.
+
+This isn't an official WhatsApp integration (it uses the
+[Baileys](https://github.com/WhiskeySockets/Baileys) library), so
+WhatsApp could restrict the number. Use a WhatsApp Business number, not
+someone's personal one. Tests: `npm run test:whatsapp`.
+
 ### Call recording
 
 The gateway records every answered call: the rep and the lead, mixed to

@@ -110,12 +110,13 @@ function sortClients(list, key) {
 // with the confidence and mood controls above it and a comment box
 // at the bottom. Backed by api/csm.js.
 //
-// WhatsApp (UI only for now — not connected yet): a client can be
-// linked to a WhatsApp chat/group from the header; its messages will
-// sit in the same timeline as entries of kind "whatsapp" (value "in" |
-// "out", author = sender), filterable, and the box at the bottom
-// switches between an internal comment and a WhatsApp message. Until
-// the connection exists, "Show example messages" previews the look.
+// WhatsApp: the team's WhatsApp is linked once by QR code (the service
+// on the voice server — see server/whatsappGateway.js, reached through
+// api/whatsapp.js). Each client can then be linked to a chat or group
+// from the header; its messages arrive in this timeline as entries of
+// kind "whatsapp" (value "in" | "out", author = sender), and the box at
+// the bottom switches between an internal comment and a WhatsApp reply.
+// Before a client is linked, "Show example messages" previews the look.
 
 const WHATSAPP_GREEN = "#25D366";
 
@@ -224,6 +225,10 @@ export default function CsmPanel() {
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [showExample, setShowExample] = useState(false);
   const [waOpen, setWaOpen] = useState(false);
+  const [waStatus, setWaStatus] = useState(null); // { state, qr, me, error }
+  const [waChats, setWaChats] = useState(null);
+  const [waChatSearch, setWaChatSearch] = useState("");
+  const [waBusy, setWaBusy] = useState(false);
   const timelineEndRef = useRef(null);
 
   const selected = clients.find((c) => c.id === selectedId) || null;
@@ -263,6 +268,69 @@ export default function CsmPanel() {
     };
   }, [selectedId]);
 
+  // WhatsApp connection status — every 3s while the WhatsApp panel is
+  // open (so a scanned QR code turns into "Connected" quickly), every
+  // 30s otherwise.
+  useEffect(() => {
+    let cancelled = false;
+    let timer;
+    const tick = async () => {
+      try {
+        const s = await api.get("/api/whatsapp?op=status");
+        if (!cancelled) setWaStatus(s);
+      } catch (err) {
+        if (!cancelled) setWaStatus({ state: "unreachable", error: err.message });
+      }
+      if (!cancelled) timer = setTimeout(tick, waOpen ? 3000 : 30000);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [waOpen]);
+
+  const waConnected = waStatus?.state === "connected";
+
+  // The chat list, fetched fresh each time the panel opens while connected.
+  useEffect(() => {
+    if (!waOpen || !waConnected) return undefined;
+    let cancelled = false;
+    setWaChatSearch("");
+    api
+      .get("/api/whatsapp?op=chats")
+      .then(({ chats }) => !cancelled && setWaChats(chats || []))
+      .catch((err) => !cancelled && setError(err.message || "Could not load WhatsApp chats."));
+    return () => {
+      cancelled = true;
+    };
+  }, [waOpen, waConnected]);
+
+  // A client linked to WhatsApp: check for new messages every 5s.
+  const selectedChatId = clients.find((c) => c.id === selectedId)?.whatsappChatId || null;
+  useEffect(() => {
+    if (!selectedId || !selectedChatId) return undefined;
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      try {
+        const { entries: list } = await api.get(`/api/csm?clientId=${selectedId}`);
+        if (cancelled || !list) return;
+        setEntries((prev) => {
+          // Keep anything still saving, unless the saved copy has arrived.
+          const pending = prev.filter((e) => e.pending && !(e.waId && list.some((x) => x.waId === e.waId)));
+          if (!pending.length && prev.length === list.length && prev.every((e, i) => e.id === list[i].id)) return prev;
+          return [...list, ...pending];
+        });
+      } catch {
+        // try again next tick
+      }
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [selectedId, selectedChatId]);
+
   // Keep the newest entry in view, next to the comment box.
   useEffect(() => {
     timelineEndRef.current?.scrollIntoView({ block: "end" });
@@ -284,7 +352,7 @@ export default function CsmPanel() {
 
   const visibleEntries = useMemo(() => {
     let list = entries;
-    if (showExample && selected) {
+    if (showExample && selected && !selected.whatsappChatId) {
       list = [...entries, ...exampleWhatsAppEntries(selected)].sort(
         (a, b) => new Date(a.createdAt) - new Date(b.createdAt)
       );
@@ -293,7 +361,7 @@ export default function CsmPanel() {
     if (timelineFilter === "comments") return list.filter((e) => e.kind !== "whatsapp");
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, showExample, timelineFilter, selected?.id]);
+  }, [entries, showExample, timelineFilter, selected?.id, selected?.whatsappChatId]);
 
   // Entries grouped by day, oldest first.
   const days = useMemo(() => {
@@ -327,7 +395,8 @@ export default function CsmPanel() {
     setEntries((list) => [...list, { ...entry, id: tempId, clientId: client.id, createdAt: now, pending: true }]);
     try {
       const result = await api.post("/api/csm", body);
-      setEntries((list) => list.map((e) => (e.id === tempId ? result.entry : e)));
+      // (The 5s WhatsApp poll may already have brought the saved copy in.)
+      setEntries((list) => list.filter((e) => e.id !== result.entry.id).map((e) => (e.id === tempId ? result.entry : e)));
       onSaved?.();
       if (latestRequest.current[key] === seq && result.client) {
         setClients((list) => list.map((c) => (c.id === result.client.id ? result.client : c)));
@@ -423,6 +492,72 @@ export default function CsmPanel() {
         },
       });
     });
+  };
+
+  // ---------- WhatsApp ----------
+
+  const linkWhatsApp = async (chat) => {
+    if (!selected) return;
+    setWaBusy(true);
+    setError("");
+    try {
+      const result = await api.post("/api/csm", {
+        action: "link-whatsapp",
+        clientId: selected.id,
+        chatId: chat?.id || null,
+        chatName: chat?.name || "",
+      });
+      setClients((list) => list.map((c) => (c.id === result.client.id ? result.client : c)));
+      // Reload: linking pulls in the chat's recent messages.
+      const { entries: list } = await api.get(`/api/csm?clientId=${selected.id}`);
+      setEntries(list || []);
+      setWaOpen(false);
+      setShowExample(false);
+      if (chat) setComposeMode("whatsapp");
+    } catch (err) {
+      setError(err.message || "Could not link the WhatsApp chat.");
+    } finally {
+      setWaBusy(false);
+    }
+  };
+
+  const disconnectWhatsApp = async () => {
+    if (!window.confirm("Disconnect the team WhatsApp from the CRM? You'll need to scan the QR code again to reconnect.")) return;
+    setWaBusy(true);
+    try {
+      await api.post("/api/whatsapp", { op: "logout" });
+      setWaChats(null);
+      setWaStatus((s) => ({ ...(s || {}), state: "connecting", me: null }));
+    } catch (err) {
+      setError(err.message || "Could not disconnect WhatsApp.");
+    } finally {
+      setWaBusy(false);
+    }
+  };
+
+  const sendWhatsApp = async () => {
+    const text = comment.trim();
+    if (!text || !selected?.whatsappChatId || !waConnected) return;
+    const clientId = selected.id;
+    const tempId = `pending-wa-${Date.now()}`;
+    setComment("");
+    setError("");
+    setEntries((list) => [
+      ...list,
+      { id: tempId, clientId, kind: "whatsapp", value: "out", author: "You", text, createdAt: new Date().toISOString(), pending: true },
+    ]);
+    try {
+      const { messageId } = await api.post("/api/whatsapp", { op: "send", clientId, text });
+      setEntries((list) =>
+        list.some((e) => e.waId === messageId && !e.pending)
+          ? list.filter((e) => e.id !== tempId)
+          : list.map((e) => (e.id === tempId ? { ...e, waId: messageId } : e))
+      );
+    } catch (err) {
+      setEntries((list) => list.filter((e) => e.id !== tempId));
+      setComment((current) => current || text);
+      setError(err.message || "Could not send the WhatsApp message.");
+    }
   };
 
   const setConfidence = (value) => {
@@ -638,41 +773,40 @@ export default function CsmPanel() {
                 <div className="relative mt-1.5">
                   <button
                     onClick={() => setWaOpen((o) => !o)}
-                    className="h-7 flex items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium bg-white text-gray-500 border-gray-200 hover:border-gray-400"
+                    className={`h-7 max-w-[280px] flex items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium ${
+                      selected.whatsappChatId
+                        ? "bg-green-50 text-green-800 border-green-200 hover:border-green-400"
+                        : "bg-white text-gray-500 border-gray-200 hover:border-gray-400"
+                    }`}
                   >
-                    <WhatsAppIcon size={13} /> WhatsApp: not linked
-                    <ChevronDown size={13} />
+                    <WhatsAppIcon size={13} />
+                    <span className="truncate">
+                      {selected.whatsappChatId ? `WhatsApp: ${selected.whatsappChatName || "linked"}` : "WhatsApp: not linked"}
+                    </span>
+                    {selected.whatsappChatId && waStatus && !waConnected && (
+                      <span className="text-amber-600 shrink-0">· offline</span>
+                    )}
+                    <ChevronDown size={13} className="shrink-0" />
                   </button>
                   {waOpen && (
                     <>
                       <div className="fixed inset-0 z-40" onClick={() => setWaOpen(false)} />
                       <div className="absolute left-0 top-full mt-1 z-50 w-80 bg-white border border-gray-200 rounded-xl shadow-lg p-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          <WhatsAppIcon size={16} />
-                          <span className="text-sm font-semibold text-gray-900">Link a WhatsApp chat</span>
-                          <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">
-                            Coming soon
-                          </span>
-                        </div>
-                        <p className="text-xs text-gray-500 mb-2.5">
-                          Once WhatsApp is connected, pick {selected.name}'s chat or group here and its messages will appear
-                          in this timeline.
-                        </p>
-                        <select
-                          disabled
-                          className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm text-gray-400 bg-gray-50 mb-2.5"
-                        >
-                          <option>Choose a chat or group…</option>
-                        </select>
-                        <button
-                          onClick={() => {
+                        <WhatsAppPanel
+                          client={selected}
+                          status={waStatus}
+                          chats={waChats}
+                          search={waChatSearch}
+                          onSearch={setWaChatSearch}
+                          busy={waBusy}
+                          onLink={linkWhatsApp}
+                          onDisconnect={disconnectWhatsApp}
+                          showExample={showExample}
+                          onToggleExample={() => {
                             setShowExample((v) => !v);
                             setWaOpen(false);
                           }}
-                          className="w-full text-xs font-medium text-gray-700 border border-gray-200 hover:bg-gray-50 rounded-lg px-2.5 py-1.5"
-                        >
-                          {showExample ? "Hide example messages" : "Show example messages"}
-                        </button>
+                        />
                       </div>
                     </>
                   )}
@@ -787,12 +921,18 @@ export default function CsmPanel() {
                     <div className="flex justify-center mb-2">
                       <WhatsAppIcon size={28} />
                     </div>
-                    WhatsApp isn't connected yet, so there are no messages to show.
-                    <div className="mt-2">
-                      <button onClick={() => setShowExample(true)} className="text-gray-700 font-medium underline">
-                        Show example messages
-                      </button>
-                    </div>
+                    {selected.whatsappChatId ? (
+                      <>No WhatsApp messages with {selected.name} yet.</>
+                    ) : (
+                      <>
+                        {selected.name} isn't linked to a WhatsApp chat yet — use the WhatsApp button under their name.
+                        <div className="mt-2">
+                          <button onClick={() => setShowExample(true)} className="text-gray-700 font-medium underline">
+                            Show example messages
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 ) : (
                   <div className="text-sm text-gray-400 text-center mt-10">
@@ -846,7 +986,11 @@ export default function CsmPanel() {
                 <span className="text-xs text-gray-400 ml-2">
                   {composeMode === "comment"
                     ? "Only your team sees comments."
-                    : "WhatsApp isn't connected yet — messages can't be sent from here yet."}
+                    : !selected.whatsappChatId
+                    ? "Link this client to a WhatsApp chat first (the WhatsApp button under their name)."
+                    : !waConnected
+                    ? "The team WhatsApp is offline — reconnect it from the WhatsApp button to send."
+                    : `Sends to "${selected.whatsappChatName || "their chat"}" from the team WhatsApp.`}
                 </span>
               </div>
               {composeMode === "comment" && (attachments.length > 0 || preparingFiles > 0) && (
@@ -919,6 +1063,7 @@ export default function CsmPanel() {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
                       if (composeMode === "comment") sendComment();
+                      else sendWhatsApp();
                     }
                   }}
                   rows={2}
@@ -943,10 +1088,10 @@ export default function CsmPanel() {
                   </button>
                 ) : (
                   <button
-                    disabled
-                    title="WhatsApp isn't connected yet"
+                    onClick={sendWhatsApp}
+                    disabled={!comment.trim() || !selected.whatsappChatId || !waConnected}
                     style={{ backgroundColor: WHATSAPP_GREEN }}
-                    className="h-10 flex items-center gap-1.5 text-white text-sm font-semibold rounded-xl px-4 opacity-40 cursor-not-allowed"
+                    className="h-10 flex items-center gap-1.5 text-white text-sm font-semibold rounded-xl px-4 hover:brightness-95 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Send size={15} /> Send
                   </button>
@@ -984,10 +1129,11 @@ function TimelineItem({ entry }) {
               </span>
             )}
           </div>
-          <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">{entry.text}</div>
+          {entry.text && <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">{entry.text}</div>}
+          {entry.files?.length > 0 && <Attachments files={entry.files} />}
           <div className="text-[11px] text-gray-500 text-right mt-0.5">
             {time}
-            {out && <span className="ml-1 text-sky-500">✓✓</span>}
+            {out && (entry.pending ? <span className="ml-1 text-gray-400">🕓</span> : <span className="ml-1 text-sky-500">✓✓</span>)}
           </div>
         </div>
       </div>
@@ -1092,5 +1238,139 @@ function Attachments({ files }) {
         </div>
       ))}
     </div>
+  );
+}
+
+// The WhatsApp panel under a client's name: connect the team WhatsApp
+// (QR code), then link this client to one of its chats or groups.
+function WhatsAppPanel({ client, status, chats, search, onSearch, busy, onLink, onDisconnect, showExample, onToggleExample }) {
+  const state = status?.state;
+  const title = (
+    <div className="flex items-center gap-2 mb-2">
+      <WhatsAppIcon size={16} />
+      <span className="text-sm font-semibold text-gray-900">WhatsApp</span>
+      {state === "connected" && status.me?.number && (
+        <span className="ml-auto text-[11px] text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+          ● {status.me.number}
+        </span>
+      )}
+    </div>
+  );
+
+  if (!status || state === "starting" || state === "connecting" || state === "disconnected") {
+    return (
+      <>
+        {title}
+        <div className="flex items-center gap-2 text-sm text-gray-500 py-3">
+          <Loader2 size={15} className="animate-spin" /> Connecting to WhatsApp…
+        </div>
+        {status?.error && <p className="text-xs text-gray-400">{status.error}</p>}
+      </>
+    );
+  }
+
+  if (state === "unreachable") {
+    return (
+      <>
+        {title}
+        <p className="text-sm text-gray-700 mb-1">The WhatsApp service isn't running on the voice server yet.</p>
+        <p className="text-xs text-gray-400">{status.error}</p>
+      </>
+    );
+  }
+
+  if (state === "qr") {
+    return (
+      <>
+        {title}
+        <p className="text-xs text-gray-600 mb-2">Connect the team WhatsApp (once for everyone):</p>
+        <ol className="text-xs text-gray-600 list-decimal pl-4 space-y-0.5 mb-2">
+          <li>Open WhatsApp on the team phone</li>
+          <li>
+            Go to <b>Settings → Linked devices → Link a device</b>
+          </li>
+          <li>Scan this code</li>
+        </ol>
+        {status.qr ? (
+          <img src={status.qr} alt="WhatsApp QR code" className="w-56 h-56 mx-auto border border-gray-200 rounded-lg" />
+        ) : (
+          <div className="w-56 h-56 mx-auto flex items-center justify-center text-gray-400">
+            <Loader2 size={20} className="animate-spin" />
+          </div>
+        )}
+        <p className="text-[11px] text-gray-400 mt-2 text-center">The code refreshes by itself — this updates when it's scanned.</p>
+      </>
+    );
+  }
+
+  // Connected: pick this client's chat.
+  const q = search.trim().toLowerCase();
+  const list = (chats || []).filter((c) => !q || c.name.toLowerCase().includes(q));
+  return (
+    <>
+      {title}
+      {client.whatsappChatId ? (
+        <div className="flex items-center gap-2 text-xs text-gray-600 bg-green-50 border border-green-200 rounded-lg px-2.5 py-2 mb-2">
+          <span className="flex-1 min-w-0">
+            Linked to <b className="text-gray-900">{client.whatsappChatName || client.whatsappChatId}</b>
+          </span>
+          <button disabled={busy} onClick={() => onLink(null)} className="text-gray-500 hover:text-red-600 font-medium">
+            Unlink
+          </button>
+        </div>
+      ) : (
+        <p className="text-xs text-gray-500 mb-2">Pick {client.name}'s chat or group — its messages will show in this timeline.</p>
+      )}
+      <div className="relative mb-2">
+        <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+        <input
+          autoFocus
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+          placeholder={client.whatsappChatId ? "Change to another chat…" : "Search chats and groups"}
+          className="w-full border border-gray-200 rounded-lg pl-8 pr-2.5 py-1.5 text-sm outline-none focus:border-gray-400"
+        />
+      </div>
+      <div className="max-h-60 overflow-y-auto -mx-1">
+        {!chats ? (
+          <div className="flex items-center gap-2 text-xs text-gray-400 px-2 py-3">
+            <Loader2 size={13} className="animate-spin" /> Loading chats…
+          </div>
+        ) : !list.length ? (
+          <div className="text-xs text-gray-400 px-2 py-3">
+            {chats.length ? "No chats match." : "No chats yet — they appear as WhatsApp syncs, give it a minute."}
+          </div>
+        ) : (
+          list.slice(0, 100).map((c) => (
+            <button
+              key={c.id}
+              disabled={busy || c.id === client.whatsappChatId}
+              onClick={() => onLink(c)}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-sm ${
+                c.id === client.whatsappChatId ? "bg-green-50 text-green-800" : "hover:bg-gray-50 text-gray-800"
+              } disabled:cursor-default`}
+            >
+              <span className="w-7 h-7 shrink-0 rounded-full bg-gray-100 text-gray-500 text-[11px] font-semibold flex items-center justify-center">
+                {c.isGroup ? "👥" : initials(c.name)}
+              </span>
+              <span className="flex-1 min-w-0 truncate">{c.name}</span>
+              {c.isGroup && <span className="text-[10px] text-gray-400">Group</span>}
+            </button>
+          ))
+        )}
+      </div>
+      <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-100">
+        {!client.whatsappChatId ? (
+          <button onClick={onToggleExample} className="text-xs font-medium text-gray-600 hover:text-gray-900">
+            {showExample ? "Hide example messages" : "Show example messages"}
+          </button>
+        ) : (
+          <span />
+        )}
+        <button disabled={busy} onClick={onDisconnect} className="text-xs text-gray-400 hover:text-red-600">
+          Disconnect WhatsApp
+        </button>
+      </div>
+    </>
   );
 }
