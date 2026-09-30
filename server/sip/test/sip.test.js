@@ -395,3 +395,24 @@ test("re-registers after the TCP connection drops", async () => {
   await waitFor(ua, "registration", (r) => r.state === "registered", 6000);
   assert.ok(trunk.registers.length > before);
 });
+
+test("a failure's Q.850 cause is kept and explained", async () => {
+  const { parseQ850 } = await import("../call.js");
+  const { endedMessage } = await import("../gateway.js");
+  assert.equal(parseQ850('Q.850;cause=1;text="Unallocated number"'), 1);
+  assert.equal(parseQ850("SIP;cause=500, Q.850 ; cause = 34"), 34);
+  assert.equal(parseQ850(""), 0);
+
+  const invitePromise = trunk.next("invite");
+  const call = ua.dial("0412345678");
+  const invite = await invitePromise;
+  const ended = waitFor(call, "ended");
+  trunk.reply(invite, 500, "Server Internal Error", {
+    toTag: newTag(),
+    headers: { reason: 'Q.850;cause=1;text="Unallocated (unassigned) number"' },
+  });
+  const info = await ended;
+  assert.equal(info.reason, "failed");
+  assert.equal(info.cause, 1);
+  assert.match(endedMessage(info), /doesn't exist.*500 Server Internal Error, cause 1/);
+});
