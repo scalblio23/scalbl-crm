@@ -58,7 +58,8 @@ export class WhatsAppService extends EventEmitter {
     this.me = null; // { number, name }
     this.lastError = "";
     this.chats = new Map(); // id → { id, name, isGroup, lastMessageAt }
-    this.names = new Map(); // jid → display name
+    this.names = new Map(); // jid (phone or @lid) → display name
+    this.lidToPn = new Map(); // "…@lid" → "…@s.whatsapp.net"
     this.recent = new Map(); // chatId → [{ normalized, raw }]
     this.stopped = false;
     this.reconnectTimer = null;
@@ -89,7 +90,8 @@ export class WhatsAppService extends EventEmitter {
     this.sock = sock;
     sock.ev.on("creds.update", saveCreds);
     sock.ev.on("connection.update", (u) => this.onConnectionUpdate(sock, u));
-    sock.ev.on("messaging-history.set", ({ chats, contacts, messages }) => {
+    sock.ev.on("messaging-history.set", ({ chats, contacts, messages, lidPnMappings }) => {
+      for (const m of lidPnMappings || []) this.rememberPair(m.lid, m.pn);
       this.addContacts(contacts);
       this.addChats(chats);
       this.addMessages(messages, { live: false });
@@ -100,6 +102,7 @@ export class WhatsAppService extends EventEmitter {
     sock.ev.on("contacts.update", (contacts) => this.addContacts(contacts));
     sock.ev.on("groups.upsert", (groups) => this.addGroups(groups));
     sock.ev.on("groups.update", (groups) => this.addGroups(groups));
+    sock.ev.on("lid-mapping.update", (m) => this.rememberPair(m?.lid, m?.pn));
     sock.ev.on("messages.upsert", ({ messages, type }) => this.addMessages(messages, { live: type === "notify" || type === "append" }));
     if (this.state !== "qr") this.setState("connecting");
   }
@@ -171,10 +174,47 @@ export class WhatsAppService extends EventEmitter {
 
   // ---------- chats / names ----------
 
+  // Two ids for the same person, in either order.
+  rememberPair(a, b) {
+    const lid = [a, b].find((j) => String(j || "").endsWith("@lid"));
+    const pn = [a, b].find((j) => String(j || "").endsWith("@s.whatsapp.net"));
+    if (lid && pn) this.lidToPn.set(lid, pn.replace(/:\d+@/, "@"));
+  }
+
+  setName(jids, name) {
+    if (!name) return;
+    for (const j of jids) if (j) this.names.set(j, name);
+  }
+
+  // A known name for either of a person's ids (or the other id we
+  // know for them), or "".
+  nameFor(jid, altJid = "") {
+    const pn = this.lidToPn.get(jid) || this.lidToPn.get(altJid) || "";
+    return this.names.get(jid) || this.names.get(altJid) || (pn && this.names.get(pn)) || "";
+  }
+
+  // Name for a message's sender, falling back to their phone number
+  // (asking WhatsApp for it when only the private @lid id is known).
+  async resolveSender(n) {
+    if (n.sender) return n.sender;
+    const known = this.nameFor(n.senderJid, n.senderAltJid);
+    if (known) return known;
+    let pn = [n.senderJid, n.senderAltJid].find((j) => String(j || "").endsWith("@s.whatsapp.net")) || "";
+    if (!pn) pn = this.lidToPn.get(n.senderJid) || "";
+    if (!pn && String(n.senderJid).endsWith("@lid")) {
+      pn = (await this.sock?.signalRepository?.lidMapping?.getPNForLID?.(n.senderJid).catch(() => null)) || "";
+      if (pn) this.rememberPair(n.senderJid, pn);
+    }
+    return (pn && (this.names.get(pn.replace(/:\d+@/, "@")) || phoneFromJid(pn))) || "WhatsApp user";
+  }
+
   addContacts(contacts = []) {
     for (const c of contacts) {
+      this.rememberPair(c.id, c.lid);
+      this.rememberPair(c.id, c.phoneNumber);
+      this.rememberPair(c.lid, c.phoneNumber);
       const name = c.name || c.verifiedName || c.notify;
-      if (c.id && name) this.names.set(c.id, name);
+      this.setName([c.id, c.lid, c.phoneNumber], name);
       if (c.id && name && this.chats.has(c.id) && !this.chats.get(c.id).named) {
         this.chats.get(c.id).name = name;
       }
@@ -185,7 +225,15 @@ export class WhatsAppService extends EventEmitter {
     for (const c of chats) {
       if (!isStorableChat(c.id)) continue;
       const existing = this.chats.get(c.id);
-      const name = c.name || c.subject || existing?.name || this.names.get(c.id) || phoneFromJid(c.id) || c.id;
+      const name =
+        c.name ||
+        c.subject ||
+        (existing?.named && existing.name) ||
+        this.nameFor(c.id) ||
+        existing?.name ||
+        phoneFromJid(c.id) ||
+        phoneFromJid(this.lidToPn.get(c.id)) ||
+        c.id;
       const ts = Number(c.conversationTimestamp?.toNumber?.() ?? c.conversationTimestamp ?? 0) || existing?.lastMessageAt || 0;
       this.chats.set(c.id, {
         id: c.id,
@@ -198,7 +246,15 @@ export class WhatsAppService extends EventEmitter {
   }
 
   addGroups(groups = []) {
-    this.addChats(groups.filter((g) => g.id).map((g) => ({ id: g.id, subject: g.subject })));
+    for (const g of groups) {
+      // Members' ids and names — so group messages show who sent them.
+      for (const m of g.participants || []) {
+        this.rememberPair(m.id, m.phoneNumber);
+        this.rememberPair(m.id, m.lid);
+        this.setName([m.id, m.lid, m.phoneNumber], m.name || m.notify || m.verifiedName);
+      }
+    }
+    this.addChats(groups.filter((g) => g.id && g.subject).map((g) => ({ id: g.id, subject: g.subject })));
   }
 
   listChats() {
@@ -212,9 +268,13 @@ export class WhatsAppService extends EventEmitter {
   addMessages(messages = [], { live }) {
     const batch = [];
     for (const raw of messages) {
-      if (raw.pushName && raw.key?.participant) this.names.set(raw.key.participant, raw.pushName);
-      else if (raw.pushName && !raw.key?.fromMe && raw.key?.remoteJid) this.names.set(raw.key.remoteJid, raw.pushName);
-      const normalized = normalizeMessage(raw, (jid) => this.names.get(jid) || "");
+      const key = raw.key || {};
+      if (key.participant) this.rememberPair(key.participant, key.participantAlt);
+      else this.rememberPair(key.remoteJid, key.remoteJidAlt);
+      if (raw.pushName && !key.fromMe) {
+        this.setName(key.participant ? [key.participant, key.participantAlt] : [key.remoteJid, key.remoteJidAlt], raw.pushName);
+      }
+      const normalized = normalizeMessage(raw, (jid, alt) => this.nameFor(jid, alt));
       if (!normalized) continue;
       this.remember(normalized, raw);
       batch.push({ normalized, raw });

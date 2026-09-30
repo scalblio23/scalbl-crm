@@ -2896,17 +2896,20 @@ export async function getLinkedWhatsAppChatIds() {
 }
 
 // Stores one WhatsApp message on a client's timeline. Returns the new
-// entry, or null if it was already there (same client + message id).
+// entry, or null if it was already there (same client + message id) —
+// in which case an old placeholder sender ("Client") is replaced with
+// the real name, if we now have one.
 // files: [{ name, mimeType, data: Buffer }]
 export async function addCsmWhatsAppMessage({ clientId, waId, direction, author, text, createdAt, files = [] }) {
   const rows = await query(
     `INSERT INTO csm_entries (client_id, kind, text, value, author, created_at, wa_id)
      VALUES ($1, 'whatsapp', $2, $3, $4, $5, $6)
-     ON CONFLICT (client_id, wa_id) WHERE wa_id IS NOT NULL DO NOTHING
-     RETURNING *`,
+     ON CONFLICT (client_id, wa_id) WHERE wa_id IS NOT NULL DO UPDATE SET author = EXCLUDED.author
+       WHERE csm_entries.author IN ('Client', '') AND EXCLUDED.author NOT IN ('Client', '', 'WhatsApp user')
+     RETURNING *, (xmax = 0) AS inserted`,
     [clientId, text || "", direction, author || "", createdAt || new Date(), waId]
   );
-  if (!rows[0]) return null;
+  if (!rows[0] || !rows[0].inserted) return null;
   const entry = csmEntryFromRow(rows[0]);
   entry.files = [];
   for (const f of files) {

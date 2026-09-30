@@ -26,7 +26,7 @@ export function createWhatsAppSync({ service, db, log = console }) {
     if (!clientIds.length) return [];
     const file = n.media ? await service.downloadMedia(n, raw) : null;
     const text = n.text || (file ? "" : n.placeholder || "");
-    const author = n.fromMe ? sentBy.get(n.id) || "Team (WhatsApp)" : n.sender;
+    const author = n.fromMe ? sentBy.get(n.id) || "Team (WhatsApp)" : await service.resolveSender(n);
     const stored = [];
     for (const clientId of clientIds) {
       const entry = await db.addCsmWhatsAppMessage({

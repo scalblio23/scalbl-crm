@@ -40,7 +40,16 @@ function fakeSocketFactory() {
       },
       end() {},
       async groupFetchAllParticipating() {
-        return { [GROUP]: { id: GROUP, subject: "Cable Co × Scalbl" } };
+        return {
+          [GROUP]: {
+            id: GROUP,
+            subject: "Cable Co × Scalbl",
+            participants: [{ id: "555@lid", phoneNumber: "61400000055@s.whatsapp.net", notify: "Eric Lee" }],
+          },
+        };
+      },
+      signalRepository: {
+        lidMapping: { async getPNForLID(lid) { return lid === "333@lid" ? "61400000088:0@s.whatsapp.net" : null; } },
       },
     };
     made.push(sock);
@@ -210,4 +219,35 @@ test("HTTP API: token required; status, chats, send, backfill", async () => {
     server.close();
     await service.stop();
   }
+});
+
+test("sender names: contacts, lid↔phone mappings, group members, phone fallback — never just 'Client'", async () => {
+  const { service, sock } = await startService();
+  const db = fakeDb({ [GROUP]: [1] });
+  createWhatsAppSync({ service, db, log: quiet });
+  sock.ev.emit("connection.update", { connection: "open" });
+  await until(() => service.status().state === "connected" && service.chats.has(GROUP), "connected + groups");
+  sock.ev.emit("messaging-history.set", {
+    chats: [],
+    contacts: [{ id: JANE, name: "Jane Client" }],
+    lidPnMappings: [{ lid: "111@lid", pn: JANE }],
+    messages: [],
+  });
+  const msg = (id, key) => ({ key: { remoteJid: GROUP, fromMe: false, id, ...key }, message: { conversation: `msg ${id}` }, messageTimestamp: 1790000000 });
+  sock.ev.emit("messages.upsert", {
+    type: "notify",
+    messages: [
+      msg("N1", { participant: "111@lid" }), // mapped to a saved contact
+      msg("N2", { participant: "222@lid", participantAlt: "61400000077@s.whatsapp.net" }), // phone on the message
+      msg("N3", { participant: "333@lid" }), // WhatsApp knows the phone
+      msg("N4", { participant: "555@lid" }), // group member's name
+      msg("N5", { participant: "444@lid" }), // nothing known at all
+    ],
+  });
+  await until(() => db.stored.length === 5, "5 messages stored");
+  assert.deepEqual(
+    Object.fromEntries(db.stored.map((s) => [s.waId, s.author])),
+    { N1: "Jane Client", N2: "+61400000077", N3: "+61400000088", N4: "Eric Lee", N5: "WhatsApp user" }
+  );
+  await service.stop();
 });
