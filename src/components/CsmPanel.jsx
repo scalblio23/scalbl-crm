@@ -5,6 +5,7 @@ import {
   Download,
   FileText,
   Loader2,
+  Lock,
   MessageCircle,
   Paperclip,
   Plus,
@@ -194,7 +195,7 @@ function initials(name) {
     .toUpperCase();
 }
 
-export default function CsmPanel() {
+export default function CsmPanel({ canManageWhatsApp = false }) {
   const [clients, setClients] = useState([]);
   const [loadingClients, setLoadingClients] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
@@ -294,7 +295,7 @@ export default function CsmPanel() {
 
   // The chat list, fetched fresh each time the panel opens while connected.
   useEffect(() => {
-    if (!waOpen || !waConnected) return undefined;
+    if (!waOpen || !waConnected || !canManageWhatsApp) return undefined;
     let cancelled = false;
     setWaChatSearch("");
     api
@@ -304,7 +305,7 @@ export default function CsmPanel() {
     return () => {
       cancelled = true;
     };
-  }, [waOpen, waConnected]);
+  }, [waOpen, waConnected, canManageWhatsApp]);
 
   // A client linked to WhatsApp: check for new messages every 5s.
   const selectedChatId = clients.find((c) => c.id === selectedId)?.whatsappChatId || null;
@@ -780,6 +781,7 @@ export default function CsmPanel() {
                     }`}
                   >
                     <WhatsAppIcon size={13} />
+                    {selected.whatsappChatId && <Lock size={11} className="shrink-0" aria-label="Locked" />}
                     <span className="truncate">
                       {selected.whatsappChatId ? `WhatsApp: ${selected.whatsappChatName || "linked"}` : "WhatsApp: not linked"}
                     </span>
@@ -793,6 +795,7 @@ export default function CsmPanel() {
                       <div className="fixed inset-0 z-40" onClick={() => setWaOpen(false)} />
                       <div className="absolute left-0 top-full mt-1 z-50 w-80 bg-white border border-gray-200 rounded-xl shadow-lg p-3">
                         <WhatsAppPanel
+                          canManage={canManageWhatsApp}
                           client={selected}
                           status={waStatus}
                           chats={waChats}
@@ -925,7 +928,9 @@ export default function CsmPanel() {
                       <>No WhatsApp messages with {selected.name} yet.</>
                     ) : (
                       <>
-                        {selected.name} isn't linked to a WhatsApp chat yet — use the WhatsApp button under their name.
+                        {canManageWhatsApp
+                          ? `${selected.name} doesn't have a WhatsApp chat assigned yet — use the WhatsApp button under their name.`
+                          : `${selected.name} doesn't have a WhatsApp chat assigned yet — a super admin can assign one.`}
                         <div className="mt-2">
                           <button onClick={() => setShowExample(true)} className="text-gray-700 font-medium underline">
                             Show example messages
@@ -987,7 +992,9 @@ export default function CsmPanel() {
                   {composeMode === "comment"
                     ? "Only your team sees comments."
                     : !selected.whatsappChatId
-                    ? "Link this client to a WhatsApp chat first (the WhatsApp button under their name)."
+                    ? canManageWhatsApp
+                      ? "Assign this client a WhatsApp chat first (the WhatsApp button under their name)."
+                      : "No WhatsApp chat is assigned to this client yet — a super admin can assign one."
                     : !waConnected
                     ? "The team WhatsApp is offline — reconnect it from the WhatsApp button to send."
                     : `Sends to "${selected.whatsappChatName || "their chat"}" from the team WhatsApp.`}
@@ -1243,7 +1250,19 @@ function Attachments({ files }) {
 
 // The WhatsApp panel under a client's name: connect the team WhatsApp
 // (QR code), then link this client to one of its chats or groups.
-function WhatsAppPanel({ client, status, chats, search, onSearch, busy, onLink, onDisconnect, showExample, onToggleExample }) {
+function WhatsAppPanel({
+  canManage,
+  client,
+  status,
+  chats,
+  search,
+  onSearch,
+  busy,
+  onLink,
+  onDisconnect,
+  showExample,
+  onToggleExample,
+}) {
   const state = status?.state;
   const title = (
     <div className="flex items-center gap-2 mb-2">
@@ -1279,6 +1298,16 @@ function WhatsAppPanel({ client, status, chats, search, onSearch, busy, onLink, 
     );
   }
 
+  if (state === "qr" && !canManage) {
+    return (
+      <>
+        {title}
+        <p className="text-sm text-gray-700">The team WhatsApp isn't connected right now.</p>
+        <p className="text-xs text-gray-400 mt-1">Ask a super admin to connect it.</p>
+      </>
+    );
+  }
+
   if (state === "qr") {
     return (
       <>
@@ -1303,7 +1332,33 @@ function WhatsAppPanel({ client, status, chats, search, onSearch, busy, onLink, 
     );
   }
 
-  // Connected: pick this client's chat.
+  // Everyone but a super admin: the assigned chat, locked, read-only.
+  if (!canManage) {
+    return (
+      <>
+        {title}
+        {client.whatsappChatId ? (
+          <div className="flex items-start gap-2 text-xs text-gray-600 bg-green-50 border border-green-200 rounded-lg px-2.5 py-2">
+            <Lock size={13} className="text-green-700 mt-0.5 shrink-0" />
+            <span>
+              Assigned to <b className="text-gray-900">{client.whatsappChatName || client.whatsappChatId}</b>. You can read and
+              reply here; only a super admin can change it.
+            </span>
+          </div>
+        ) : (
+          <>
+            <p className="text-sm text-gray-700">No WhatsApp chat is assigned to {client.name} yet.</p>
+            <p className="text-xs text-gray-400 mt-1">A super admin can assign one.</p>
+            <button onClick={onToggleExample} className="mt-2 text-xs font-medium text-gray-600 hover:text-gray-900">
+              {showExample ? "Hide example messages" : "Show example messages"}
+            </button>
+          </>
+        )}
+      </>
+    );
+  }
+
+  // Super admin, connected: assign (or change) this client's chat.
   const q = search.trim().toLowerCase();
   const list = (chats || []).filter((c) => !q || c.name.toLowerCase().includes(q));
   return (
@@ -1311,15 +1366,18 @@ function WhatsAppPanel({ client, status, chats, search, onSearch, busy, onLink, 
       {title}
       {client.whatsappChatId ? (
         <div className="flex items-center gap-2 text-xs text-gray-600 bg-green-50 border border-green-200 rounded-lg px-2.5 py-2 mb-2">
+          <Lock size={13} className="text-green-700 shrink-0" />
           <span className="flex-1 min-w-0">
-            Linked to <b className="text-gray-900">{client.whatsappChatName || client.whatsappChatId}</b>
+            Locked to <b className="text-gray-900">{client.whatsappChatName || client.whatsappChatId}</b>
           </span>
           <button disabled={busy} onClick={() => onLink(null)} className="text-gray-500 hover:text-red-600 font-medium">
             Unlink
           </button>
         </div>
       ) : (
-        <p className="text-xs text-gray-500 mb-2">Pick {client.name}'s chat or group — its messages will show in this timeline.</p>
+        <p className="text-xs text-gray-500 mb-2">
+          Assign {client.name}'s chat or group — it's then locked to them, and only super admins can change it.
+        </p>
       )}
       <div className="relative mb-2">
         <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />

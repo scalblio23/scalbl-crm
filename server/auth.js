@@ -56,6 +56,14 @@ export function canManageUsers(role) {
   return role === "owner" || role === "super_admin";
 }
 
+// WhatsApp for the CSM tab: connecting/disconnecting the team account
+// and assigning a chat to a client (which then stays locked to it) is
+// for super admins only; everyone else can read and reply in the chat
+// a client has been assigned.
+export function canManageWhatsApp(role) {
+  return role === "owner" || role === "super_admin";
+}
+
 export function canDeleteUser(actingRole, targetRole) {
   if (targetRole === "owner") return false;
   return canManageUsers(actingRole);
