@@ -7,6 +7,8 @@
 //   GET ?op=unread              → { total, byClient, mentions: { total, byClient, items } }
 //                                 unread incoming WhatsApp messages and @mentions of this user
 //   GET ?op=people              → { people: [{ id, name }] }  who can be @mentioned
+//   GET ?op=ad-leads&clientId=  → { status, days: [{ date, leads }], total, keyword, fetchedAt }
+//                                 last 30 days of Meta leads (status: ok | no-account | not-configured | error)
 //   GET ?clientId=[&after=id]   → { entries }  (oldest first; each has files: [{ id, name, mimeType, size }])
 //                                 after: only entries newer than that id
 //   GET ?fileId=                → the attached file itself (inline; ?download=1 to save it)
@@ -14,7 +16,8 @@
 //   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }], mentions?: [userId] }
 //   POST { action: "confidence", clientId, value }   0.1 … 1.0
 //   POST { action: "mood", clientId, mood }          see CSM_MOODS
-//   POST { action: "ad-account", clientId, url }     the client's ad account link ("" clears it)
+//   POST { action: "ad-account", clientId, url, rule? }  the client's ad account link ("" clears it)
+//                                 and campaign keyword its leads count from ("" = all campaigns)
 //   POST { action: "link-whatsapp", clientId, chatId, chatName }   chatId null unlinks
 //   POST { action: "mark-read", clientId }   this user has seen the client's messages and @mentions
 //   DELETE ?clientId=
@@ -30,6 +33,8 @@ import {
   setCsmConfidence,
   setCsmMood,
   setCsmAdAccount,
+  getCsmAdLeadsCache,
+  saveCsmAdLeadsCache,
   linkCsmWhatsApp,
   getCsmUnread,
   markCsmRead,
@@ -37,6 +42,10 @@ import {
 } from "../server/db.js";
 import { requireAuth, forbidClientRole, canManageWhatsApp } from "../server/auth.js";
 import { callWhatsAppGateway } from "../server/voiceConfig.js";
+import { adAccountIdFrom, fetchDailyLeads, metaConfigured } from "../server/metaAds.js";
+
+// Meta's numbers move through the day; 30 minutes old is fresh enough.
+const AD_LEADS_FRESH_MS = 30 * 60 * 1000;
 
 const MAX_COMMENT_LENGTH = 5000;
 // The whole request has to fit under the platform's ~4.5MB body limit
@@ -89,6 +98,36 @@ export default async function handler(req, res) {
       }
       if (req.query?.op === "unread") return res.status(200).json(await getCsmUnread(user.id));
       if (req.query?.op === "people") return res.status(200).json({ people: await getCsmPeople() });
+      if (req.query?.op === "ad-leads") {
+        const id = Number(req.query?.clientId);
+        const client = (await getCsmClients()).find((c) => c.id === id);
+        if (!client) return res.status(404).json({ error: "Client not found" });
+        const accountId = adAccountIdFrom(client.adAccountUrl);
+        if (!accountId) return res.status(200).json({ status: "no-account" });
+        const keyword = client.adAccountRule || "";
+        const cached = await getCsmAdLeadsCache(id);
+        const usable = cached && cached.accountId === accountId && cached.keyword === keyword;
+        const reply = (c) => ({
+          status: "ok",
+          days: c.days,
+          total: c.days.reduce((n, d) => n + d.leads, 0),
+          keyword,
+          fetchedAt: c.fetchedAt,
+        });
+        if (usable && Date.now() - new Date(cached.fetchedAt).getTime() < AD_LEADS_FRESH_MS) {
+          return res.status(200).json(reply(cached));
+        }
+        if (!metaConfigured()) return res.status(200).json({ status: "not-configured" });
+        try {
+          const days = await fetchDailyLeads({ accountId, keyword });
+          await saveCsmAdLeadsCache(id, { accountId, keyword, days });
+          return res.status(200).json(reply({ days, fetchedAt: new Date().toISOString() }));
+        } catch (err) {
+          // Meta hiccup: last known numbers beat nothing.
+          if (usable) return res.status(200).json({ ...reply(cached), stale: true });
+          return res.status(200).json({ status: "error", error: err.message });
+        }
+      }
       const clientId = Number(req.query?.clientId);
       if (clientId) {
         const after = Math.max(0, Number(req.query?.after) || 0);
@@ -178,7 +217,8 @@ export default async function handler(req, res) {
         if (url && (!/^https?:\/\/\S+$/i.test(url) || url.length > 2000)) {
           return res.status(400).json({ error: "That doesn't look like a link — paste the full https:// address." });
         }
-        const client = await setCsmAdAccount(clientId, url);
+        const rule = req.body?.rule === undefined ? undefined : String(req.body.rule).trim().slice(0, 200);
+        const client = await setCsmAdAccount(clientId, url, rule);
         if (!client) return res.status(404).json({ error: "Client not found" });
         return res.status(200).json({ client });
       }
