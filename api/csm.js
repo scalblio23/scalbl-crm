@@ -14,6 +14,7 @@
 //   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }], mentions?: [userId] }
 //   POST { action: "confidence", clientId, value }   0.1 … 1.0
 //   POST { action: "mood", clientId, mood }          see CSM_MOODS
+//   POST { action: "ad-account", clientId, url }     the client's ad account link ("" clears it)
 //   POST { action: "link-whatsapp", clientId, chatId, chatName }   chatId null unlinks
 //   POST { action: "mark-read", clientId }   this user has seen the client's messages and @mentions
 //   DELETE ?clientId=
@@ -28,6 +29,7 @@ import {
   getCsmPeople,
   setCsmConfidence,
   setCsmMood,
+  setCsmAdAccount,
   linkCsmWhatsApp,
   getCsmUnread,
   markCsmRead,
@@ -169,6 +171,16 @@ export default async function handler(req, res) {
             .catch(() => 0);
         }
         return res.status(200).json(result);
+      }
+
+      if (action === "ad-account") {
+        const url = String(req.body?.url || "").trim();
+        if (url && (!/^https?:\/\/\S+$/i.test(url) || url.length > 2000)) {
+          return res.status(400).json({ error: "That doesn't look like a link — paste the full https:// address." });
+        }
+        const client = await setCsmAdAccount(clientId, url);
+        if (!client) return res.status(404).json({ error: "Client not found" });
+        return res.status(200).json({ client });
       }
 
       if (action === "mood") {
