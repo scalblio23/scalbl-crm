@@ -87,6 +87,7 @@ import {
   onSipTransferState,
 } from "./lib/voiceDevice";
 import { api } from "./lib/api";
+import CrazytelSmsInbox from "./components/CrazytelSmsInbox";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
 import AIVoicePanel from "./components/AIVoicePanel";
@@ -2299,6 +2300,7 @@ export default function SimpleCRM() {
   // it, so you can find a thread by something that was said, not just
   // who said it.
   const [convoSearch, setConvoSearch] = useState("");
+  const [inboxView, setInboxView] = useState("legacy");
   const convoSearchQuery = convoSearch.trim().toLowerCase();
   const visibleConversations = convoSearchQuery
     ? conversations.filter((c) => {
@@ -5803,6 +5805,19 @@ export default function SimpleCRM() {
 
         {/* Conversation */}
         {page === "conversation" && (
+          <div className="flex gap-2 border-b border-gray-200 px-4 py-2" aria-label="Inbox views">
+            <button type="button" aria-pressed={inboxView === "legacy"} onClick={() => setInboxView("legacy")}
+              className={`rounded px-3 py-2 text-sm ${inboxView === "legacy" ? "bg-gray-900 text-white" : "text-gray-600"}`}>
+              Legacy inbox · calls &amp; Twilio
+            </button>
+            <button type="button" aria-pressed={inboxView === "crazytel"} onClick={() => setInboxView("crazytel")}
+              className={`rounded px-3 py-2 text-sm ${inboxView === "crazytel" ? "bg-gray-900 text-white" : "text-gray-600"}`}>
+              Crazytel SMS
+            </button>
+          </div>
+        )}
+        <CrazytelSmsInbox active={page === "conversation" && inboxView === "crazytel"} contacts={contacts} />
+        {page === "conversation" && inboxView === "legacy" && (
           <div className="flex flex-1 overflow-hidden">
             <div className="w-80 border-r border-gray-200 flex flex-col">
               <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
