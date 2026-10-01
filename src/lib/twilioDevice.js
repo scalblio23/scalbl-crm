@@ -174,8 +174,12 @@ export async function joinConference(conferenceName, identity = "rep", { leadId 
 }
 
 // Ends whatever call is currently in progress on this device, if any.
+// `device` is dropped whenever it errors or unregisters (see getDevice)
+// — which can happen mid-call — so the live call is also hung up
+// directly, otherwise "End call" would do nothing on that call.
 export function hangUp() {
   device?.disconnectAll();
+  if (lastCall && lastCall.status() !== "closed") lastCall.disconnect();
 }
 
 // Sends DTMF tones (keypad presses) into the live call, e.g. to get

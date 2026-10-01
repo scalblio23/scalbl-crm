@@ -359,7 +359,9 @@ function handleMessage(msg) {
       {
         const call = current;
         finishCall();
-        call.emit("disconnect", { outcome: "no-answer", outcomeMessage: "No answer on any line." });
+        // `cancelled`: the rep hung up before anyone answered.
+        if (msg.cancelled) call.emit("disconnect", { outcome: "cancelled", outcomeMessage: "" });
+        else call.emit("disconnect", { outcome: "no-answer", outcomeMessage: "No answer on any line." });
       }
       return;
     default:
@@ -524,8 +526,14 @@ async function begin(call, message) {
   try {
     await startAudio();
   } catch (err) {
-    finishCall();
+    if (current === call) finishCall();
     throw err;
+  }
+  // Hung up while the mic was still starting — nothing's been dialled
+  // yet, so just don't (see hangUp).
+  if (current !== call) {
+    stopAudio();
+    throw new Error("The call was cancelled.");
   }
   return new Promise((resolve, reject) => {
     pending = { ref: message.ref, call, resolve, reject, multi: message.type === "dial-multi" };
@@ -571,8 +579,32 @@ async function answerIncoming(offer) {
   send({ type: "answer", callId: offer.callId });
 }
 
+// How long to wait for the gateway to confirm a hang-up before ending
+// the call locally anyway, so "End call" can never leave the rep stuck
+// on a live-looking call (a half-dead socket, a lost message, …).
+const HANGUP_BACKSTOP_MS = 3000;
+
 export function hangUp() {
-  if (current || pending) send({ type: "hangup" });
+  const call = current;
+  if (!call && !pending) return;
+  // Still starting the mic — the dial hasn't gone to the gateway, so
+  // there's nothing there to hang up. Dropping `current` makes begin()
+  // abandon the call instead of dialling it a moment later.
+  if (call && !pending && !call.callId && call.direction === "outbound") {
+    finishCall();
+    return;
+  }
+  send({ type: "hangup" });
+  setTimeout(() => {
+    if (pending && pending.call === call) {
+      pending.reject(new Error("The call was cancelled."));
+      pending = null;
+    }
+    if (call && current === call) {
+      finishCall();
+      call.emit("disconnect", { outcome: "cancelled", outcomeMessage: "" });
+    }
+  }, HANGUP_BACKSTOP_MS);
 }
 
 export function sendDigits(digits) {
