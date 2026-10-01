@@ -158,7 +158,7 @@ export async function ensureSchema() {
         AND to_regclass('public.tag_booking_links') IS NOT NULL
         AND to_regclass('public.csm_entries') IS NOT NULL
         AND to_regclass('public.csm_files') IS NOT NULL
-        AND to_regclass('public.csm_reads') IS NOT NULL
+        AND to_regclass('public.csm_seen') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'csm_entries' AND column_name = 'wa_id'
@@ -643,10 +643,12 @@ export async function ensureSchema() {
     await query(
       `CREATE UNIQUE INDEX IF NOT EXISTS csm_entries_wa_idx ON csm_entries (client_id, wa_id) WHERE wa_id IS NOT NULL`
     );
-    // When each user last looked at each CSM client — drives the unread
-    // WhatsApp counts (CSM tab badge, per-client badges).
+    // When each user last opened each CSM client — drives the unread
+    // WhatsApp counts (CSM tab bell, per-client badges). Replaces
+    // csm_reads, which marked everything read on a user's first check.
+    await query(`DROP TABLE IF EXISTS csm_reads`);
     await query(`
-      CREATE TABLE IF NOT EXISTS csm_reads (
+      CREATE TABLE IF NOT EXISTS csm_seen (
         user_id INTEGER NOT NULL,
         client_id INTEGER NOT NULL REFERENCES csm_clients(id) ON DELETE CASCADE,
         last_read_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -2936,24 +2938,21 @@ export async function addCsmWhatsAppMessage({ clientId, waId, direction, author,
 // ---------- CSM unread WhatsApp messages (per user) ----------
 
 // { total, byClient: { [clientId]: n } } — incoming WhatsApp messages
-// newer than when this user last opened that client. A user's very
-// first check starts everything as read, so they aren't greeted by the
-// whole history; a client added later counts from that first check.
+// this user hasn't seen: newer than when they last opened that client
+// and newer than the team's last WhatsApp reply in that chat (replying
+// means it was read).
 export async function getCsmUnread(userId) {
-  const existing = await query("SELECT 1 FROM csm_reads WHERE user_id = $1 LIMIT 1", [userId]);
-  if (!existing.length) {
-    await query(
-      "INSERT INTO csm_reads (user_id, client_id) SELECT $1, id FROM csm_clients ON CONFLICT DO NOTHING",
-      [userId]
-    );
-    return { total: 0, byClient: {} };
-  }
   const rows = await query(
     `SELECT e.client_id, count(*)::int AS n
        FROM csm_entries e
-       LEFT JOIN csm_reads r ON r.client_id = e.client_id AND r.user_id = $1
+       LEFT JOIN csm_seen r ON r.client_id = e.client_id AND r.user_id = $1
+       LEFT JOIN LATERAL (
+         SELECT max(o.created_at) AS at FROM csm_entries o
+          WHERE o.client_id = e.client_id AND o.kind = 'whatsapp' AND o.value = 'out'
+       ) last_reply ON true
       WHERE e.kind = 'whatsapp' AND e.value = 'in'
-        AND e.created_at > COALESCE(r.last_read_at, (SELECT min(last_read_at) FROM csm_reads WHERE user_id = $1))
+        AND (r.last_read_at IS NULL OR e.created_at > r.last_read_at)
+        AND (last_reply.at IS NULL OR e.created_at > last_reply.at)
       GROUP BY e.client_id`,
     [userId]
   );
@@ -2968,7 +2967,7 @@ export async function getCsmUnread(userId) {
 
 export async function markCsmRead(userId, clientId) {
   await query(
-    `INSERT INTO csm_reads (user_id, client_id, last_read_at) VALUES ($1, $2, now())
+    `INSERT INTO csm_seen (user_id, client_id, last_read_at) VALUES ($1, $2, now())
      ON CONFLICT (user_id, client_id) DO UPDATE SET last_read_at = now()`,
     [userId, clientId]
   );
