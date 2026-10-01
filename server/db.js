@@ -2793,10 +2793,13 @@ function csmEntryFromRow(r) {
 
 export async function getCsmClients() {
   const rows = await query(`
-    SELECT c.*,
-           (SELECT max(e.created_at) FROM csm_entries e WHERE e.client_id = c.id) AS last_activity_at,
-           (SELECT count(*) FROM csm_entries e WHERE e.client_id = c.id AND e.kind = 'comment') AS comment_count
+    SELECT c.*, s.last_activity_at, COALESCE(s.comment_count, 0) AS comment_count
       FROM csm_clients c
+      LEFT JOIN (
+        SELECT client_id, max(created_at) AS last_activity_at,
+               count(*) FILTER (WHERE kind = 'comment') AS comment_count
+          FROM csm_entries GROUP BY client_id
+      ) s ON s.client_id = c.id
      ORDER BY lower(c.name)
   `);
   return rows.map(csmClientFromRow);
@@ -2811,16 +2814,20 @@ function csmFileMeta(r) {
   return { id: r.id, name: r.name, mimeType: r.mime_type, size: r.size };
 }
 
-export async function getCsmEntries(clientId) {
-  const rows = await query("SELECT * FROM csm_entries WHERE client_id = $1 ORDER BY created_at, id", [clientId]);
+// afterId: only entries added after that one (ids only go up), so the
+// timeline's 5s refresh fetches what's new instead of everything.
+export async function getCsmEntries(clientId, afterId = 0) {
+  const [rows, files] = await Promise.all([
+    query("SELECT * FROM csm_entries WHERE client_id = $1 AND id > $2 ORDER BY created_at, id", [clientId, afterId]),
+    query(
+      `SELECT f.id, f.entry_id, f.name, f.mime_type, f.size
+         FROM csm_files f JOIN csm_entries e ON e.id = f.entry_id
+        WHERE e.client_id = $1 AND e.id > $2
+        ORDER BY f.id`,
+      [clientId, afterId]
+    ),
+  ]);
   const entries = rows.map(csmEntryFromRow);
-  const files = await query(
-    `SELECT f.id, f.entry_id, f.name, f.mime_type, f.size
-       FROM csm_files f JOIN csm_entries e ON e.id = f.entry_id
-      WHERE e.client_id = $1
-      ORDER BY f.id`,
-    [clientId]
-  );
   const byEntry = new Map();
   for (const f of files) {
     if (!byEntry.has(f.entry_id)) byEntry.set(f.entry_id, []);
@@ -2973,27 +2980,31 @@ export async function addCsmWhatsAppMessage({ clientId, waId, direction, author,
 // and newer than the team's last WhatsApp reply in that chat (replying
 // means it was read).
 export async function getCsmUnread(userId) {
-  const rows = await query(
-    `SELECT e.client_id, count(*)::int AS n
-       FROM csm_entries e
-       LEFT JOIN csm_seen r ON r.client_id = e.client_id AND r.user_id = $1
-       LEFT JOIN LATERAL (
-         SELECT max(o.created_at) AS at FROM csm_entries o
-          WHERE o.client_id = e.client_id AND o.kind = 'whatsapp' AND o.value = 'out'
-       ) last_reply ON true
-      WHERE e.kind = 'whatsapp' AND e.value = 'in'
-        AND (r.last_read_at IS NULL OR e.created_at > r.last_read_at)
-        AND (last_reply.at IS NULL OR e.created_at > last_reply.at)
-      GROUP BY e.client_id`,
-    [userId]
-  );
+  const [rows, mentions] = await Promise.all([
+    query(
+      `WITH last_reply AS (
+         SELECT client_id, max(created_at) AS at FROM csm_entries
+          WHERE kind = 'whatsapp' AND value = 'out' GROUP BY client_id
+       )
+       SELECT e.client_id, count(*)::int AS n
+         FROM csm_entries e
+         LEFT JOIN csm_seen r ON r.client_id = e.client_id AND r.user_id = $1
+         LEFT JOIN last_reply lr ON lr.client_id = e.client_id
+        WHERE e.kind = 'whatsapp' AND e.value = 'in'
+          AND (r.last_read_at IS NULL OR e.created_at > r.last_read_at)
+          AND (lr.at IS NULL OR e.created_at > lr.at)
+        GROUP BY e.client_id`,
+      [userId]
+    ),
+    getCsmMentions(userId),
+  ]);
   const byClient = {};
   let total = 0;
   for (const r of rows) {
     byClient[r.client_id] = r.n;
     total += r.n;
   }
-  return { total, byClient, mentions: await getCsmMentions(userId) };
+  return { total, byClient, mentions };
 }
 
 // Comments where this user was @mentioned and hasn't opened that client

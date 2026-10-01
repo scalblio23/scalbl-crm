@@ -7,7 +7,8 @@
 //   GET ?op=unread              → { total, byClient, mentions: { total, byClient, items } }
 //                                 unread incoming WhatsApp messages and @mentions of this user
 //   GET ?op=people              → { people: [{ id, name }] }  who can be @mentioned
-//   GET ?clientId=              → { entries }  (oldest first; each has files: [{ id, name, mimeType, size }])
+//   GET ?clientId=[&after=id]   → { entries }  (oldest first; each has files: [{ id, name, mimeType, size }])
+//                                 after: only entries newer than that id
 //   GET ?fileId=                → the attached file itself (inline; ?download=1 to save it)
 //   POST { action: "add-client", name }
 //   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }], mentions?: [userId] }
@@ -53,12 +54,16 @@ function cleanFileName(name) {
 }
 
 export default async function handler(req, res) {
+  // The schema check and the login check each need the database — run
+  // them side by side rather than one after the other.
+  const schema = ensureSchema();
+  schema.catch(() => {}); // reported below, once we know who's asking
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
   const author = user.name || user.email || "Someone";
   try {
-    await ensureSchema();
+    await schema;
 
     if (req.method === "GET") {
       const fileId = Number(req.query?.fileId);
@@ -83,7 +88,10 @@ export default async function handler(req, res) {
       if (req.query?.op === "unread") return res.status(200).json(await getCsmUnread(user.id));
       if (req.query?.op === "people") return res.status(200).json({ people: await getCsmPeople() });
       const clientId = Number(req.query?.clientId);
-      if (clientId) return res.status(200).json({ entries: await getCsmEntries(clientId) });
+      if (clientId) {
+        const after = Math.max(0, Number(req.query?.after) || 0);
+        return res.status(200).json({ entries: await getCsmEntries(clientId, after) });
+      }
       const [clients, unread] = await Promise.all([getCsmClients(), getCsmUnread(user.id)]);
       return res.status(200).json({ clients, unread });
     }

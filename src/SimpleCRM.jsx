@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   AreaChart,
   Area,
@@ -91,8 +91,14 @@ import { api } from "./lib/api";
 import CrazytelSmsInbox from "./components/CrazytelSmsInbox";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
-import AIVoicePanel from "./components/AIVoicePanel";
-import CsmPanel from "./components/CsmPanel";
+// Tabs with their own code load when first opened (and in the
+// background shortly after the app starts), not as part of the first
+// download.
+const loadCsmPanel = () => import("./components/CsmPanel");
+const loadAIVoicePanel = () => import("./components/AIVoicePanel");
+const CsmPanel = lazy(loadCsmPanel);
+const AIVoicePanel = lazy(loadAIVoicePanel);
+const TabLoading = () => <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Loading…</div>;
 import RecordingPlayer from "./components/RecordingPlayer";
 import {
   timezoneOptions,
@@ -2662,6 +2668,17 @@ export default function SimpleCRM() {
   const isClientRole = Boolean(authUser) && (authUser.role === "client" || !FULL_ACCESS_ROLES.includes(authUser.role));
   const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal"];
   const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
+  // Fetch the CSM / AI Voice tab code in the background once the app
+  // is up, so opening them later doesn't wait on a download.
+  useEffect(() => {
+    if (!authUser || isClientRole) return undefined;
+    const timer = setTimeout(() => {
+      loadCsmPanel().catch(() => {});
+      loadAIVoicePanel().catch(() => {});
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [authUser, isClientRole]);
+
   useEffect(() => {
     if (!authUser || isClientRole) return undefined;
     let cancelled = false;
@@ -10699,8 +10716,16 @@ export default function SimpleCRM() {
           </div>
         )}
 
-        {page === "ai-voice" && <AIVoicePanel />}
-        {page === "csm" && <CsmPanel canManageWhatsApp={canManageUsers} currentUserId={authUser?.id} onUnreadChange={setCsmUnread} />}
+        {page === "ai-voice" && (
+          <Suspense fallback={<TabLoading />}>
+            <AIVoicePanel />
+          </Suspense>
+        )}
+        {page === "csm" && (
+          <Suspense fallback={<TabLoading />}>
+            <CsmPanel canManageWhatsApp={canManageUsers} currentUserId={authUser?.id} onUnreadChange={setCsmUnread} />
+          </Suspense>
+        )}
       </main>
 
       {/* Manual dial — floating softphone button, available on every

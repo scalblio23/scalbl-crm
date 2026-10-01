@@ -1,8 +1,11 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
-import SimpleCRM from "./SimpleCRM.jsx";
-import BookingWidget from "./BookingWidget.jsx";
 import "./index.css";
+
+// The public booking page and the CRM never share a page load, so each
+// only downloads its own code.
+const SimpleCRM = lazy(() => import("./SimpleCRM.jsx"));
+const BookingWidget = lazy(() => import("./BookingWidget.jsx"));
 
 // No router dependency — the app is a single mounted component, and
 // the only other page is this one public route: a booking widget
@@ -11,5 +14,7 @@ import "./index.css";
 const bookMatch = window.location.pathname.match(/^\/book\/([^/]+)\/?$/);
 
 ReactDOM.createRoot(document.getElementById("root")).render(
-  <React.StrictMode>{bookMatch ? <BookingWidget slug={bookMatch[1]} /> : <SimpleCRM />}</React.StrictMode>
+  <React.StrictMode>
+    <Suspense fallback={null}>{bookMatch ? <BookingWidget slug={bookMatch[1]} /> : <SimpleCRM />}</Suspense>
+  </React.StrictMode>
 );

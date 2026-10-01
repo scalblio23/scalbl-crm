@@ -211,7 +211,10 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
   const highlightRef = useRef(null);
   const [loadingClients, setLoadingClients] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
-  const [entries, setEntries] = useState([]);
+  // Every timeline opened (or prefetched) this visit, by client id — so
+  // going back to a client is instant, and refreshes only fetch what's
+  // new. Entries still saving carry pending: true.
+  const [timelines, setTimelines] = useState({});
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [search, setSearch] = useState("");
   const [comment, setComment] = useState("");
@@ -237,6 +240,9 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
   const [composeMode, setComposeMode] = useState("comment"); // comment | whatsapp
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [showExample, setShowExample] = useState(false);
+  // Long timelines show their newest entries first; "Show earlier"
+  // adds more (drawing hundreds at once is what makes a busy chat slow).
+  const [shownCount, setShownCount] = useState(TIMELINE_PAGE);
   const [waOpen, setWaOpen] = useState(false);
   const [waStatus, setWaStatus] = useState(null); // { state, qr, me, error }
   const [waChats, setWaChats] = useState(null);
@@ -245,6 +251,33 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
   const timelineEndRef = useRef(null);
 
   const selected = clients.find((c) => c.id === selectedId) || null;
+  const entries = useMemo(() => timelines[selectedId] || [], [timelines, selectedId]);
+  const updateTimeline = (clientId, fn) =>
+    setTimelines((t) => {
+      const next = fn(t[clientId] || []);
+      return next === t[clientId] ? t : { ...t, [clientId]: next };
+    });
+  // Fetches a client's timeline — just the entries after the newest one
+  // we already have, when we have some — and merges it in.
+  const timelinesRef = useRef(timelines);
+  timelinesRef.current = timelines;
+  const inFlight = useRef(new Map());
+  const refreshTimeline = (clientId) => {
+    if (inFlight.current.has(clientId)) return inFlight.current.get(clientId);
+    const have = timelinesRef.current[clientId];
+    const after = have ? lastSavedId(have) : 0;
+    const request = api
+      .get(`/api/csm?clientId=${clientId}${after ? `&after=${after}` : ""}`)
+      .then(({ entries: list }) => updateTimeline(clientId, (prev) => mergeEntries(prev, list || [], !have)))
+      .finally(() => inFlight.current.delete(clientId));
+    inFlight.current.set(clientId, request);
+    return request;
+  };
+  // Load a timeline before it's clicked (hovering a client, or the top
+  // of the list right after it loads).
+  const prefetchTimeline = (clientId) => {
+    if (!timelinesRef.current[clientId]) refreshTimeline(clientId).catch(() => {});
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -255,6 +288,13 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
         setClients(list || []);
         if (counts) setUnread(withMentions(counts));
         if (list?.length) setSelectedId((id) => id ?? list[0].id);
+        // Warm up the next few timelines, a moment after the first one.
+        setTimeout(() => {
+          if (cancelled) return;
+          sortClients(list || [], sortKey)
+            .slice(0, 6)
+            .forEach((c) => prefetchTimeline(c.id));
+        }, 800);
       })
       .catch((err) => !cancelled && setError(err.message || "Could not load clients."))
       .finally(() => !cancelled && setLoadingClients(false));
@@ -264,22 +304,20 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
   }, []);
 
   useEffect(() => {
-    if (!selectedId) {
-      setEntries([]);
-      return undefined;
-    }
+    if (!selectedId) return undefined;
     let cancelled = false;
-    setLoadingEntries(true);
+    // Already loaded: show it straight away and just check for new entries.
+    setLoadingEntries(!timelinesRef.current[selectedId]);
     setMoodOpen(false);
     setWaOpen(false);
-    api
-      .get(`/api/csm?clientId=${selectedId}`)
-      .then(({ entries: list }) => !cancelled && setEntries(list || []))
+    setShownCount(TIMELINE_PAGE);
+    refreshTimeline(selectedId)
       .catch((err) => !cancelled && setError(err.message || "Could not load the timeline."))
       .finally(() => !cancelled && setLoadingEntries(false));
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
   // Keep the sidebar bells in step with what this tab knows.
@@ -377,30 +415,19 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
     };
   }, [waOpen, waConnected, canManageWhatsApp]);
 
-  // A client linked to WhatsApp: check for new messages every 5s.
-  const selectedChatId = clients.find((c) => c.id === selectedId)?.whatsappChatId || null;
+  // The open client: check for new entries (WhatsApp messages,
+  // teammates' comments) every 5s while the page is visible.
   useEffect(() => {
-    if (!selectedId || !selectedChatId) return undefined;
-    let cancelled = false;
-    const timer = setInterval(async () => {
-      try {
-        const { entries: list } = await api.get(`/api/csm?clientId=${selectedId}`);
-        if (cancelled || !list) return;
-        setEntries((prev) => {
-          // Keep anything still saving, unless the saved copy has arrived.
-          const pending = prev.filter((e) => e.pending && !(e.waId && list.some((x) => x.waId === e.waId)));
-          if (!pending.length && prev.length === list.length && prev.every((e, i) => e.id === list[i].id)) return prev;
-          return [...list, ...pending];
-        });
-      } catch {
+    if (!selectedId) return undefined;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      refreshTimeline(selectedId).catch(() => {
         // try again next tick
-      }
+      });
     }, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [selectedId, selectedChatId]);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   // Keep the newest entry in view, next to the comment box.
   useEffect(() => {
@@ -434,16 +461,18 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, showExample, timelineFilter, selected?.id, selected?.whatsappChatId]);
 
+  const hiddenCount = Math.max(0, visibleEntries.length - shownCount);
+
   // Entries grouped by day, oldest first.
   const days = useMemo(() => {
     const groups = [];
-    for (const e of visibleEntries) {
+    for (const e of visibleEntries.slice(-shownCount)) {
       const label = formatDay(e.createdAt);
       if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, items: [] });
       groups[groups.length - 1].items.push(e);
     }
     return groups;
-  }, [visibleEntries]);
+  }, [visibleEntries, shownCount]);
 
   // Confidence, mood and comments update the screen straight away and
   // save in the background (the round trip can take a second or two);
@@ -463,17 +492,19 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
     if (field !== "comment") {
       setClients((list) => list.map((c) => (c.id === client.id ? { ...c, [field]: value, lastActivityAt: now } : c)));
     }
-    setEntries((list) => [...list, { ...entry, id: tempId, clientId: client.id, createdAt: now, pending: true }]);
+    updateTimeline(client.id, (list) => [...list, { ...entry, id: tempId, clientId: client.id, createdAt: now, pending: true }]);
     try {
       const result = await api.post("/api/csm", body);
       // (The 5s WhatsApp poll may already have brought the saved copy in.)
-      setEntries((list) => list.filter((e) => e.id !== result.entry.id).map((e) => (e.id === tempId ? result.entry : e)));
+      updateTimeline(client.id, (list) =>
+        list.filter((e) => e.id !== result.entry.id).map((e) => (e.id === tempId ? result.entry : e))
+      );
       onSaved?.();
       if (latestRequest.current[key] === seq && result.client) {
         setClients((list) => list.map((c) => (c.id === result.client.id ? result.client : c)));
       }
     } catch (err) {
-      setEntries((list) => list.filter((e) => e.id !== tempId));
+      updateTimeline(client.id, (list) => list.filter((e) => e.id !== tempId));
       if (field !== "comment" && latestRequest.current[key] === seq) {
         setClients((list) => list.map((c) => (c.id === client.id ? { ...c, [field]: previous } : c)));
       }
@@ -613,7 +644,7 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
       setClients((list) => list.map((c) => (c.id === result.client.id ? result.client : c)));
       // Reload: linking pulls in the chat's recent messages.
       const { entries: list } = await api.get(`/api/csm?clientId=${selected.id}`);
-      setEntries(list || []);
+      updateTimeline(selected.id, (prev) => mergeEntries(prev, list || [], true));
       setWaOpen(false);
       setShowExample(false);
       if (chat) setComposeMode("whatsapp");
@@ -645,19 +676,19 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
     const tempId = `pending-wa-${Date.now()}`;
     setComment("");
     setError("");
-    setEntries((list) => [
+    updateTimeline(clientId, (list) => [
       ...list,
       { id: tempId, clientId, kind: "whatsapp", value: "out", author: "You", text, createdAt: new Date().toISOString(), pending: true },
     ]);
     try {
       const { messageId } = await api.post("/api/whatsapp", { op: "send", clientId, text });
-      setEntries((list) =>
+      updateTimeline(clientId, (list) =>
         list.some((e) => e.waId === messageId && !e.pending)
           ? list.filter((e) => e.id !== tempId)
           : list.map((e) => (e.id === tempId ? { ...e, waId: messageId } : e))
       );
     } catch (err) {
-      setEntries((list) => list.filter((e) => e.id !== tempId));
+      updateTimeline(clientId, (list) => list.filter((e) => e.id !== tempId));
       setComment((current) => current || text);
       setError(err.message || "Could not send the WhatsApp message.");
     }
@@ -854,6 +885,7 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
               <button
                 key={c.id}
                 onClick={() => setSelectedId(c.id)}
+                onMouseEnter={() => prefetchTimeline(c.id)}
                 className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left mb-0.5 ${
                   active ? "bg-white shadow-sm border border-gray-200" : "hover:bg-white border border-transparent"
                 }`}
@@ -1126,6 +1158,16 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
                 )
               ) : (
                 <ol className="relative border-l border-gray-200 ml-2">
+                  {hiddenCount > 0 && (
+                    <li className="mb-4 -ml-px pl-6">
+                      <button
+                        onClick={() => setShownCount((n) => n + TIMELINE_PAGE)}
+                        className="text-xs font-medium text-gray-600 hover:text-gray-900 border border-gray-200 bg-white rounded-full px-3 py-1"
+                      >
+                        Show earlier ({hiddenCount})
+                      </button>
+                    </li>
+                  )}
                   {days.map((day) => (
                     <li key={day.label} className="mb-2">
                       <div className="-ml-2 mb-3 inline-block bg-white pr-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
@@ -1362,6 +1404,30 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
       </section>
     </div>
   );
+}
+
+const TIMELINE_PAGE = 150;
+
+// Newest saved entry id (ids only go up; pending ones aren't saved yet).
+function lastSavedId(list) {
+  let max = 0;
+  for (const e of list) if (!e.pending && typeof e.id === "number" && e.id > max) max = e.id;
+  return max;
+}
+
+// Adds fetched entries to a timeline: new ones are added, saved copies
+// replace what we had, anything still saving stays (unless its saved
+// copy just arrived). full: the fetch was the whole timeline, so it
+// replaces the saved entries outright. Kept in time order.
+function mergeEntries(prev, fetched, full = false) {
+  if (!fetched.length && !full) return prev;
+  const byId = new Map((full ? [] : prev.filter((e) => !e.pending)).map((e) => [e.id, e]));
+  for (const e of fetched) byId.set(e.id, e);
+  const saved = [...byId.values()];
+  const pending = prev.filter((e) => e.pending && !(e.waId && saved.some((x) => x.waId === e.waId)));
+  const merged = [...saved.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt) || a.id - b.id), ...pending];
+  if (merged.length === prev.length && merged.every((e, i) => e === prev[i])) return prev;
+  return merged;
 }
 
 const NO_MENTIONS = { total: 0, byClient: {}, items: [] };

@@ -4,7 +4,9 @@
 // rep's mic/speakers instead of their actual phone. All it needs from
 // the backend is a short-lived Access Token — no Twilio secrets ever
 // reach the browser.
-import { Device } from "@twilio/voice-sdk";
+// The SDK is only downloaded the first time a Twilio call is placed —
+// accounts dialling over SIP never need it.
+const loadDeviceClass = () => import("@twilio/voice-sdk").then((m) => m.Device);
 import { getSoundboardProcessor } from "./soundboardProcessor";
 
 // Empty string = same-origin, i.e. /api/token — correct for the
@@ -57,8 +59,8 @@ async function fetchToken(identity) {
 async function getDevice(identity) {
   if (device) return device;
   if (!deviceReady) {
-    deviceReady = fetchToken(identity)
-      .then(({ token, callerIds }) => {
+    deviceReady = Promise.all([fetchToken(identity), loadDeviceClass()])
+      .then(([{ token, callerIds }, Device]) => {
         callerIdPool = Array.isArray(callerIds) ? callerIds : [];
         device = new Device(token, { logLevel: "warn" });
         // Self-heals a device left in a bad state — previously, once
