@@ -88,6 +88,7 @@ import {
   onSipTransferState,
 } from "./lib/voiceDevice";
 import { api } from "./lib/api";
+import { getCachedUser, setCachedUser, readSnapshot, writeSnapshot, clearStartupCache } from "./lib/startupCache";
 import CrazytelSmsInbox from "./components/CrazytelSmsInbox";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
@@ -942,8 +943,10 @@ export default function SimpleCRM() {
   // this component (the database bootstrap fetch included) waits for
   // this to resolve — there's no "logged out" flash of real data
   // because nothing else fetches until authUser is set.
-  const [authUser, setAuthUser] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  // Starts as the login remembered in this browser (if any) so the app
+  // shows straight away; /api/auth-me confirms it (or logs out) behind.
+  const [authUser, setAuthUser] = useState(getCachedUser);
+  const [authLoading, setAuthLoading] = useState(() => !getCachedUser());
   const [authMode, setAuthMode] = useState("login"); // "login" | "setup"
   const [authForm, setAuthForm] = useState({ email: "", password: "", confirm: "" });
   const [authError, setAuthError] = useState("");
@@ -954,9 +957,19 @@ export default function SimpleCRM() {
     (async () => {
       try {
         const { user } = await api.get("/api/auth-me");
-        if (!cancelled) setAuthUser(user);
-      } catch {
-        // Treated as logged out — the login screen below handles it.
+        if (!cancelled) {
+          // Same person, same access: keep the object so nothing reloads.
+          setAuthUser((prev) => (prev && user && JSON.stringify(prev) === JSON.stringify(user) ? prev : user || null));
+          setCachedUser(user || null);
+          if (!user) clearStartupCache();
+        }
+      } catch (err) {
+        // Logged out (or the session expired) — the login screen below
+        // handles it. A network blip keeps the remembered login.
+        if (!cancelled && (err.status === 401 || err.status === 403)) {
+          setAuthUser(null);
+          clearStartupCache();
+        }
       } finally {
         if (!cancelled) setAuthLoading(false);
       }
@@ -992,7 +1005,9 @@ export default function SimpleCRM() {
       } catch {
         // fall through to the login body below
       }
-      setAuthUser(resolved || { ...user, role: user.role || "client", allowedTags: user.allowedTags || [] });
+      const signedIn = resolved || { ...user, role: user.role || "client", allowedTags: user.allowedTags || [] };
+      setAuthUser(signedIn);
+      setCachedUser(signedIn);
     } catch (err) {
       setAuthError(err.message || "Something went wrong.");
     } finally {
@@ -1001,14 +1016,8 @@ export default function SimpleCRM() {
   };
 
   const handleLogout = async () => {
-    // Saved tab snapshots (CSM) belong to this login only.
-    try {
-      Object.keys(localStorage)
-        .filter((k) => k.startsWith("scalbl.csm.snapshot."))
-        .forEach((k) => localStorage.removeItem(k));
-    } catch {
-      // storage blocked — nothing saved anyway
-    }
+    // Everything remembered in this browser belongs to this login only.
+    await clearStartupCache();
     try {
       await api.post("/api/auth-logout", {});
     } catch {
@@ -1179,30 +1188,44 @@ export default function SimpleCRM() {
   // explains that changes won't be saved until it's fixed.
   const [dbLoading, setDbLoading] = useState(true);
   const [dbError, setDbError] = useState("");
+  // The data a user's app showed last time is kept in this browser
+  // (lib/startupCache.js): it's shown straight away on the next start,
+  // then replaced by the fresh copy a moment later.
+  const authUserId = authUser?.id;
   useEffect(() => {
-    if (!authUser) return; // wait for login before fetching any CRM data
+    if (!authUserId) return; // wait for login before fetching any CRM data
     let cancelled = false;
+    let freshArrived = false;
+    let showingSaved = false;
+    const apply = (data) => {
+      setClients(data.clients);
+      setClientColumns(data.clientColumns);
+      setContacts(data.contacts);
+      setContactColumns(data.contactColumns);
+      setConversations(data.conversations);
+      setDialLists(data.dialLists);
+      setCallLog(data.callLog);
+    };
+    readSnapshot("bootstrap", authUserId).then((saved) => {
+      if (cancelled || freshArrived || !saved?.contacts) return;
+      showingSaved = true;
+      apply(saved);
+      setDbLoading(false);
+    });
     (async () => {
       try {
-        const {
-          clients: clientsData,
-          clientColumns: clientColumnsData,
-          contacts: contactsData,
-          contactColumns: contactColumnsData,
-          conversations: conversationsData,
-          dialLists: dialListsData,
-          callLog: callLogData,
-        } = await api.get("/api/bootstrap");
+        const data = await api.get("/api/bootstrap");
+        freshArrived = true;
         if (cancelled) return;
-        setClients(clientsData);
-        setClientColumns(clientColumnsData);
-        setContacts(contactsData);
-        setContactColumns(contactColumnsData);
-        setConversations(conversationsData);
-        setDialLists(dialListsData);
-        setCallLog(callLogData);
+        apply(data);
+        setDbError("");
+        writeSnapshot("bootstrap", authUserId, data);
       } catch (err) {
-        if (!cancelled) {
+        freshArrived = true;
+        if (!cancelled && showingSaved) {
+          // Keep showing last time's data rather than sample data.
+          setDbError(err.message || "Could not refresh from the database — showing the last loaded data.");
+        } else if (!cancelled) {
           // Genuine failure (DB not configured, network issue, …) —
           // fall back to the built-in sample data so the app is still
           // usable, rather than sitting empty.
@@ -1222,7 +1245,7 @@ export default function SimpleCRM() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authUser]);
+  }, [authUserId]);
 
   // ---------- Calendars ----------
   // Loaded lazily the first time the tab is opened rather than as
@@ -2639,24 +2662,28 @@ export default function SimpleCRM() {
   const [copiedApiKey, setCopiedApiKey] = useState(false);
   const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
 
-  useEffect(() => {
-    if (page !== "settings" || !authUser) return;
-    let cancelled = false;
-    setApiKeyLoading(true);
-    api
+  // Settings data is fetched in the background after start-up (see
+  // "Warm up the other tabs") and refreshed each time Settings opens;
+  // the spinner only shows if it hasn't loaded yet. quiet: background
+  // fetch — no spinner, no error banner.
+  const settingsLoaded = useRef({ apiKey: false, users: false, invites: false });
+  const loadApiKey = ({ quiet = false } = {}) => {
+    if (!quiet && !settingsLoaded.current.apiKey) setApiKeyLoading(true);
+    return api
       .get("/api/api-keys")
       .then((key) => {
-        if (!cancelled) setApiKey(key);
+        setApiKey(key);
+        settingsLoaded.current.apiKey = true;
       })
       .catch((err) => {
-        if (!cancelled) setDbError(err.message || "Could not load the API key.");
+        if (!quiet) setDbError(err.message || "Could not load the API key.");
       })
-      .finally(() => {
-        if (!cancelled) setApiKeyLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => setApiKeyLoading(false));
+  };
+  useEffect(() => {
+    if (page !== "settings" || !authUser) return;
+    loadApiKey();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, authUser]);
 
   // ---------- Users (Settings → Team, role management) ----------
@@ -2693,7 +2720,9 @@ export default function SimpleCRM() {
     if (!authUser || isClientRole) return undefined;
     const timer = setTimeout(() => {
       warmCsm();
-      loadAIVoicePanel().catch(() => {});
+      loadAIVoicePanel()
+        .then((m) => m.prefetchAIVoice())
+        .catch(() => {});
     }, 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2724,24 +2753,23 @@ export default function SimpleCRM() {
   const [inviteForm, setInviteForm] = useState(emptyInviteForm);
   const [invitingUser, setInvitingUser] = useState(false);
 
-  useEffect(() => {
-    if (page !== "settings" || !authUser) return;
-    let cancelled = false;
-    setTeamUsersLoading(true);
-    api
+  const loadTeamUsers = ({ quiet = false } = {}) => {
+    if (!quiet && !settingsLoaded.current.users) setTeamUsersLoading(true);
+    return api
       .get("/api/users")
       .then((list) => {
-        if (!cancelled) setTeamUsers(list);
+        setTeamUsers(list);
+        settingsLoaded.current.users = true;
       })
       .catch((err) => {
-        if (!cancelled) setDbError(err.message || "Could not load the team list.");
+        if (!quiet) setDbError(err.message || "Could not load the team list.");
       })
-      .finally(() => {
-        if (!cancelled) setTeamUsersLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => setTeamUsersLoading(false));
+  };
+  useEffect(() => {
+    if (page !== "settings" || !authUser) return;
+    loadTeamUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, authUser]);
 
   const handleInviteUser = async (e) => {
@@ -2810,25 +2838,50 @@ export default function SimpleCRM() {
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [copiedInviteId, setCopiedInviteId] = useState(null);
 
-  useEffect(() => {
-    if (page !== "settings" || !authUser || isClientRole) return;
-    let cancelled = false;
-    setPortalInvitesLoading(true);
-    api
+  const loadPortalInvites = ({ quiet = false } = {}) => {
+    if (!quiet && !settingsLoaded.current.invites) setPortalInvitesLoading(true);
+    return api
       .get("/api/portal-invites")
       .then((list) => {
-        if (!cancelled) setPortalInvites(list);
+        setPortalInvites(list);
+        settingsLoaded.current.invites = true;
       })
       .catch((err) => {
-        if (!cancelled) setDbError(err.message || "Could not load invite links.");
+        if (!quiet) setDbError(err.message || "Could not load invite links.");
       })
-      .finally(() => {
-        if (!cancelled) setPortalInvitesLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => setPortalInvitesLoading(false));
+  };
+  useEffect(() => {
+    if (page !== "settings" || !authUser || isClientRole) return;
+    loadPortalInvites();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, authUser]);
+
+  // ---------- Warm up the other tabs ----------
+  // A moment after the app has its data, fetch what the other tabs
+  // would otherwise fetch when first opened — so every tab opens
+  // instantly, not just the one you start on.
+  useEffect(() => {
+    if (!authUser || dbLoading) return undefined;
+    const timer = setTimeout(() => {
+      if (!tagFoldersLoaded) loadTagFolders();
+      if (isClientRole) return;
+      if (!calendarsLoaded && !calendarsLoading) loadCalendars();
+      if (!automationsLoaded && !automationsLoading) loadAutomations();
+      loadApiKey({ quiet: true });
+      loadTeamUsers({ quiet: true });
+      loadPortalInvites({ quiet: true });
+      if (!soundboardLoaded) {
+        setSoundboardLoaded(true);
+        api
+          .get("/api/soundboard-clips")
+          .then(setSoundboardClips)
+          .catch(() => setSoundboardLoaded(false)); // tries again when a dialler tab opens
+      }
+    }, 1200);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser?.id, dbLoading]);
 
   const toggleNewInviteTag = (tag) =>
     setNewInviteTags((tags) => (tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag]));
@@ -3477,9 +3530,14 @@ export default function SimpleCRM() {
     clients.find((cl) => cl.name === clientName);
 
   // Leads for the powerdialler, newest first, filterable by every column
-  const dialQueue = [...contacts].sort(
-    (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-  );
+  // Sorted once per change to contacts (not on every render — with
+  // thousands of leads that sort alone was noticeable on every click),
+  // plus a by-id index so looking a lead up doesn't scan the whole list.
+  const dialQueue = useMemo(() => {
+    const at = new Map(contacts.map((c) => [c.id, new Date(c.createdAt).getTime() || 0]));
+    return [...contacts].sort((a, b) => at.get(b.id) - at.get(a.id));
+  }, [contacts]);
+  const dialQueueById = useMemo(() => new Map(dialQueue.map((l) => [l.id, l])), [dialQueue]);
   const dialClientOptions = ["All", ...clients.map((cl) => cl.name)];
   // Custom columns worth showing/filtering in the Powerdialler table —
   // whatever actually has a value somewhere in the queue. Computed
@@ -3531,7 +3589,7 @@ export default function SimpleCRM() {
           .includes(textFilter);
       })
   );
-  const activeLead = dialQueue.find((l) => l.id === activeLeadId) || null;
+  const activeLead = dialQueueById.get(activeLeadId) || null;
 
   // Live calling — same model as GoHighLevel's power dialler: the
   // browser registers as a Twilio Voice "device" and calls ring
@@ -4171,7 +4229,7 @@ export default function SimpleCRM() {
   // re-dial a lead that's already closed.
   const remainingInList = (leadIds) =>
     leadIds.filter((id) => {
-      const lead = dialQueue.find((l) => l.id === id);
+      const lead = dialQueueById.get(id);
       return Boolean(lead) && !isClosedLeadStatus(lead.status);
     });
 
@@ -5308,13 +5366,13 @@ export default function SimpleCRM() {
     if (lines > 1) {
       const batch = leadIds
         .slice(0, lines)
-        .map((id) => dialQueue.find((l) => l.id === id))
+        .map((id) => dialQueueById.get(id))
         .filter(Boolean);
       if (batch.length > 1) return startMultilineCall(batch);
       if (batch.length === 1) return startCall(batch[0]);
       return;
     }
-    const lead = dialQueue.find((l) => l.id === leadIds[0]);
+    const lead = dialQueueById.get(leadIds[0]);
     if (lead) startCall(lead);
   };
 

@@ -104,6 +104,19 @@ function KeyField({ label, hint, value, onChange, placeholder, usingEnvFallback 
 // call — see server/aiVoiceCore.js for why that's the right scope for
 // a first version, and what a real-time upgrade (Twilio Media
 // Streams, streaming STT/TTS, barge-in) would need on top of this.
+// Settings fetched ahead of time (prefetchAIVoice, after start-up) and
+// kept between visits to the tab, so it opens with them already there.
+let settingsRequest = null;
+export function prefetchAIVoice() {
+  if (!settingsRequest) {
+    settingsRequest = api.get("/api/ai-voice-settings");
+    settingsRequest.catch(() => {
+      settingsRequest = null;
+    });
+  }
+  return settingsRequest;
+}
+
 export default function AIVoicePanel() {
   // `settings` is the last-saved-and-fetched state (what actually
   // governs turns); `draft` is what's currently typed in the form.
@@ -129,8 +142,7 @@ export default function AIVoicePanel() {
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .get("/api/ai-voice-settings")
+    prefetchAIVoice()
       .then((data) => {
         if (cancelled) return;
         setSettings(data);
@@ -145,6 +157,13 @@ export default function AIVoicePanel() {
       .catch((err) => {
         if (!cancelled) setSettingsError(err.message || "Couldn't load AI Voice settings.");
       });
+    // Next visit shows these straight away, then checks again.
+    settingsRequest = null;
+    prefetchAIVoice()
+      .then((data) => {
+        if (!cancelled) setSettings((cur) => cur || data);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
