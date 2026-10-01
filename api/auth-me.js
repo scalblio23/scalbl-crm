@@ -6,7 +6,14 @@ import { getSessionUser } from "../server/auth.js";
 // baked into the cookie — see getSessionUser). Always 200; check
 // `user` for null rather than relying on status.
 export default async function handler(req, res) {
-  await ensureSchema();
-  const user = await getSessionUser(req);
-  res.status(200).json({ user });
+  try {
+    await ensureSchema();
+    const user = await getSessionUser(req);
+    res.status(200).json({ user });
+  } catch (err) {
+    // Database unreachable/busy: say so (503) rather than { user: null },
+    // which the app would take as "logged out".
+    console.error("[api/auth-me]", err);
+    res.status(503).json({ error: "The database is busy right now — try again in a moment." });
+  }
 }

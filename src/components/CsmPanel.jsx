@@ -335,12 +335,13 @@ export default function CsmPanel({
       .then((list) => {
         if (cancelled) return;
         setSelectedId((id) => (id && list.some((c) => c.id === id) ? id : list[0]?.id ?? null));
-        // Warm up the next few timelines, a moment after the first one.
-        setTimeout(() => {
-          if (cancelled) return;
-          sortClients(list || [], sortKey)
-            .slice(0, 6)
-            .forEach((c) => prefetchTimeline(c.id));
+        // Warm up the next few timelines, a moment after the first one —
+        // one at a time, so it never holds several database connections.
+        setTimeout(async () => {
+          for (const c of sortClients(list || [], sortKey).slice(0, 6)) {
+            if (cancelled) return;
+            if (!timelinesRef.current[c.id]) await refreshTimeline(c.id).catch(() => {});
+          }
         }, 800);
       })
       .catch((err) => !cancelled && setError(err.message || "Could not load clients."))
