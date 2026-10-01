@@ -159,6 +159,7 @@ export async function ensureSchema() {
         AND to_regclass('public.csm_entries') IS NOT NULL
         AND to_regclass('public.csm_files') IS NOT NULL
         AND to_regclass('public.csm_seen') IS NOT NULL
+        AND to_regclass('public.csm_mentions') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'csm_entries' AND column_name = 'wa_id'
@@ -655,6 +656,20 @@ export async function ensureSchema() {
         PRIMARY KEY (user_id, client_id)
       )
     `);
+    // @mentions in CSM comments: one row per person tagged, until they
+    // open that client (the blue bell).
+    await query(`
+      CREATE TABLE IF NOT EXISTS csm_mentions (
+        id SERIAL PRIMARY KEY,
+        entry_id INTEGER NOT NULL REFERENCES csm_entries(id) ON DELETE CASCADE,
+        client_id INTEGER NOT NULL REFERENCES csm_clients(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL,
+        read_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (entry_id, user_id)
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS csm_mentions_unread_idx ON csm_mentions (user_id) WHERE read_at IS NULL`);
     // The starting client list — only into an empty table, so a client
     // removed later doesn't come back.
     await query(
@@ -2844,9 +2859,25 @@ export async function deleteCsmClient(id) {
   await query("DELETE FROM csm_clients WHERE id = $1", [id]);
 }
 
-// files: [{ name, mimeType, data: Buffer }]
-export async function addCsmComment(clientId, text, author, files = []) {
+// The team members who can be @mentioned in CSM comments (everyone
+// except client-portal users).
+export async function getCsmPeople() {
+  const rows = await query(
+    "SELECT id, name, email FROM users WHERE COALESCE(role, 'admin') <> 'client' ORDER BY lower(name), id"
+  );
+  return rows.map((r) => ({ id: r.id, name: r.name || r.email }));
+}
+
+// files: [{ name, mimeType, data: Buffer }]; mentionIds: users tagged
+// with @ in the text (each gets a notification).
+export async function addCsmComment(clientId, text, author, files = [], mentionIds = []) {
   const entry = await addCsmEntry(clientId, { kind: "comment", text, author });
+  for (const userId of mentionIds) {
+    await query(
+      "INSERT INTO csm_mentions (entry_id, client_id, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+      [entry.id, clientId, userId]
+    );
+  }
   entry.files = [];
   for (const f of files) {
     const rows = await query(
@@ -2962,7 +2993,35 @@ export async function getCsmUnread(userId) {
     byClient[r.client_id] = r.n;
     total += r.n;
   }
-  return { total, byClient };
+  return { total, byClient, mentions: await getCsmMentions(userId) };
+}
+
+// Comments where this user was @mentioned and hasn't opened that client
+// since: { total, byClient, items: [{ id, clientId, clientName, author, text, createdAt }] }.
+async function getCsmMentions(userId) {
+  const rows = await query(
+    `SELECT m.id, m.client_id, c.name AS client_name, e.author, e.text, e.created_at
+       FROM csm_mentions m
+       JOIN csm_entries e ON e.id = m.entry_id
+       JOIN csm_clients c ON c.id = m.client_id
+      WHERE m.user_id = $1 AND m.read_at IS NULL
+      ORDER BY e.created_at DESC, m.id DESC`,
+    [userId]
+  );
+  const byClient = {};
+  for (const r of rows) byClient[r.client_id] = (byClient[r.client_id] || 0) + 1;
+  return {
+    total: rows.length,
+    byClient,
+    items: rows.slice(0, 30).map((r) => ({
+      id: r.id,
+      clientId: r.client_id,
+      clientName: r.client_name,
+      author: r.author || "Someone",
+      text: r.text || "",
+      createdAt: r.created_at,
+    })),
+  };
 }
 
 export async function markCsmRead(userId, clientId) {
@@ -2971,4 +3030,8 @@ export async function markCsmRead(userId, clientId) {
      ON CONFLICT (user_id, client_id) DO UPDATE SET last_read_at = now()`,
     [userId, clientId]
   );
+  await query("UPDATE csm_mentions SET read_at = now() WHERE user_id = $1 AND client_id = $2 AND read_at IS NULL", [
+    userId,
+    clientId,
+  ]);
 }

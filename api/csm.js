@@ -3,16 +3,18 @@
 // src/components/CsmPanel.jsx). Internal only: client-role users never
 // see this tab.
 //
-//   GET                         → { clients, unread: { total, byClient } }
-//   GET ?op=unread              → { total, byClient }  unread incoming WhatsApp messages for this user
+//   GET                         → { clients, unread: { total, byClient, mentions } }
+//   GET ?op=unread              → { total, byClient, mentions: { total, byClient, items } }
+//                                 unread incoming WhatsApp messages and @mentions of this user
+//   GET ?op=people              → { people: [{ id, name }] }  who can be @mentioned
 //   GET ?clientId=              → { entries }  (oldest first; each has files: [{ id, name, mimeType, size }])
 //   GET ?fileId=                → the attached file itself (inline; ?download=1 to save it)
 //   POST { action: "add-client", name }
-//   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }] }
+//   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }], mentions?: [userId] }
 //   POST { action: "confidence", clientId, value }   0.1 … 1.0
 //   POST { action: "mood", clientId, mood }          see CSM_MOODS
 //   POST { action: "link-whatsapp", clientId, chatId, chatName }   chatId null unlinks
-//   POST { action: "mark-read", clientId }   this user has seen the client's messages
+//   POST { action: "mark-read", clientId }   this user has seen the client's messages and @mentions
 //   DELETE ?clientId=
 import {
   ensureSchema,
@@ -22,6 +24,7 @@ import {
   createCsmClient,
   deleteCsmClient,
   addCsmComment,
+  getCsmPeople,
   setCsmConfidence,
   setCsmMood,
   linkCsmWhatsApp,
@@ -78,6 +81,7 @@ export default async function handler(req, res) {
         return res.status(200).end(file.data);
       }
       if (req.query?.op === "unread") return res.status(200).json(await getCsmUnread(user.id));
+      if (req.query?.op === "people") return res.status(200).json({ people: await getCsmPeople() });
       const clientId = Number(req.query?.clientId);
       if (clientId) return res.status(200).json({ entries: await getCsmEntries(clientId) });
       const [clients, unread] = await Promise.all([getCsmClients(), getCsmUnread(user.id)]);
@@ -114,7 +118,15 @@ export default async function handler(req, res) {
         if (total > MAX_ATTACHMENT_BYTES) {
           return res.status(413).json({ error: "That's too big — attachments are limited to 3MB per comment." });
         }
-        return res.status(201).json(await addCsmComment(clientId, text, author, files));
+        // Only real team members whose @Name is actually in the text, and
+        // not the person writing it.
+        const wanted = new Set((Array.isArray(req.body?.mentions) ? req.body.mentions : []).map(Number).slice(0, 50));
+        const mentionIds = wanted.size
+          ? (await getCsmPeople())
+              .filter((p) => wanted.has(p.id) && p.id !== user.id && text.includes(`@${p.name}`))
+              .map((p) => p.id)
+          : [];
+        return res.status(201).json(await addCsmComment(clientId, text, author, files, mentionIds));
       }
 
       if (action === "mark-read") {

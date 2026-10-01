@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  AtSign,
+  Bell,
   ChevronDown,
   Download,
   FileText,
@@ -195,10 +197,18 @@ function initials(name) {
     .toUpperCase();
 }
 
-export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = () => {} }) {
+export default function CsmPanel({ canManageWhatsApp = false, currentUserId = null, onUnreadChange = () => {} }) {
   const [clients, setClients] = useState([]);
-  // Unread incoming WhatsApp messages per client, for this user.
-  const [unread, setUnread] = useState({ total: 0, byClient: {} });
+  // Unread incoming WhatsApp messages per client, and comments that
+  // @mention this user, per client.
+  const [unread, setUnread] = useState({ total: 0, byClient: {}, mentions: NO_MENTIONS });
+  // Team members who can be @mentioned: [{ id, name }].
+  const [people, setPeople] = useState([]);
+  // The @ picker under the comment box: { query, start, index } while open.
+  const [mentionPicker, setMentionPicker] = useState(null);
+  const [mentionsOpen, setMentionsOpen] = useState(false);
+  const commentBoxRef = useRef(null);
+  const highlightRef = useRef(null);
   const [loadingClients, setLoadingClients] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -243,7 +253,7 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
       .then(({ clients: list, unread: counts }) => {
         if (cancelled) return;
         setClients(list || []);
-        if (counts) setUnread(counts);
+        if (counts) setUnread(withMentions(counts));
         if (list?.length) setSelectedId((id) => id ?? list[0].id);
       })
       .catch((err) => !cancelled && setError(err.message || "Could not load clients."))
@@ -272,11 +282,18 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
     };
   }, [selectedId]);
 
-  // Keep the sidebar bell in step with what this tab knows.
+  // Keep the sidebar bells in step with what this tab knows.
   useEffect(() => {
-    onUnreadChange(unread.total);
+    onUnreadChange({ total: unread.total, mentions: unread.mentions.total });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unread.total]);
+  }, [unread.total, unread.mentions.total]);
+
+  useEffect(() => {
+    api
+      .get("/api/csm?op=people")
+      .then((r) => setPeople(r.people || []))
+      .catch(() => {});
+  }, []);
 
   // Every 15s: fresh client list (last activity, counts) and unread
   // badges, so new WhatsApp messages show up on clients you're not
@@ -288,7 +305,7 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
         const { clients: list, unread: counts } = await api.get("/api/csm");
         if (cancelled) return;
         if (list) setClients((prev) => list.map((c) => ({ ...(prev.find((p) => p.id === c.id) || {}), ...c })));
-        if (counts) setUnread(counts);
+        if (counts) setUnread(withMentions(counts));
       } catch {
         // try again next tick
       }
@@ -299,18 +316,26 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
     };
   }, []);
 
-  // Looking at a client means you've seen its messages: clear its badge
-  // (on open, and again whenever new ones arrive while it's open).
-  const selectedUnread = (selectedId && unread.byClient[selectedId]) || 0;
+  // Looking at a client means you've seen its messages and mentions:
+  // clear its badges (on open, and again whenever new ones arrive while
+  // it's open).
+  const selectedUnread =
+    (selectedId && (unread.byClient[selectedId] || 0) + (unread.mentions.byClient[selectedId] || 0)) || 0;
   useEffect(() => {
     if (!selectedId || !selectedUnread || document.visibilityState === "hidden") return;
     setUnread((u) => {
       const byClient = { ...u.byClient, [selectedId]: 0 };
-      return { total: Math.max(0, u.total - (u.byClient[selectedId] || 0)), byClient };
+      const m = u.mentions;
+      const mentions = {
+        total: Math.max(0, m.total - (m.byClient[selectedId] || 0)),
+        byClient: { ...m.byClient, [selectedId]: 0 },
+        items: m.items.filter((i) => i.clientId !== selectedId),
+      };
+      return { total: Math.max(0, u.total - (u.byClient[selectedId] || 0)), byClient, mentions };
     });
     api
       .post("/api/csm", { action: "mark-read", clientId: selectedId })
-      .then((counts) => counts && setUnread(counts))
+      .then((counts) => counts && setUnread(withMentions(counts)))
       .catch(() => {});
   }, [selectedId, selectedUnread]);
 
@@ -511,6 +536,7 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
     }
     if (!batches.length) batches.push({ files: [], size: 0 });
     setComment("");
+    setMentionPicker(null);
     setAttachments([]);
     batches.forEach((batch, i) => {
       const batchText = i === 0 ? text : "";
@@ -522,6 +548,7 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
           clientId: selected.id,
           text: batchText,
           files: batch.files.map(({ name, mimeType, data }) => ({ name, mimeType, data })),
+          mentions: batchText ? mentionedIn(batchText, people).map((p) => p.id) : [],
         },
         entry: {
           kind: "comment",
@@ -539,6 +566,36 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
       });
     });
   };
+
+  // ---------- @mentions ----------
+
+  // Typing "@" (at the start or after a space) opens the picker; what
+  // follows narrows it down.
+  const updateMentionPicker = (value, caret) => {
+    if (composeMode !== "comment" || !people.length) return setMentionPicker(null);
+    const m = /(^|\s)@([^@\n]{0,30})$/.exec(value.slice(0, caret));
+    if (!m) return setMentionPicker(null);
+    const query = m[2];
+    if (!mentionMatches(people, query, currentUserId).length) return setMentionPicker(null);
+    setMentionPicker((prev) => ({ query, start: caret - query.length - 1, index: prev?.query === query ? prev.index : 0 }));
+  };
+
+  const pickMention = (person) => {
+    if (!mentionPicker) return;
+    const box = commentBoxRef.current;
+    const end = mentionPicker.start + 1 + mentionPicker.query.length;
+    const insert = `@${person.name} `;
+    const next = comment.slice(0, mentionPicker.start) + insert + comment.slice(end);
+    setComment(next);
+    setMentionPicker(null);
+    const caret = mentionPicker.start + insert.length;
+    requestAnimationFrame(() => {
+      box?.focus();
+      box?.setSelectionRange(caret, caret);
+    });
+  };
+
+  const mentionOptions = mentionPicker ? mentionMatches(people, mentionPicker.query, currentUserId) : [];
 
   // ---------- WhatsApp ----------
 
@@ -673,6 +730,64 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
         <div className="px-4 pt-5 pb-3">
           <div className="flex items-center justify-between">
             <h1 className="text-xl font-bold">CSM</h1>
+            <div className="relative ml-auto mr-1.5">
+              <button
+                onClick={() => setMentionsOpen((v) => !v)}
+                title={
+                  unread.mentions.total
+                    ? `You were mentioned in ${unread.mentions.total} comment${unread.mentions.total === 1 ? "" : "s"}`
+                    : "Comments that mention you"
+                }
+                className={`relative h-7 w-7 flex items-center justify-center rounded-lg border ${
+                  unread.mentions.total
+                    ? "border-blue-200 bg-blue-50 text-blue-600"
+                    : "border-gray-200 bg-white text-gray-400 hover:text-gray-700"
+                }`}
+              >
+                <Bell size={14} />
+                {unread.mentions.total > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-blue-500 text-white text-[10px] font-bold flex items-center justify-center">
+                    {unread.mentions.total > 99 ? "99+" : unread.mentions.total}
+                  </span>
+                )}
+              </button>
+              {mentionsOpen && (
+                <>
+                  <div className="fixed inset-0 z-20" onClick={() => setMentionsOpen(false)} />
+                  <div className="absolute left-0 top-9 z-30 w-80 max-h-96 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-lg">
+                    <div className="px-3 py-2 border-b border-gray-100 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                      Mentions
+                    </div>
+                    {!unread.mentions.items.length && (
+                      <div className="px-3 py-4 text-sm text-gray-400">
+                        Nothing new. When someone writes @your name in a comment, it shows up here.
+                      </div>
+                    )}
+                    {unread.mentions.items.map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          setSelectedId(item.clientId);
+                          setTimelineFilter("all");
+                          setMentionsOpen(false);
+                        }}
+                        className="w-full text-left px-3 py-2.5 border-b border-gray-50 last:border-0 hover:bg-blue-50/60"
+                      >
+                        <div className="flex items-baseline gap-1.5 text-xs">
+                          <span className="font-semibold text-gray-900">{item.author}</span>
+                          <span className="text-gray-400">on</span>
+                          <span className="font-semibold text-blue-700 truncate">{item.clientName}</span>
+                          <span className="ml-auto shrink-0 text-gray-400">{formatTime(item.createdAt)}</span>
+                        </div>
+                        <div className="mt-0.5 text-sm text-gray-600 line-clamp-2 break-words">
+                          <MentionText text={item.text} people={people} currentUserId={currentUserId} />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
             <button
               onClick={() => setShowAddClient((v) => !v)}
               title="Add client"
@@ -754,6 +869,15 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
                     {c.commentCount ? `${c.commentCount} comment${c.commentCount === 1 ? "" : "s"}` : "No comments yet"}
                   </span>
                 </span>
+                {unread.mentions.byClient[c.id] > 0 && (
+                  <span
+                    title={`You were mentioned ${unread.mentions.byClient[c.id]} time${unread.mentions.byClient[c.id] === 1 ? "" : "s"}`}
+                    className="h-5 px-1.5 rounded-full bg-blue-500 text-white text-[11px] font-bold flex items-center gap-0.5"
+                  >
+                    <AtSign size={10} strokeWidth={3} />
+                    {unread.mentions.byClient[c.id]}
+                  </span>
+                )}
                 {unread.byClient[c.id] > 0 && (
                   <span
                     title={`${unread.byClient[c.id]} new WhatsApp message${unread.byClient[c.id] === 1 ? "" : "s"}`}
@@ -1010,7 +1134,7 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
                       {day.items.map((e) => (
                         // Faded until the server has saved it.
                         <div key={e.id} className={e.pending ? "opacity-60" : ""}>
-                          <TimelineItem entry={e} />
+                          <TimelineItem entry={e} people={people} currentUserId={currentUserId} />
                         </div>
                       ))}
                     </li>
@@ -1113,34 +1237,106 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
                     </button>
                   </>
                 )}
-                <textarea
-                  value={comment}
-                  onPaste={(e) => {
-                    const files = Array.from(e.clipboardData?.files || []);
-                    if (composeMode !== "comment" || !files.length) return;
-                    e.preventDefault();
-                    addFiles(files);
-                  }}
-                  onChange={(e) => setComment(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
+                <div
+                  className={`relative flex-1 min-w-0 rounded-xl ${composeMode === "whatsapp" ? "bg-green-50/30" : "bg-white"}`}
+                >
+                  {/* Names picked with @ are highlighted behind the text. */}
+                  {composeMode === "comment" && (
+                    <div
+                      ref={highlightRef}
+                      aria-hidden
+                      className="absolute inset-0 overflow-hidden whitespace-pre-wrap break-words border border-transparent rounded-xl px-3 py-2 text-sm text-transparent pointer-events-none"
+                    >
+                      <MentionText text={comment} people={people} highlightOnly />
+                      {"\n"}
+                    </div>
+                  )}
+                  <textarea
+                    ref={commentBoxRef}
+                    value={comment}
+                    onPaste={(e) => {
+                      const files = Array.from(e.clipboardData?.files || []);
+                      if (composeMode !== "comment" || !files.length) return;
                       e.preventDefault();
-                      if (composeMode === "comment") sendComment();
-                      else sendWhatsApp();
+                      addFiles(files);
+                    }}
+                    onChange={(e) => {
+                      setComment(e.target.value);
+                      updateMentionPicker(e.target.value, e.target.selectionStart);
+                    }}
+                    onSelect={(e) => updateMentionPicker(e.target.value, e.target.selectionStart)}
+                    onBlur={() => setTimeout(() => setMentionPicker(null), 150)}
+                    onScroll={(e) => {
+                      if (highlightRef.current) highlightRef.current.scrollTop = e.target.scrollTop;
+                    }}
+                    onKeyDown={(e) => {
+                      if (mentionPicker && mentionOptions.length) {
+                        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                          e.preventDefault();
+                          const step = e.key === "ArrowDown" ? 1 : -1;
+                          setMentionPicker((p) => ({
+                            ...p,
+                            index: (p.index + step + mentionOptions.length) % mentionOptions.length,
+                          }));
+                          return;
+                        }
+                        if (e.key === "Enter" || e.key === "Tab") {
+                          e.preventDefault();
+                          pickMention(mentionOptions[Math.min(mentionPicker.index, mentionOptions.length - 1)]);
+                          return;
+                        }
+                        if (e.key === "Escape") {
+                          e.preventDefault();
+                          setMentionPicker(null);
+                          return;
+                        }
+                      }
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        if (composeMode === "comment") sendComment();
+                        else sendWhatsApp();
+                      }
+                    }}
+                    rows={2}
+                    placeholder={
+                      composeMode === "comment"
+                        ? `Add a comment about ${selected.name}… Type @ to mention someone (Enter to send)`
+                        : `Message ${selected.name} on WhatsApp…`
                     }
-                  }}
-                  rows={2}
-                  placeholder={
-                    composeMode === "comment"
-                      ? `Add a comment about ${selected.name}… (Enter to send, Shift+Enter for a new line)`
-                      : `Message ${selected.name} on WhatsApp…`
-                  }
-                  className={`flex-1 resize-none border rounded-xl px-3 py-2 text-sm outline-none ${
-                    composeMode === "whatsapp"
-                      ? "border-green-200 focus:border-green-400 bg-green-50/30"
-                      : "border-gray-200 focus:border-gray-400"
-                  }`}
-                />
+                    className={`relative block w-full bg-transparent resize-none border rounded-xl px-3 py-2 text-sm outline-none ${
+                      composeMode === "whatsapp"
+                        ? "border-green-200 focus:border-green-400"
+                        : "border-gray-200 focus:border-gray-400"
+                    }`}
+                  />
+                  {mentionPicker && mentionOptions.length > 0 && (
+                    <div className="absolute left-0 bottom-full mb-1.5 z-30 w-64 bg-white border border-gray-200 rounded-xl shadow-lg py-1">
+                      <div className="px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                        Mention someone
+                      </div>
+                      {mentionOptions.map((person, i) => (
+                        <button
+                          key={person.id}
+                          type="button"
+                          // mousedown, so the comment box keeps focus
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            pickMention(person);
+                          }}
+                          onMouseEnter={() => setMentionPicker((p) => p && { ...p, index: i })}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-sm ${
+                            i === mentionPicker.index ? "bg-blue-50 text-blue-700" : "text-gray-700"
+                          }`}
+                        >
+                          <span className="w-6 h-6 shrink-0 rounded-full bg-blue-100 text-blue-700 text-[10px] font-semibold flex items-center justify-center">
+                            {initials(person.name)}
+                          </span>
+                          <span className="truncate">{person.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {composeMode === "comment" ? (
                   <button
                     onClick={sendComment}
@@ -1168,7 +1364,68 @@ export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = (
   );
 }
 
-function TimelineItem({ entry }) {
+const NO_MENTIONS = { total: 0, byClient: {}, items: [] };
+const withMentions = (counts) => ({ ...counts, mentions: counts.mentions || NO_MENTIONS });
+
+// People whose name starts with (or has a word starting with) what's
+// been typed after the @ — never yourself.
+function mentionMatches(people, query, currentUserId) {
+  const q = query.trim().toLowerCase();
+  return people
+    .filter((p) => p.id !== currentUserId)
+    .filter((p) => !q || p.name.toLowerCase().startsWith(q) || p.name.toLowerCase().split(/\s+/).some((w) => w.startsWith(q)))
+    .slice(0, 6);
+}
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Splits text into plain parts and "@Name" parts for known people
+// (longest names first, so "@Jem Smith" wins over "@Jem").
+function splitMentions(text, people) {
+  const names = people.map((p) => p.name).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!names.length || !text.includes("@")) return [{ text }];
+  const re = new RegExp(`@(${names.map(escapeRegExp).join("|")})`, "g");
+  const parts = [];
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index > last) parts.push({ text: text.slice(last, m.index) });
+    parts.push({ text: m[0], person: people.find((p) => p.name === m[1]) });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
+}
+
+// The people a comment mentions (sent with it, so they get notified).
+function mentionedIn(text, people) {
+  const ids = new Set(splitMentions(text, people).filter((p) => p.person).map((p) => p.person.id));
+  return people.filter((p) => ids.has(p.id));
+}
+
+// Comment text with @mentions shown as blue name tags. highlightOnly:
+// the backdrop behind the comment box (same text, only the tags show).
+function MentionText({ text, people, currentUserId = null, highlightOnly = false }) {
+  return splitMentions(text, people).map((part, i) =>
+    part.person ? (
+      <mark
+        key={i}
+        className={
+          highlightOnly
+            ? "bg-blue-100 text-transparent rounded"
+            : `rounded px-0.5 font-medium ${
+                part.person.id === currentUserId ? "bg-blue-500 text-white" : "bg-blue-100 text-blue-700"
+              }`
+        }
+      >
+        {part.text}
+      </mark>
+    ) : (
+      <span key={i}>{part.text}</span>
+    )
+  );
+}
+
+function TimelineItem({ entry, people = [], currentUserId = null }) {
   const time = formatTime(entry.createdAt);
   if (entry.kind === "whatsapp") {
     const out = entry.value === "out";
@@ -1211,7 +1468,11 @@ function TimelineItem({ entry }) {
             <span className="text-sm font-semibold text-gray-900">{entry.author || "Someone"}</span>
             <span className="text-xs text-gray-400">{time}</span>
           </div>
-          {entry.text && <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">{entry.text}</div>}
+          {entry.text && (
+            <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">
+              <MentionText text={entry.text} people={people} currentUserId={currentUserId} />
+            </div>
+          )}
           {entry.files?.length > 0 && <Attachments files={entry.files} />}
         </div>
       </div>

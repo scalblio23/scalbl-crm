@@ -2647,10 +2647,11 @@ export default function SimpleCRM() {
 
   // ---------- Users (Settings → Team, role management) ----------
   const canManageUsers = authUser?.role === "owner" || authUser?.role === "super_admin";
-  // Unread WhatsApp messages across CSM clients — the bell on the CSM
-  // tab. Checked every 30s from anywhere in the app; the CSM tab itself
-  // reports changes straight away (onUnreadChange).
-  const [csmUnread, setCsmUnread] = useState(0);
+  // Unread WhatsApp messages across CSM clients (red bell) and comments
+  // that @mention you (blue bell) — on the CSM tab. Checked every 30s
+  // from anywhere in the app; the CSM tab itself reports changes
+  // straight away (onUnreadChange).
+  const [csmUnread, setCsmUnread] = useState({ total: 0, mentions: 0 });
   // Mirrors server/auth.js's tabsForRole — a client role only ever
   // sees their own leads, so Powerdialler/Log/Clients/Settings (which
   // are either full-roster tools or nothing-to-do-with-leads config)
@@ -2667,7 +2668,7 @@ export default function SimpleCRM() {
     const check = () =>
       api
         .get("/api/csm?op=unread")
-        .then((r) => !cancelled && setCsmUnread(r.total || 0))
+        .then((r) => !cancelled && setCsmUnread({ total: r.total || 0, mentions: r.mentions?.total || 0 }))
         .catch(() => {});
     check();
     const timer = setInterval(check, 30000);
@@ -5650,13 +5651,26 @@ export default function SimpleCRM() {
             >
               <Icon size={17} strokeWidth={page === key ? 2.4 : 1.8} />
               {label}
-              {key === "csm" && csmUnread > 0 && (
-                <span
-                  title={`${csmUnread} unread WhatsApp message${csmUnread === 1 ? "" : "s"}`}
-                  className="ml-auto flex items-center gap-1 rounded-full bg-red-500 text-white text-[11px] font-semibold pl-1.5 pr-2 py-0.5"
-                >
-                  <Bell size={11} strokeWidth={2.4} />
-                  {csmUnread > 99 ? "99+" : csmUnread}
+              {key === "csm" && (csmUnread.total > 0 || csmUnread.mentions > 0) && (
+                <span className="ml-auto flex items-center gap-1">
+                  {csmUnread.mentions > 0 && (
+                    <span
+                      title={`You were mentioned in ${csmUnread.mentions} comment${csmUnread.mentions === 1 ? "" : "s"}`}
+                      className="flex items-center gap-1 rounded-full bg-blue-500 text-white text-[11px] font-semibold pl-1.5 pr-2 py-0.5"
+                    >
+                      <Bell size={11} strokeWidth={2.4} />
+                      {csmUnread.mentions > 99 ? "99+" : csmUnread.mentions}
+                    </span>
+                  )}
+                  {csmUnread.total > 0 && (
+                    <span
+                      title={`${csmUnread.total} unread WhatsApp message${csmUnread.total === 1 ? "" : "s"}`}
+                      className="flex items-center gap-1 rounded-full bg-red-500 text-white text-[11px] font-semibold pl-1.5 pr-2 py-0.5"
+                    >
+                      <Bell size={11} strokeWidth={2.4} />
+                      {csmUnread.total > 99 ? "99+" : csmUnread.total}
+                    </span>
+                  )}
                 </span>
               )}
             </button>
@@ -10686,7 +10700,7 @@ export default function SimpleCRM() {
         )}
 
         {page === "ai-voice" && <AIVoicePanel />}
-        {page === "csm" && <CsmPanel canManageWhatsApp={canManageUsers} onUnreadChange={setCsmUnread} />}
+        {page === "csm" && <CsmPanel canManageWhatsApp={canManageUsers} currentUserId={authUser?.id} onUnreadChange={setCsmUnread} />}
       </main>
 
       {/* Manual dial — floating softphone button, available on every
