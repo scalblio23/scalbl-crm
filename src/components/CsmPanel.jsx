@@ -195,8 +195,10 @@ function initials(name) {
     .toUpperCase();
 }
 
-export default function CsmPanel({ canManageWhatsApp = false }) {
+export default function CsmPanel({ canManageWhatsApp = false, onUnreadChange = () => {} }) {
   const [clients, setClients] = useState([]);
+  // Unread incoming WhatsApp messages per client, for this user.
+  const [unread, setUnread] = useState({ total: 0, byClient: {} });
   const [loadingClients, setLoadingClients] = useState(true);
   const [selectedId, setSelectedId] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -238,9 +240,10 @@ export default function CsmPanel({ canManageWhatsApp = false }) {
     let cancelled = false;
     api
       .get("/api/csm")
-      .then(({ clients: list }) => {
+      .then(({ clients: list, unread: counts }) => {
         if (cancelled) return;
         setClients(list || []);
+        if (counts) setUnread(counts);
         if (list?.length) setSelectedId((id) => id ?? list[0].id);
       })
       .catch((err) => !cancelled && setError(err.message || "Could not load clients."))
@@ -268,6 +271,48 @@ export default function CsmPanel({ canManageWhatsApp = false }) {
       cancelled = true;
     };
   }, [selectedId]);
+
+  // Keep the sidebar bell in step with what this tab knows.
+  useEffect(() => {
+    onUnreadChange(unread.total);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unread.total]);
+
+  // Every 15s: fresh client list (last activity, counts) and unread
+  // badges, so new WhatsApp messages show up on clients you're not
+  // looking at.
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      try {
+        const { clients: list, unread: counts } = await api.get("/api/csm");
+        if (cancelled) return;
+        if (list) setClients((prev) => list.map((c) => ({ ...(prev.find((p) => p.id === c.id) || {}), ...c })));
+        if (counts) setUnread(counts);
+      } catch {
+        // try again next tick
+      }
+    }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  // Looking at a client means you've seen its messages: clear its badge
+  // (on open, and again whenever new ones arrive while it's open).
+  const selectedUnread = (selectedId && unread.byClient[selectedId]) || 0;
+  useEffect(() => {
+    if (!selectedId || !selectedUnread || document.visibilityState === "hidden") return;
+    setUnread((u) => {
+      const byClient = { ...u.byClient, [selectedId]: 0 };
+      return { total: Math.max(0, u.total - (u.byClient[selectedId] || 0)), byClient };
+    });
+    api
+      .post("/api/csm", { action: "mark-read", clientId: selectedId })
+      .then((counts) => counts && setUnread(counts))
+      .catch(() => {});
+  }, [selectedId, selectedUnread]);
 
   // WhatsApp connection status — every 3s while the WhatsApp panel is
   // open (so a scanned QR code turns into "Connected" quickly), every
@@ -702,11 +747,22 @@ export default function CsmPanel({ canManageWhatsApp = false }) {
                   {initials(c.name)}
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="block text-sm font-medium text-gray-900 truncate">{c.name}</span>
+                  <span className={`block text-sm text-gray-900 truncate ${unread.byClient[c.id] ? "font-bold" : "font-medium"}`}>
+                    {c.name}
+                  </span>
                   <span className="block text-xs text-gray-400 truncate">
                     {c.commentCount ? `${c.commentCount} comment${c.commentCount === 1 ? "" : "s"}` : "No comments yet"}
                   </span>
                 </span>
+                {unread.byClient[c.id] > 0 && (
+                  <span
+                    title={`${unread.byClient[c.id]} new WhatsApp message${unread.byClient[c.id] === 1 ? "" : "s"}`}
+                    style={{ backgroundColor: WHATSAPP_GREEN }}
+                    className="min-w-[20px] h-5 px-1.5 rounded-full text-white text-[11px] font-bold flex items-center justify-center"
+                  >
+                    {unread.byClient[c.id] > 99 ? "99+" : unread.byClient[c.id]}
+                  </span>
+                )}
                 {m && (
                   <span title={m.label} className="text-base leading-none">
                     {m.emoji}

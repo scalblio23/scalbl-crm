@@ -3,7 +3,8 @@
 // src/components/CsmPanel.jsx). Internal only: client-role users never
 // see this tab.
 //
-//   GET                         → { clients }
+//   GET                         → { clients, unread: { total, byClient } }
+//   GET ?op=unread              → { total, byClient }  unread incoming WhatsApp messages for this user
 //   GET ?clientId=              → { entries }  (oldest first; each has files: [{ id, name, mimeType, size }])
 //   GET ?fileId=                → the attached file itself (inline; ?download=1 to save it)
 //   POST { action: "add-client", name }
@@ -11,6 +12,7 @@
 //   POST { action: "confidence", clientId, value }   0.1 … 1.0
 //   POST { action: "mood", clientId, mood }          see CSM_MOODS
 //   POST { action: "link-whatsapp", clientId, chatId, chatName }   chatId null unlinks
+//   POST { action: "mark-read", clientId }   this user has seen the client's messages
 //   DELETE ?clientId=
 import {
   ensureSchema,
@@ -23,6 +25,8 @@ import {
   setCsmConfidence,
   setCsmMood,
   linkCsmWhatsApp,
+  getCsmUnread,
+  markCsmRead,
   CSM_MOODS,
 } from "../server/db.js";
 import { requireAuth, forbidClientRole, canManageWhatsApp } from "../server/auth.js";
@@ -73,9 +77,11 @@ export default async function handler(req, res) {
         res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
         return res.status(200).end(file.data);
       }
+      if (req.query?.op === "unread") return res.status(200).json(await getCsmUnread(user.id));
       const clientId = Number(req.query?.clientId);
       if (clientId) return res.status(200).json({ entries: await getCsmEntries(clientId) });
-      return res.status(200).json({ clients: await getCsmClients() });
+      const [clients, unread] = await Promise.all([getCsmClients(), getCsmUnread(user.id)]);
+      return res.status(200).json({ clients, unread });
     }
 
     if (req.method === "POST") {
@@ -109,6 +115,11 @@ export default async function handler(req, res) {
           return res.status(413).json({ error: "That's too big — attachments are limited to 3MB per comment." });
         }
         return res.status(201).json(await addCsmComment(clientId, text, author, files));
+      }
+
+      if (action === "mark-read") {
+        await markCsmRead(user.id, clientId);
+        return res.status(200).json(await getCsmUnread(user.id));
       }
 
       if (action === "confidence") {

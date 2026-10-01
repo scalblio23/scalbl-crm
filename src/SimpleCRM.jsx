@@ -47,6 +47,7 @@ import {
   Send,
   Layers,
   HeartHandshake,
+  Bell,
   Play,
   Mic,
   Square,
@@ -2644,6 +2645,10 @@ export default function SimpleCRM() {
 
   // ---------- Users (Settings → Team, role management) ----------
   const canManageUsers = authUser?.role === "owner" || authUser?.role === "super_admin";
+  // Unread WhatsApp messages across CSM clients — the bell on the CSM
+  // tab. Checked every 30s from anywhere in the app; the CSM tab itself
+  // reports changes straight away (onUnreadChange).
+  const [csmUnread, setCsmUnread] = useState(0);
   // Mirrors server/auth.js's tabsForRole — a client role only ever
   // sees their own leads, so Powerdialler/Log/Clients/Settings (which
   // are either full-roster tools or nothing-to-do-with-leads config)
@@ -2654,6 +2659,21 @@ export default function SimpleCRM() {
   const isClientRole = Boolean(authUser) && (authUser.role === "client" || !FULL_ACCESS_ROLES.includes(authUser.role));
   const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal"];
   const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
+  useEffect(() => {
+    if (!authUser || isClientRole) return undefined;
+    let cancelled = false;
+    const check = () =>
+      api
+        .get("/api/csm?op=unread")
+        .then((r) => !cancelled && setCsmUnread(r.total || 0))
+        .catch(() => {});
+    check();
+    const timer = setInterval(check, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [authUser, isClientRole]);
   useEffect(() => {
     if (isClientRole && !CLIENT_NAV_KEYS.includes(page)) setPage("conversation");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5628,6 +5648,15 @@ export default function SimpleCRM() {
             >
               <Icon size={17} strokeWidth={page === key ? 2.4 : 1.8} />
               {label}
+              {key === "csm" && csmUnread > 0 && (
+                <span
+                  title={`${csmUnread} unread WhatsApp message${csmUnread === 1 ? "" : "s"}`}
+                  className="ml-auto flex items-center gap-1 rounded-full bg-red-500 text-white text-[11px] font-semibold pl-1.5 pr-2 py-0.5"
+                >
+                  <Bell size={11} strokeWidth={2.4} />
+                  {csmUnread > 99 ? "99+" : csmUnread}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -10642,7 +10671,7 @@ export default function SimpleCRM() {
         )}
 
         {page === "ai-voice" && <AIVoicePanel />}
-        {page === "csm" && <CsmPanel canManageWhatsApp={canManageUsers} />}
+        {page === "csm" && <CsmPanel canManageWhatsApp={canManageUsers} onUnreadChange={setCsmUnread} />}
       </main>
 
       {/* Manual dial — floating softphone button, available on every
