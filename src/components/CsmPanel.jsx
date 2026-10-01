@@ -5,11 +5,14 @@ import {
   Bell,
   ChevronDown,
   Download,
+  ExternalLink,
   FileText,
   Loader2,
   Lock,
+  Megaphone,
   MessageCircle,
   Paperclip,
+  Pencil,
   Plus,
   Search,
   Send,
@@ -753,6 +756,22 @@ export default function CsmPanel({
     });
   };
 
+  // The client's ad account link: shows straight away, saved behind.
+  const saveAdAccount = async (url) => {
+    const client = selected;
+    if (!client) return;
+    const previous = client.adAccountUrl;
+    setError("");
+    setClients((list) => list.map((c) => (c.id === client.id ? { ...c, adAccountUrl: url || null } : c)));
+    try {
+      const result = await api.post("/api/csm", { action: "ad-account", clientId: client.id, url });
+      setClients((list) => list.map((c) => (c.id === result.client.id ? { ...c, ...result.client } : c)));
+    } catch (err) {
+      setClients((list) => list.map((c) => (c.id === client.id ? { ...c, adAccountUrl: previous } : c)));
+      setError(err.message || "Could not save the ad account link.");
+    }
+  };
+
   const setMood = (mood) => {
     setMoodOpen(false);
     if (!selected || selected.mood === mood) return;
@@ -1030,7 +1049,8 @@ export default function CsmPanel({
                 <div className="text-xs text-gray-400">
                   {selected.lastActivityAt ? `Last update ${formatDay(selected.lastActivityAt).toLowerCase()} at ${formatTime(selected.lastActivityAt)}` : "No activity yet"}
                 </div>
-                <div className="relative mt-1.5">
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <div className="relative">
                   <button
                     onClick={() => setWaOpen((o) => !o)}
                     className={`h-7 max-w-[280px] flex items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium ${
@@ -1072,6 +1092,8 @@ export default function CsmPanel({
                       </div>
                     </>
                   )}
+                </div>
+                <AdAccountLink key={selected.id} url={selected.adAccountUrl} onSave={saveAdAccount} />
                 </div>
               </div>
 
@@ -1704,6 +1726,102 @@ function MentionText({ text, people, currentUserId = null, highlightOnly = false
     ) : (
       <span key={i}>{links ? <Linkified text={part.text} /> : part.text}</span>
     )
+  );
+}
+
+const META_BLUE = "#0866FF";
+
+// The client's ad account: opens it in Ads Manager; the pencil edits it.
+function AdAccountLink({ url, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(url || "");
+  const act = /[?&]act=(\d+)/.exec(url || "")?.[1];
+  const save = (value) => {
+    const next = value.trim();
+    if (next && !/^https?:\/\/\S+$/i.test(next)) return;
+    setEditing(false);
+    if (next !== (url || "")) onSave(next);
+  };
+  return (
+    <div className="relative flex items-center">
+      {url ? (
+        <span className="h-7 flex items-center rounded-full border border-blue-200 bg-blue-50 text-xs font-medium" style={{ color: META_BLUE }}>
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={act ? `Ad account ${act} — open in Ads Manager` : "Open in Ads Manager"}
+            className="h-full flex items-center gap-1.5 pl-2.5 pr-1.5 rounded-l-full hover:bg-blue-100"
+          >
+            <Megaphone size={13} />
+            Ad account
+            <ExternalLink size={11} />
+          </a>
+          <button
+            onClick={() => {
+              setDraft(url);
+              setEditing(true);
+            }}
+            title="Change the ad account link"
+            className="h-full flex items-center pl-1 pr-2 rounded-r-full border-l border-blue-200 hover:bg-blue-100"
+          >
+            <Pencil size={11} />
+          </button>
+        </span>
+      ) : (
+        <button
+          onClick={() => {
+            setDraft("");
+            setEditing(true);
+          }}
+          className="h-7 flex items-center gap-1.5 rounded-full border border-dashed border-gray-300 bg-white px-2.5 text-xs font-medium text-gray-500 hover:border-gray-400 hover:text-gray-700"
+        >
+          <Megaphone size={13} /> Add ad account link
+        </button>
+      )}
+      {editing && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setEditing(false)} />
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              save(draft);
+            }}
+            className="absolute left-0 top-full mt-1 z-50 w-96 bg-white border border-gray-200 rounded-xl shadow-lg p-3"
+          >
+            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Ad account link (Ads Manager)</label>
+            <input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setEditing(false)}
+              placeholder="https://adsmanager.facebook.com/…?act=…"
+              className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-gray-400"
+            />
+            {draft.trim() && !/^https?:\/\/\S+$/i.test(draft.trim()) && (
+              <div className="mt-1 text-xs text-red-600">Paste the full link, starting with https://</div>
+            )}
+            <div className="mt-2.5 flex items-center gap-2">
+              <button
+                type="submit"
+                disabled={Boolean(draft.trim()) && !/^https?:\/\/\S+$/i.test(draft.trim())}
+                className="bg-gray-900 text-white text-xs font-semibold rounded-lg px-3 py-1.5 disabled:opacity-40"
+              >
+                Save
+              </button>
+              {url && (
+                <button type="button" onClick={() => save("")} className="text-xs font-medium text-red-600 hover:text-red-700">
+                  Remove
+                </button>
+              )}
+              <button type="button" onClick={() => setEditing(false)} className="ml-auto text-xs text-gray-500 hover:text-gray-800">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </>
+      )}
+    </div>
   );
 }
 

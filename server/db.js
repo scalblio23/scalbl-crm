@@ -166,6 +166,10 @@ export async function ensureSchema() {
         )
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'csm_clients' AND column_name = 'ad_account_url'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
           WHERE table_name = 'messages' AND column_name = 'recording_sid'
         )
         AND EXISTS (
@@ -640,6 +644,10 @@ export async function ensureSchema() {
     // client (see server/whatsapp/).
     await query(`ALTER TABLE csm_clients ADD COLUMN IF NOT EXISTS whatsapp_chat_id TEXT`);
     await query(`ALTER TABLE csm_clients ADD COLUMN IF NOT EXISTS whatsapp_chat_name TEXT`);
+    // The client's Meta ad account (a link to it in Ads Manager). NULL =
+    // never set; '' = deliberately cleared (so the pre-fill below never
+    // puts it back).
+    await query(`ALTER TABLE csm_clients ADD COLUMN IF NOT EXISTS ad_account_url TEXT`);
     await query(`ALTER TABLE csm_entries ADD COLUMN IF NOT EXISTS wa_id TEXT`);
     await query(
       `CREATE UNIQUE INDEX IF NOT EXISTS csm_entries_wa_idx ON csm_entries (client_id, wa_id) WHERE wa_id IS NOT NULL`
@@ -678,6 +686,14 @@ export async function ensureSchema() {
        ON CONFLICT (name) DO NOTHING`,
       [CSM_SEED_CLIENTS]
     );
+    // Ad account links from the team's raw data tracker, matched by
+    // client or company name — only for clients that don't have one yet.
+    for (const [names, url] of CSM_AD_ACCOUNTS) {
+      await query(
+        `UPDATE csm_clients SET ad_account_url = $2 WHERE ad_account_url IS NULL AND lower(name) = ANY($1::text[])`,
+        [names.map((n) => n.toLowerCase()), url]
+      );
+    }
     }
     // Deliberately OUTSIDE the fast path above: a production database
     // that already has every table still needs these once, and they're
@@ -2765,6 +2781,30 @@ const CSM_SEED_CLIENTS = [
 
 export const CSM_MOODS = ["happy", "satisfied", "neutral", "concerned", "frustrated"];
 
+// Each client's Meta ad account, from the raw data tracker's AD ACCOUNT
+// LINK column (trimmed to the account itself — no stale date ranges or
+// session ids). [names it might go by in CSM, link].
+const adsManager = (act, business = "718995589957678") =>
+  `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${act}&business_id=${business}`;
+const CSM_AD_ACCOUNTS = [
+  [["Cable Co", "Brendon"], adsManager("1407003067618851")],
+  [["Anil", "Solar Direct Shop"], adsManager("1426810695992525")],
+  [["Solar Battery Rebate", "Solar Battery Direct", "Ryan"], adsManager("698402602533485")],
+  [["Veralba", "Daniel"], adsManager("38699507566300044")],
+  [["Wilco", "Pascal"], adsManager("1053258310017552")],
+  [["Loving Family Care", "John G"], adsManager("1554206692783434")],
+  [["Eco Pro Cleaning", "Sheh"], adsManager("1414662590624224")],
+  [["Lasertronics", "Carl"], adsManager("1427105457364993")],
+  [["Patrol Bugs", "Navin"], adsManager("629922297513048", "544866521253077")],
+  [["Elecsol", "Elecsol Electrical"], adsManager("199877392876381")],
+  [["Imran", "Khan Legal"], adsManager("889934823992615")],
+  [["Fundd", "Christian"], adsManager("1434876818528338")],
+  [["Clicksmith Pro", "Mike Aze"], adsManager("1572526987755616")],
+  [["Stop Rent", "Stoprent", "John Zadun"], adsManager("1229782484769445")],
+  [["Goal Finance", "Luke"], adsManager("1424804918570597")],
+  [["Morley", "Prince"], adsManager("459400153174233")],
+];
+
 function csmClientFromRow(r) {
   return {
     id: r.id,
@@ -2775,6 +2815,7 @@ function csmClientFromRow(r) {
     commentCount: Number(r.comment_count || 0),
     whatsappChatId: r.whatsapp_chat_id || null,
     whatsappChatName: r.whatsapp_chat_name || null,
+    adAccountUrl: r.ad_account_url || null,
   };
 }
 
@@ -2903,6 +2944,13 @@ export async function setCsmConfidence(clientId, confidence, author) {
   if (!rows[0]) return null;
   const entry = await addCsmEntry(clientId, { kind: "confidence", value: confidence.toFixed(1), author });
   return { entry, client: await getCsmClient(clientId) };
+}
+
+// Sets (or, with "", clears) the client's ad account link. Returns the
+// client, or null if it doesn't exist.
+export async function setCsmAdAccount(clientId, url) {
+  const rows = await query("UPDATE csm_clients SET ad_account_url = $2 WHERE id = $1 RETURNING id", [clientId, url]);
+  return rows[0] ? getCsmClient(clientId) : null;
 }
 
 export async function setCsmMood(clientId, mood, author) {
