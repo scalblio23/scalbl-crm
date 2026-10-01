@@ -197,24 +197,41 @@ function initials(name) {
     .toUpperCase();
 }
 
-export default function CsmPanel({ canManageWhatsApp = false, currentUserId = null, onUnreadChange = () => {} }) {
-  const [clients, setClients] = useState([]);
+export default function CsmPanel({
+  canManageWhatsApp = false,
+  currentUserId = null,
+  onUnreadChange = () => {},
+  // false while another tab is showing: the panel stays mounted (so
+  // coming back is instant) but stops refreshing.
+  active = true,
+}) {
+  // What this tab showed last time (clients, counts, recent timelines),
+  // so it opens instantly and then refreshes in the background.
+  const [snapshot] = useState(() => readSnapshot(currentUserId));
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const [clients, setClients] = useState(snapshot?.clients || []);
   // Unread incoming WhatsApp messages per client, and comments that
   // @mention this user, per client.
-  const [unread, setUnread] = useState({ total: 0, byClient: {}, mentions: NO_MENTIONS });
+  const [unread, setUnread] = useState(() =>
+    snapshot?.unread ? withMentions(snapshot.unread) : { total: 0, byClient: {}, mentions: NO_MENTIONS }
+  );
   // Team members who can be @mentioned: [{ id, name }].
-  const [people, setPeople] = useState([]);
+  const [people, setPeople] = useState(snapshot?.people || []);
   // The @ picker under the comment box: { query, start, index } while open.
   const [mentionPicker, setMentionPicker] = useState(null);
   const [mentionsOpen, setMentionsOpen] = useState(false);
   const commentBoxRef = useRef(null);
   const highlightRef = useRef(null);
-  const [loadingClients, setLoadingClients] = useState(true);
-  const [selectedId, setSelectedId] = useState(null);
+  const [loadingClients, setLoadingClients] = useState(!snapshot?.clients?.length);
+  const [selectedId, setSelectedId] = useState(snapshot?.selectedId ?? null);
   // Every timeline opened (or prefetched) this visit, by client id — so
   // going back to a client is instant, and refreshes only fetch what's
   // new. Entries still saving carry pending: true.
-  const [timelines, setTimelines] = useState({});
+  const [timelines, setTimelines] = useState(snapshot?.timelines || {});
+  // Timelines from the snapshot are only the newest part: the first
+  // refresh of each fetches it in full.
+  const partialTimelines = useRef(new Set(Object.keys(snapshot?.timelines || {}).map(Number)));
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [search, setSearch] = useState("");
   const [comment, setComment] = useState("");
@@ -264,11 +281,14 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
   const inFlight = useRef(new Map());
   const refreshTimeline = (clientId) => {
     if (inFlight.current.has(clientId)) return inFlight.current.get(clientId);
-    const have = timelinesRef.current[clientId];
+    const partial = partialTimelines.current.has(clientId);
+    const have = partial ? null : timelinesRef.current[clientId];
     const after = have ? lastSavedId(have) : 0;
-    const request = api
-      .get(`/api/csm?clientId=${clientId}${after ? `&after=${after}` : ""}`)
-      .then(({ entries: list }) => updateTimeline(clientId, (prev) => mergeEntries(prev, list || [], !have)))
+    const request = ((!after && takeWarmTimeline(clientId)) || api.get(`/api/csm?clientId=${clientId}${after ? `&after=${after}` : ""}`))
+      .then(({ entries: list }) => {
+        partialTimelines.current.delete(clientId);
+        updateTimeline(clientId, (prev) => mergeEntries(prev, list || [], !have));
+      })
       .finally(() => inFlight.current.delete(clientId));
     inFlight.current.set(clientId, request);
     return request;
@@ -279,15 +299,20 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
     if (!timelinesRef.current[clientId]) refreshTimeline(clientId).catch(() => {});
   };
 
+  const loadClients = () =>
+    takeWarmCsm()
+      .then(({ clients: list, unread: counts }) => {
+        if (list) setClients((prev) => list.map((c) => ({ ...(prev.find((p) => p.id === c.id) || {}), ...c })));
+        if (counts) setUnread(withMentions(counts));
+        return list || [];
+      });
+
   useEffect(() => {
     let cancelled = false;
-    api
-      .get("/api/csm")
-      .then(({ clients: list, unread: counts }) => {
+    loadClients()
+      .then((list) => {
         if (cancelled) return;
-        setClients(list || []);
-        if (counts) setUnread(withMentions(counts));
-        if (list?.length) setSelectedId((id) => id ?? list[0].id);
+        setSelectedId((id) => (id && list.some((c) => c.id === id) ? id : list[0]?.id ?? null));
         // Warm up the next few timelines, a moment after the first one.
         setTimeout(() => {
           if (cancelled) return;
@@ -339,11 +364,9 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
   useEffect(() => {
     let cancelled = false;
     const timer = setInterval(async () => {
+      if (!activeRef.current || document.visibilityState === "hidden") return;
       try {
-        const { clients: list, unread: counts } = await api.get("/api/csm");
-        if (cancelled) return;
-        if (list) setClients((prev) => list.map((c) => ({ ...(prev.find((p) => p.id === c.id) || {}), ...c })));
-        if (counts) setUnread(withMentions(counts));
+        if (!cancelled) await loadClients();
       } catch {
         // try again next tick
       }
@@ -354,13 +377,33 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
     };
   }, []);
 
+  // Back on this tab after another one: catch up straight away.
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (active && !wasActive.current) {
+      loadClients().catch(() => {});
+      if (selectedId) refreshTimeline(selectedId).catch(() => {});
+    }
+    wasActive.current = active;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  // Remember what's on screen for next time (see readSnapshot).
+  useEffect(() => {
+    const timer = setTimeout(
+      () => writeSnapshot(currentUserId, { clients, unread, people, selectedId, timelines }),
+      1000
+    );
+    return () => clearTimeout(timer);
+  }, [currentUserId, clients, unread, people, selectedId, timelines]);
+
   // Looking at a client means you've seen its messages and mentions:
   // clear its badges (on open, and again whenever new ones arrive while
   // it's open).
   const selectedUnread =
     (selectedId && (unread.byClient[selectedId] || 0) + (unread.mentions.byClient[selectedId] || 0)) || 0;
   useEffect(() => {
-    if (!selectedId || !selectedUnread || document.visibilityState === "hidden") return;
+    if (!active || !selectedId || !selectedUnread || document.visibilityState === "hidden") return;
     setUnread((u) => {
       const byClient = { ...u.byClient, [selectedId]: 0 };
       const m = u.mentions;
@@ -375,7 +418,7 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
       .post("/api/csm", { action: "mark-read", clientId: selectedId })
       .then((counts) => counts && setUnread(withMentions(counts)))
       .catch(() => {});
-  }, [selectedId, selectedUnread]);
+  }, [active, selectedId, selectedUnread]);
 
   // WhatsApp connection status — every 3s while the WhatsApp panel is
   // open (so a scanned QR code turns into "Connected" quickly), every
@@ -384,6 +427,10 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
     let cancelled = false;
     let timer;
     const tick = async () => {
+      if (!activeRef.current) {
+        timer = setTimeout(tick, 5000);
+        return;
+      }
       try {
         const s = await api.get("/api/whatsapp?op=status");
         if (!cancelled) setWaStatus(s);
@@ -420,7 +467,7 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
   useEffect(() => {
     if (!selectedId) return undefined;
     const timer = setInterval(() => {
-      if (document.visibilityState === "hidden") return;
+      if (!activeRef.current || document.visibilityState === "hidden") return;
       refreshTimeline(selectedId).catch(() => {
         // try again next tick
       });
@@ -1407,6 +1454,74 @@ export default function CsmPanel({ canManageWhatsApp = false, currentUserId = nu
 }
 
 const TIMELINE_PAGE = 150;
+
+// ---------- Opening instantly ----------
+
+// The client list, fetched ahead of time (see prefetchCsm), used by the
+// panel when it opens if it's still fresh.
+// Also the timeline of the client it will open on.
+let warmCsm = null;
+let warmTimeline = null; // { clientId, at, request }
+const WARM_MS = 60000;
+export function prefetchCsm(userId = null) {
+  if (warmCsm && Date.now() - warmCsm.at < WARM_MS) return;
+  const at = Date.now();
+  warmCsm = { at, request: api.get("/api/csm") };
+  warmCsm.request
+    .then(({ clients: list }) => {
+      // The client the tab opens on: last one looked at, else the first.
+      const saved = readSnapshot(userId)?.selectedId;
+      const clientId = (list || []).some((c) => c.id === saved) ? saved : list?.[0]?.id;
+      if (clientId) warmTimeline = { clientId, at, request: api.get(`/api/csm?clientId=${clientId}`) };
+    })
+    .catch(() => {
+      warmCsm = null;
+    });
+}
+function takeWarmCsm() {
+  const warm = warmCsm && Date.now() - warmCsm.at < WARM_MS ? warmCsm.request : null;
+  warmCsm = null;
+  return warm || api.get("/api/csm");
+}
+// A whole-timeline request for this client made ahead of time, if any.
+function takeWarmTimeline(clientId) {
+  const warm = warmTimeline;
+  if (!warm || warm.clientId !== clientId || Date.now() - warm.at > WARM_MS) return null;
+  warmTimeline = null;
+  return warm.request;
+}
+
+// A snapshot of the tab in this browser, per user: the client list,
+// counts, people and the timelines looked at most recently (newest
+// entries only). Shown on open while fresh data loads.
+const SNAPSHOT_TIMELINES = 8;
+const snapshotKey = (userId) => `scalbl.csm.snapshot.${userId || "me"}`;
+function readSnapshot(userId) {
+  try {
+    const s = JSON.parse(localStorage.getItem(snapshotKey(userId)) || "null");
+    return s && s.v === 1 && Array.isArray(s.clients) ? s : null;
+  } catch {
+    return null;
+  }
+}
+function writeSnapshot(userId, { clients, unread, people, selectedId, timelines }) {
+  if (!clients.length) return;
+  const ids = [selectedId, ...Object.keys(timelines).map(Number).reverse()].filter(
+    (id, i, all) => id && all.indexOf(id) === i && timelines[id]
+  );
+  const kept = {};
+  for (const id of ids.slice(0, SNAPSHOT_TIMELINES)) {
+    kept[id] = timelines[id].filter((e) => !e.pending && typeof e.id === "number").slice(-TIMELINE_PAGE);
+  }
+  try {
+    localStorage.setItem(
+      snapshotKey(userId),
+      JSON.stringify({ v: 1, clients, unread, people, selectedId, timelines: kept })
+    );
+  } catch {
+    // storage full or blocked — it just opens the normal way next time
+  }
+}
 
 // Newest saved entry id (ids only go up; pending ones aren't saved yet).
 function lastSavedId(list) {

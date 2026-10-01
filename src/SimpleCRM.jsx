@@ -1001,6 +1001,14 @@ export default function SimpleCRM() {
   };
 
   const handleLogout = async () => {
+    // Saved tab snapshots (CSM) belong to this login only.
+    try {
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith("scalbl.csm.snapshot."))
+        .forEach((k) => localStorage.removeItem(k));
+    } catch {
+      // storage blocked — nothing saved anyway
+    }
     try {
       await api.post("/api/auth-logout", {});
     } catch {
@@ -2668,15 +2676,27 @@ export default function SimpleCRM() {
   const isClientRole = Boolean(authUser) && (authUser.role === "client" || !FULL_ACCESS_ROLES.includes(authUser.role));
   const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal"];
   const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
-  // Fetch the CSM / AI Voice tab code in the background once the app
-  // is up, so opening them later doesn't wait on a download.
+  // Fetch the CSM tab's code and client list in the background once the
+  // app is up (and again on hovering the tab), so opening it doesn't
+  // wait on either. AI Voice's code too.
+  const warmCsm = () =>
+    loadCsmPanel()
+      .then((m) => m.prefetchCsm(authUser?.id))
+      .catch(() => {});
+  // Once opened, the CSM tab stays mounted (hidden on other tabs) so
+  // coming back to it is instant.
+  const [csmMounted, setCsmMounted] = useState(false);
+  useEffect(() => {
+    if (page === "csm") setCsmMounted(true);
+  }, [page]);
   useEffect(() => {
     if (!authUser || isClientRole) return undefined;
     const timer = setTimeout(() => {
-      loadCsmPanel().catch(() => {});
+      warmCsm();
       loadAIVoicePanel().catch(() => {});
-    }, 2000);
+    }, 500);
     return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser, isClientRole]);
 
   useEffect(() => {
@@ -5660,6 +5680,7 @@ export default function SimpleCRM() {
             <button
               key={key}
               onClick={() => setPage(key)}
+              onMouseEnter={key === "csm" ? warmCsm : undefined}
               className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${
                 page === key
                   ? "bg-gray-100 font-semibold text-gray-900 border-r-2 border-gray-900"
@@ -10721,10 +10742,17 @@ export default function SimpleCRM() {
             <AIVoicePanel />
           </Suspense>
         )}
-        {page === "csm" && (
-          <Suspense fallback={<TabLoading />}>
-            <CsmPanel canManageWhatsApp={canManageUsers} currentUserId={authUser?.id} onUnreadChange={setCsmUnread} />
-          </Suspense>
+        {(page === "csm" || csmMounted) && (
+          <div className={page === "csm" ? "flex-1 flex min-h-0 min-w-0" : "hidden"}>
+            <Suspense fallback={<TabLoading />}>
+              <CsmPanel
+                active={page === "csm"}
+                canManageWhatsApp={canManageUsers}
+                currentUserId={authUser?.id}
+                onUnreadChange={setCsmUnread}
+              />
+            </Suspense>
+          </div>
         )}
       </main>
 
