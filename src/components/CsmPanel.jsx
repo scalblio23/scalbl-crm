@@ -1585,7 +1585,108 @@ function mentionedIn(text, people) {
 
 // Comment text with @mentions shown as blue name tags. highlightOnly:
 // the backdrop behind the comment box (same text, only the tags show).
-function MentionText({ text, people, currentUserId = null, highlightOnly = false }) {
+// Web links in comment text (trailing punctuation isn't part of them).
+const URL_RE = /https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'}]/g;
+
+// Plain text with its links made clickable.
+function Linkified({ text }) {
+  const parts = [];
+  let last = 0;
+  for (const m of text.matchAll(URL_RE)) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    parts.push(
+      <a
+        key={m.index}
+        href={m[0]}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-blue-600 underline decoration-blue-300 hover:decoration-blue-600 break-all"
+      >
+        {m[0]}
+      </a>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+// A video link we can play inline → { provider, src } (the provider's
+// own embeddable player), else null.
+export function videoEmbedFor(rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.replace(/^www\./, "");
+  const path = url.pathname;
+  let m;
+  if (host === "loom.com" && (m = /^\/(?:share|embed)\/([a-f0-9]{32})/i.exec(path))) {
+    return { provider: "Loom", src: `https://www.loom.com/embed/${m[1]}` };
+  }
+  if (host === "youtu.be" && (m = /^\/([\w-]{11})/.exec(path))) {
+    return { provider: "YouTube", src: `https://www.youtube-nocookie.com/embed/${m[1]}` };
+  }
+  if (host === "youtube.com" || host === "m.youtube.com") {
+    const id = url.searchParams.get("v") || (/^\/(?:shorts|embed|live)\/([\w-]{11})/.exec(path) || [])[1];
+    if (id && /^[\w-]{11}$/.test(id)) return { provider: "YouTube", src: `https://www.youtube-nocookie.com/embed/${id}` };
+  }
+  if (host === "vimeo.com" && (m = /^\/(\d+)(?:\/([a-f0-9]+))?/.exec(path))) {
+    return { provider: "Vimeo", src: `https://player.vimeo.com/video/${m[1]}${m[2] ? `?h=${m[2]}` : ""}` };
+  }
+  if (host === "drive.google.com" && (m = /^\/file\/d\/([\w-]+)/.exec(path))) {
+    return { provider: "Google Drive", src: `https://drive.google.com/file/d/${m[1]}/preview` };
+  }
+  return null;
+}
+
+// Players for the Loom / YouTube / Vimeo / Google Drive links in a
+// comment, under its text.
+function VideoEmbeds({ text }) {
+  const seen = new Set();
+  const videos = [];
+  for (const m of text.matchAll(URL_RE)) {
+    const v = videoEmbedFor(m[0]);
+    if (v && !seen.has(v.src) && videos.length < 4) {
+      seen.add(v.src);
+      videos.push({ ...v, link: m[0] });
+    }
+  }
+  if (!videos.length) return null;
+  return (
+    <div className="mt-2 space-y-2">
+      {videos.map((v) => (
+        <div key={v.src} className="max-w-xl">
+          <div className="relative w-full overflow-hidden rounded-lg border border-gray-200 bg-black" style={{ paddingTop: "56.25%" }}>
+            <iframe
+              src={v.src}
+              title={`${v.provider} video`}
+              loading="lazy"
+              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+              allowFullScreen
+              referrerPolicy="strict-origin-when-cross-origin"
+              className="absolute inset-0 h-full w-full"
+            />
+          </div>
+          <a
+            href={v.link}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-1 inline-block text-[11px] text-gray-400 hover:text-gray-700"
+          >
+            Open in {v.provider} ↗
+          </a>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// links: make web links clickable (the timeline; not the comment box's
+// highlight layer or the Mentions list, which is itself a button).
+function MentionText({ text, people, currentUserId = null, highlightOnly = false, links = false }) {
   return splitMentions(text, people).map((part, i) =>
     part.person ? (
       <mark
@@ -1601,7 +1702,7 @@ function MentionText({ text, people, currentUserId = null, highlightOnly = false
         {part.text}
       </mark>
     ) : (
-      <span key={i}>{part.text}</span>
+      <span key={i}>{links ? <Linkified text={part.text} /> : part.text}</span>
     )
   );
 }
@@ -1651,9 +1752,10 @@ function TimelineItem({ entry, people = [], currentUserId = null }) {
           </div>
           {entry.text && (
             <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">
-              <MentionText text={entry.text} people={people} currentUserId={currentUserId} />
+              <MentionText text={entry.text} people={people} currentUserId={currentUserId} links />
             </div>
           )}
+          {entry.text && <VideoEmbeds text={entry.text} />}
           {entry.files?.length > 0 && <Attachments files={entry.files} />}
         </div>
       </div>
