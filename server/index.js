@@ -120,6 +120,7 @@ import tagBookingLinksHandler from "../api/tag-booking-links.js";
 import recordingStatusHandler from "../api/recording-status.js";
 import recordingAudioHandler from "../api/recording-audio.js";
 import csmHandler from "../api/csm.js";
+import smsThreadsHandler from "../api/sms-threads.js";
 import whatsappHandler from "../api/whatsapp.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
@@ -1473,6 +1474,7 @@ app.all("/api/recording-status", recordingStatusHandler);
 app.all("/api/recording-audio", recordingAudioHandler);
 // CSM tab — does its own auth and client-role check (see api/csm.js).
 app.all("/api/csm", csmHandler);
+app.all("/api/sms-threads", smsThreadsHandler);
 app.all("/api/whatsapp", whatsappHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
