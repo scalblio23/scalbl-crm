@@ -1,19 +1,16 @@
-import pg from 'pg';
+import { getPool, isDbConfigured } from './db.js';
 import { parseDids, smsError } from './smsPolicy.js';
 import { SmsStore } from './smsStore.js';
 import { SmsService } from './smsService.js';
 import { sendCrazytelSms } from './crazytelSms.js';
 
-let pool;
 // No connection or schema creation at import time. Migration is an operator step.
+// Shares the app's one connection pool (server/db.js) — a second pool per
+// function doubled the connections each instance could hold open.
 export function getSmsRuntime() {
   const dids=parseDids(process.env.CRAZYTEL_SMS_DIDS || '');
-  if(!pool) {
-    const connectionString=process.env.POSTGRES_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL_NON_POOLING;
-    if(!connectionString) throw smsError(503,'SMS database is not configured');
-    pool=new pg.Pool({connectionString,max:3,idleTimeoutMillis:10000,connectionTimeoutMillis:8000});
-  }
-  return {dids,secret:process.env.CRAZYTEL_SMS_WEBHOOK_SECRET,store:new SmsStore(pool)};
+  if(!isDbConfigured()) throw smsError(503,'SMS database is not configured');
+  return {dids,secret:process.env.CRAZYTEL_SMS_WEBHOOK_SECRET,store:new SmsStore(getPool())};
 }
 export function getSmsService() {
   const {store,dids}=getSmsRuntime();

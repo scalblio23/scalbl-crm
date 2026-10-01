@@ -5,6 +5,7 @@
 // it works with any Postgres-compatible provider (Neon, Prisma
 // Postgres, Supabase, RDS, …) — whichever one POSTGRES_URL points at.
 import pg from "pg";
+import { attachDatabasePool } from "@vercel/functions";
 import crypto from "crypto";
 import { CLIENT_COLUMNS, IMPORTED_CLIENTS } from "./clientImportData.js";
 import { CONTACT_COLUMNS, IMPORTED_CONTACTS } from "./contactImportData.js";
@@ -27,7 +28,7 @@ export function isDbConfigured() {
 }
 
 let pool = null;
-function getPool() {
+export function getPool() {
   if (!pool) {
     const cs = connectionString();
     if (!cs) {
@@ -57,12 +58,21 @@ function getPool() {
       // serverless container doesn't run its own idle timers, so an
       // idle connection can otherwise sit open from one invocation to
       // the next for as long as the container happens to stay warm.
-      idleTimeoutMillis: 10_000,
+      idleTimeoutMillis: 5_000,
       // Fail fast and clearly if every slot really is taken, instead
       // of hanging until the platform's own request timeout does it
       // less clearly.
       connectionTimeoutMillis: 8_000,
     });
+    // On Vercel, closes this instance's idle connections before it's
+    // suspended — otherwise every paused instance keeps holding its
+    // connections and the database runs out ("too many connections").
+    // A no-op anywhere else (local server, the droplet's gateways).
+    try {
+      attachDatabasePool(pool);
+    } catch {
+      // older runtime — the idle timeout above still applies
+    }
   }
   return pool;
 }
@@ -81,14 +91,27 @@ function isConnectionExhaustedError(err) {
   return /remaining connection slots|too many (clients|connections)/i.test(msg);
 }
 
+// Out of connections: wait and try again (0.25s, 0.5s, 1s, 2s, with a
+// little jitter so many requests don't retry in lockstep) — usually a
+// connection frees up within a second or two. Still full after that:
+// a plain-English error instead of Postgres' own message.
+const CONNECTION_RETRIES = 4;
 async function query(text, params = [], attempt = 0) {
   try {
     const { rows } = await getPool().query(text, params);
     return rows;
   } catch (err) {
-    if (isConnectionExhaustedError(err) && attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
-      return query(text, params, attempt + 1);
+    if (isConnectionExhaustedError(err)) {
+      if (attempt < CONNECTION_RETRIES) {
+        const wait = 250 * 2 ** attempt + Math.random() * 150;
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        return query(text, params, attempt + 1);
+      }
+      throw Object.assign(new Error("The database is busy right now — please try again in a moment."), {
+        status: 503,
+        dbUnavailable: true,
+        cause: err,
+      });
     }
     throw err;
   }

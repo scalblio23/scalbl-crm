@@ -189,8 +189,14 @@ export async function getSessionUser(req) {
   try {
     row = await getUserById(identity.id);
   } catch (err) {
+    // The database couldn't be reached (e.g. out of connections). That
+    // is NOT "logged out" — reporting it as such made the app show "Not
+    // authenticated" and could sign people out. Callers get a 503.
     console.error("[auth] user lookup failed", err);
-    return null;
+    throw Object.assign(new Error("The database is busy right now — try again in a moment."), {
+      status: 503,
+      dbUnavailable: true,
+    });
   }
   if (!row) return null;
   return {
@@ -277,10 +283,16 @@ async function getUserFromApiKey(req) {
 // `if (!user) return;`). Async because the API-key path needs a
 // database lookup — every caller must `await` this now.
 export async function requireAuth(req, res) {
-  const sessionUser = await getSessionUser(req);
-  if (sessionUser) return sessionUser;
-
-  const apiUser = await getUserFromApiKey(req);
+  let sessionUser;
+  let apiUser;
+  try {
+    sessionUser = await getSessionUser(req);
+    if (sessionUser) return sessionUser;
+    apiUser = await getUserFromApiKey(req);
+  } catch (err) {
+    res.status(err.status || 503).json({ error: err.dbUnavailable ? err.message : "Could not check your login — try again." });
+    return null;
+  }
   if (apiUser) return apiUser;
 
   res.status(401).json({ error: "Not authenticated" });

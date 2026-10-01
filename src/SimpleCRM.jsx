@@ -2861,25 +2861,43 @@ export default function SimpleCRM() {
   // A moment after the app has its data, fetch what the other tabs
   // would otherwise fetch when first opened — so every tab opens
   // instantly, not just the one you start on.
+  // One at a time, a moment apart — firing them all at once meant a
+  // burst of simultaneous requests per person logging in, each holding
+  // a database connection, which helped run the database out of them.
   useEffect(() => {
     if (!authUser || dbLoading) return undefined;
-    const timer = setTimeout(() => {
-      if (!tagFoldersLoaded) loadTagFolders();
-      if (isClientRole) return;
-      if (!calendarsLoaded && !calendarsLoading) loadCalendars();
-      if (!automationsLoaded && !automationsLoading) loadAutomations();
-      loadApiKey({ quiet: true });
-      loadTeamUsers({ quiet: true });
-      loadPortalInvites({ quiet: true });
-      if (!soundboardLoaded) {
+    let cancelled = false;
+    const steps = [
+      () => !tagFoldersLoaded && loadTagFolders(),
+      () => !isClientRole && !calendarsLoaded && !calendarsLoading && loadCalendars(),
+      () => !isClientRole && !automationsLoaded && !automationsLoading && loadAutomations(),
+      () => !isClientRole && loadApiKey({ quiet: true }),
+      () => !isClientRole && loadTeamUsers({ quiet: true }),
+      () => !isClientRole && loadPortalInvites({ quiet: true }),
+      () => {
+        if (isClientRole || soundboardLoaded) return null;
         setSoundboardLoaded(true);
-        api
+        return api
           .get("/api/soundboard-clips")
           .then(setSoundboardClips)
           .catch(() => setSoundboardLoaded(false)); // tries again when a dialler tab opens
+      },
+    ];
+    const timer = setTimeout(async () => {
+      for (const step of steps) {
+        if (cancelled) return;
+        try {
+          await step();
+        } catch {
+          // each loader handles its own errors; keep going
+        }
+        await new Promise((r) => setTimeout(r, 250));
       }
-    }, 1200);
-    return () => clearTimeout(timer);
+    }, 2500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser?.id, dbLoading]);
 

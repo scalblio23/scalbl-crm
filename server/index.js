@@ -292,7 +292,12 @@ app.get("/api/health", (req, res) => {
 app.get(
   "/api/auth-me",
   dbRoute(async (req, res) => {
-    res.json({ user: await getSessionUser(req) });
+    try {
+      res.json({ user: await getSessionUser(req) });
+    } catch (err) {
+      // Busy/unreachable database ≠ logged out (same as api/auth-me.js).
+      res.status(503).json({ error: err.dbUnavailable ? err.message : "Could not check your login." });
+    }
   })
 );
 
