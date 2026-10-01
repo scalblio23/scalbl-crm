@@ -2,9 +2,10 @@ import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
 
-// The public booking page and the CRM never share a page load, so each
-// only downloads its own code.
-const SimpleCRM = lazy(() => import("./SimpleCRM.jsx"));
+import SimpleCRM from "./SimpleCRM.jsx";
+
+// The public booking page never needs the CRM's tabs, and the CRM never
+// needs the booking widget — the widget loads only on its own page.
 const BookingWidget = lazy(() => import("./BookingWidget.jsx"));
 
 // No router dependency — the app is a single mounted component, and
