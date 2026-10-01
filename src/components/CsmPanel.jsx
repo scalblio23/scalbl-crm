@@ -260,6 +260,25 @@ export default function CsmPanel({
   const [composeMode, setComposeMode] = useState("comment"); // comment | whatsapp
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [showExample, setShowExample] = useState(false);
+  // Last 30 days of Meta leads per client: { [clientId]: { status, days, total, … } }.
+  const [adLeads, setAdLeads] = useState({});
+  const adLeadsAt = useRef({});
+  const loadAdLeads = (clientId, { force = false } = {}) => {
+    if (!clientId) return;
+    // The server caches Meta for 30 min; asking again within 5 adds nothing.
+    if (!force && Date.now() - (adLeadsAt.current[clientId] || 0) < 5 * 60 * 1000) return;
+    adLeadsAt.current[clientId] = Date.now();
+    if (force) setAdLeads((m) => ({ ...m, [clientId]: undefined }));
+    api
+      .get(`/api/csm?op=ad-leads&clientId=${clientId}`)
+      .then((r) => setAdLeads((m) => ({ ...m, [clientId]: r })))
+      .catch((err) => setAdLeads((m) => ({ ...m, [clientId]: { status: "error", error: err.message } })));
+  };
+  useEffect(() => {
+    if (active) loadAdLeads(selectedId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, active]);
+
   // Long timelines show their newest entries first; "Show earlier"
   // adds more (drawing hundreds at once is what makes a busy chat slow).
   const [shownCount, setShownCount] = useState(TIMELINE_PAGE);
@@ -756,18 +775,22 @@ export default function CsmPanel({
     });
   };
 
-  // The client's ad account link: shows straight away, saved behind.
-  const saveAdAccount = async (url) => {
+  // The client's ad account link (and which campaigns count): shows
+  // straight away, saved behind, then the leads chart reloads.
+  const saveAdAccount = async (url, rule) => {
     const client = selected;
     if (!client) return;
-    const previous = client.adAccountUrl;
+    const previous = { adAccountUrl: client.adAccountUrl, adAccountRule: client.adAccountRule };
     setError("");
-    setClients((list) => list.map((c) => (c.id === client.id ? { ...c, adAccountUrl: url || null } : c)));
+    setClients((list) =>
+      list.map((c) => (c.id === client.id ? { ...c, adAccountUrl: url || null, adAccountRule: rule } : c))
+    );
     try {
-      const result = await api.post("/api/csm", { action: "ad-account", clientId: client.id, url });
+      const result = await api.post("/api/csm", { action: "ad-account", clientId: client.id, url, rule });
       setClients((list) => list.map((c) => (c.id === result.client.id ? { ...c, ...result.client } : c)));
+      loadAdLeads(client.id, { force: true });
     } catch (err) {
-      setClients((list) => list.map((c) => (c.id === client.id ? { ...c, adAccountUrl: previous } : c)));
+      setClients((list) => list.map((c) => (c.id === client.id ? { ...c, ...previous } : c)));
       setError(err.message || "Could not save the ad account link.");
     }
   };
@@ -1045,9 +1068,14 @@ export default function CsmPanel({
           <>
             <header className="px-6 py-4 border-b border-gray-100 flex flex-wrap items-center gap-x-6 gap-y-3">
               <div className="min-w-0 mr-auto">
-                <h2 className="text-lg font-bold truncate">{selected.name}</h2>
-                <div className="text-xs text-gray-400">
-                  {selected.lastActivityAt ? `Last update ${formatDay(selected.lastActivityAt).toLowerCase()} at ${formatTime(selected.lastActivityAt)}` : "No activity yet"}
+                <div className="flex items-start gap-5">
+                  <div className="min-w-0">
+                    <h2 className="text-lg font-bold truncate">{selected.name}</h2>
+                    <div className="text-xs text-gray-400">
+                      {selected.lastActivityAt ? `Last update ${formatDay(selected.lastActivityAt).toLowerCase()} at ${formatTime(selected.lastActivityAt)}` : "No activity yet"}
+                    </div>
+                  </div>
+                  <LeadsChart data={adLeads[selected.id]} hasAccount={Boolean(selected.adAccountUrl)} />
                 </div>
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                 <div className="relative">
@@ -1093,9 +1121,15 @@ export default function CsmPanel({
                     </>
                   )}
                 </div>
-                <AdAccountLink key={selected.id} url={selected.adAccountUrl} onSave={saveAdAccount} />
+                <AdAccountLink
+                  key={selected.id}
+                  url={selected.adAccountUrl}
+                  rule={selected.adAccountRule || ""}
+                  onSave={saveAdAccount}
+                />
                 </div>
               </div>
+
 
               <div>
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-1">
@@ -1731,16 +1765,86 @@ function MentionText({ text, people, currentUserId = null, highlightOnly = false
 
 const META_BLUE = "#0866FF";
 
+// Last 30 days of Meta leads as a small bar chart (one bar a day,
+// today on the right), for the client header.
+function LeadsChart({ data, hasAccount }) {
+  const [hover, setHover] = useState(null);
+  const label = (
+    <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-0.5 flex items-baseline gap-1.5 whitespace-nowrap">
+      Leads · 30 days
+      {data?.status === "ok" && (
+        <span className="text-gray-900 text-xs normal-case tracking-normal tabular-nums">{data.total}</span>
+      )}
+    </div>
+  );
+  let body;
+  if (!hasAccount || data?.status === "no-account") {
+    body = <div className="h-7 flex items-center text-[11px] text-gray-400 whitespace-nowrap">Add the ad account link to see leads</div>;
+  } else if (!data) {
+    body = <div className="h-7 w-[150px] rounded bg-gray-50 animate-pulse" />;
+  } else if (data.status === "not-configured") {
+    body = (
+      <div className="h-7 flex items-center text-[11px] text-gray-400 whitespace-nowrap" title="Set META_ACCESS_TOKEN in Vercel">
+        Meta not connected yet
+      </div>
+    );
+  } else if (data.status !== "ok") {
+    body = (
+      <div className="h-7 flex items-center text-[11px] text-amber-600 whitespace-nowrap" title={data.error}>
+        Couldn't load leads from Meta
+      </div>
+    );
+  } else {
+    const max = Math.max(1, ...data.days.map((d) => d.leads));
+    const shown = hover === null ? null : data.days[hover];
+    body = (
+      <div className="relative">
+        <div className="h-7 w-[150px] flex items-end gap-px" onMouseLeave={() => setHover(null)}>
+          {data.days.map((d, i) => (
+            <div
+              key={d.date}
+              onMouseEnter={() => setHover(i)}
+              className="flex-1 h-full flex items-end"
+            >
+              <div
+                className={`w-full rounded-[1px] ${hover === i ? "bg-gray-900" : d.leads ? "bg-blue-500" : "bg-gray-200"}`}
+                style={{ height: d.leads ? `${Math.max(8, (d.leads / max) * 100)}%` : "2px", backgroundColor: hover === i ? undefined : d.leads ? META_BLUE : undefined }}
+              />
+            </div>
+          ))}
+        </div>
+        {shown && (
+          <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-30 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] text-white shadow">
+            {new Date(`${shown.date}T00:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}:{" "}
+            <span className="font-semibold">{shown.leads}</span> lead{shown.leads === 1 ? "" : "s"}
+          </div>
+        )}
+      </div>
+    );
+  }
+  const title =
+    data?.status === "ok"
+      ? `${data.total} leads in the last 30 days${data.keyword ? ` from campaigns containing "${data.keyword}"` : ""} (Meta)`
+      : undefined;
+  return (
+    <div title={title}>
+      {label}
+      {body}
+    </div>
+  );
+}
+
 // The client's ad account: opens it in Ads Manager; the pencil edits it.
-function AdAccountLink({ url, onSave }) {
+function AdAccountLink({ url, rule = "", onSave }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(url || "");
+  const [ruleDraft, setRuleDraft] = useState(rule);
   const act = /[?&]act=(\d+)/.exec(url || "")?.[1];
-  const save = (value) => {
+  const save = (value, nextRule = ruleDraft.trim()) => {
     const next = value.trim();
     if (next && !/^https?:\/\/\S+$/i.test(next)) return;
     setEditing(false);
-    if (next !== (url || "")) onSave(next);
+    if (next !== (url || "") || nextRule !== rule) onSave(next, nextRule);
   };
   return (
     <div className="relative flex items-center">
@@ -1760,6 +1864,7 @@ function AdAccountLink({ url, onSave }) {
           <button
             onClick={() => {
               setDraft(url);
+              setRuleDraft(rule);
               setEditing(true);
             }}
             title="Change the ad account link"
@@ -1772,6 +1877,7 @@ function AdAccountLink({ url, onSave }) {
         <button
           onClick={() => {
             setDraft("");
+            setRuleDraft(rule);
             setEditing(true);
           }}
           className="h-7 flex items-center gap-1.5 rounded-full border border-dashed border-gray-300 bg-white px-2.5 text-xs font-medium text-gray-500 hover:border-gray-400 hover:text-gray-700"
@@ -1801,6 +1907,16 @@ function AdAccountLink({ url, onSave }) {
             {draft.trim() && !/^https?:\/\/\S+$/i.test(draft.trim()) && (
               <div className="mt-1 text-xs text-red-600">Paste the full link, starting with https://</div>
             )}
+            <label className="block text-xs font-semibold text-gray-600 mt-3 mb-1.5">
+              Count leads from campaigns containing
+            </label>
+            <input
+              value={ruleDraft}
+              onChange={(e) => setRuleDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setEditing(false)}
+              placeholder="e.g. S.IO — leave empty for every campaign"
+              className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-gray-400"
+            />
             <div className="mt-2.5 flex items-center gap-2">
               <button
                 type="submit"
@@ -1810,7 +1926,7 @@ function AdAccountLink({ url, onSave }) {
                 Save
               </button>
               {url && (
-                <button type="button" onClick={() => save("")} className="text-xs font-medium text-red-600 hover:text-red-700">
+                <button type="button" onClick={() => save("", rule)} className="text-xs font-medium text-red-600 hover:text-red-700">
                   Remove
                 </button>
               )}
