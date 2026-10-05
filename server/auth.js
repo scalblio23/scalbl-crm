@@ -21,6 +21,7 @@ import { findApiKeyByHash, touchApiKeyLastUsed, getUserById } from "./db.js";
 //                whose tag is in that user's allowedTags.
 export const ROLES = ["owner", "super_admin", "admin", "client"];
 const FULL_ACCESS_TABS = [
+  "memo",
   "conversation",
   "contacts",
   "powerdialler",

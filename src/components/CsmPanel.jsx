@@ -31,13 +31,13 @@ const fileUrl = (id, { download = false } = {}) => `${API_BASE}/api/csm?fileId=$
 // Kept under the server's 3MB-per-comment cap: pictures are shrunk in
 // the browser, and a batch that's too big for one comment goes out as
 // several.
-const MAX_FILE_BYTES = 3 * 1024 * 1024;
-const BATCH_BYTES = 2.8 * 1024 * 1024;
+export const MAX_FILE_BYTES = 3 * 1024 * 1024;
+export const BATCH_BYTES = 2.8 * 1024 * 1024;
 const MAX_IMAGE_SIDE = 1920;
 
-const isImage = (mimeType) => /^image\/(png|jpe?g|gif|webp|avif)$/.test(mimeType || "");
+export const isImage = (mimeType) => /^image\/(png|jpe?g|gif|webp|avif)$/.test(mimeType || "");
 
-function formatBytes(n) {
+export function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -46,7 +46,7 @@ function formatBytes(n) {
 // Photos straight off a phone are several MB; resize anything large
 // to at most 1920px on its longest side as a JPEG. GIFs are left alone
 // (they'd lose their animation).
-async function shrinkImage(file) {
+export async function shrinkImage(file) {
   if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return file;
   let bitmap;
   try {
@@ -68,7 +68,7 @@ async function shrinkImage(file) {
   return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
 }
 
-function readAsBase64(file) {
+export function readAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
@@ -177,11 +177,11 @@ function confidenceTone(value) {
   return "bg-green-500 text-white";
 }
 
-function formatTime(iso) {
+export function formatTime(iso) {
   return new Date(iso).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" });
 }
 
-function formatDay(iso) {
+export function formatDay(iso) {
   const d = new Date(iso);
   const today = new Date();
   const yesterday = new Date();
@@ -191,7 +191,7 @@ function formatDay(iso) {
   return d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 }
 
-function initials(name) {
+export function initials(name) {
   return String(name || "?")
     .split(/\s+/)
     .map((w) => w[0])
@@ -1646,7 +1646,7 @@ function mentionedIn(text, people) {
 const URL_RE = /https?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'}]/g;
 
 // Plain text with its links made clickable.
-function Linkified({ text }) {
+export function Linkified({ text }) {
   const parts = [];
   let last = 0;
   for (const m of text.matchAll(URL_RE)) {
@@ -1701,7 +1701,7 @@ export function videoEmbedFor(rawUrl) {
 
 // Players for the Loom / YouTube / Vimeo / Google Drive links in a
 // comment, under its text.
-function VideoEmbeds({ text }) {
+export function VideoEmbeds({ text }) {
   const seen = new Set();
   const videos = [];
   for (const m of text.matchAll(URL_RE)) {
@@ -2031,7 +2031,8 @@ function TimelineItem({ entry, people = [], currentUserId = null }) {
 }
 
 // Pictures show inline (click for full size); other files as cards.
-function Attachments({ files }) {
+// urlFor: where a saved file is served from (CSM by default).
+export function Attachments({ files, urlFor = fileUrl }) {
   const images = files.filter((f) => isImage(f.mimeType));
   const others = files.filter((f) => !isImage(f.mimeType));
   const saved = (f) => typeof f.id === "number";
@@ -2040,7 +2041,7 @@ function Attachments({ files }) {
       {images.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {images.map((f) => {
-            const src = f.localUrl || fileUrl(f.id);
+            const src = f.localUrl || urlFor(f.id);
             const img = (
               <img
                 src={src}
@@ -2050,7 +2051,7 @@ function Attachments({ files }) {
               />
             );
             return saved(f) ? (
-              <a key={f.id} href={fileUrl(f.id)} target="_blank" rel="noreferrer" title={`${f.name} — open full size`}>
+              <a key={f.id} href={urlFor(f.id)} target="_blank" rel="noreferrer" title={`${f.name} — open full size`}>
                 {img}
               </a>
             ) : (
@@ -2068,7 +2069,7 @@ function Attachments({ files }) {
           </div>
           {saved(f) ? (
             <a
-              href={fileUrl(f.id, { download: true })}
+              href={urlFor(f.id, { download: true })}
               title="Download"
               className="w-8 h-8 flex items-center justify-center rounded-md text-gray-500 hover:text-gray-900 hover:bg-white"
             >
