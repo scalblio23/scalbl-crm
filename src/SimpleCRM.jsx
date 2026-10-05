@@ -47,6 +47,7 @@ import {
   Send,
   Layers,
   HeartHandshake,
+  Inbox,
   Bell,
   Play,
   Mic,
@@ -96,6 +97,8 @@ import AddStepMenu from "./components/AddStepMenu";
 // background shortly after the app starts), not as part of the first
 // download.
 const loadCsmPanel = () => import("./components/CsmPanel");
+const loadMemoPanel = () => import("./components/MemoPanel");
+const MemoPanel = lazy(loadMemoPanel);
 const loadAIVoicePanel = () => import("./components/AIVoicePanel");
 const CsmPanel = lazy(loadCsmPanel);
 const AIVoicePanel = lazy(loadAIVoicePanel);
@@ -884,6 +887,7 @@ function auPhoneKey(raw) {
 const FULL_ACCESS_ROLES = ["owner", "super_admin", "admin"];
 
 const navItems = [
+  { key: "memo", label: "Inbox / Memo", icon: Inbox },
   { key: "conversation", label: "Conversation", icon: MessageSquare },
   { key: "contacts", label: "Contacts", icon: Users },
   { key: "powerdialler", label: "Powerdialler", icon: Phone },
@@ -2693,6 +2697,8 @@ export default function SimpleCRM() {
   // from anywhere in the app; the CSM tab itself reports changes
   // straight away (onUnreadChange).
   const [csmUnread, setCsmUnread] = useState({ total: 0, mentions: 0 });
+  // Unread team chat messages (Inbox / Memo tab).
+  const [memoUnread, setMemoUnread] = useState(0);
   // Mirrors server/auth.js's tabsForRole — a client role only ever
   // sees their own leads, so Powerdialler/Log/Clients/Settings (which
   // are either full-roster tools or nothing-to-do-with-leads config)
@@ -2710,16 +2716,38 @@ export default function SimpleCRM() {
     loadCsmPanel()
       .then((m) => m.prefetchCsm(authUser?.id))
       .catch(() => {});
-  // Once opened, the CSM tab stays mounted (hidden on other tabs) so
-  // coming back to it is instant.
+  // Once opened, the CSM and Inbox tabs stay mounted (hidden on other
+  // tabs) so coming back to them is instant.
   const [csmMounted, setCsmMounted] = useState(false);
+  const [memoMounted, setMemoMounted] = useState(false);
   useEffect(() => {
     if (page === "csm") setCsmMounted(true);
+    if (page === "memo") setMemoMounted(true);
   }, [page]);
+  // Inbox unread count for the sidebar badge, every 20s from anywhere.
+  useEffect(() => {
+    if (!authUser || isClientRole) return undefined;
+    let cancelled = false;
+    const check = () => {
+      if (document.visibilityState === "hidden") return;
+      api
+        .get("/api/memo?op=unread")
+        .then((r) => !cancelled && setMemoUnread(r.unreadTotal || 0))
+        .catch(() => {});
+    };
+    const first = setTimeout(check, 1500);
+    const timer = setInterval(check, 20000);
+    return () => {
+      cancelled = true;
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [authUser, isClientRole]);
   useEffect(() => {
     if (!authUser || isClientRole) return undefined;
     const timer = setTimeout(() => {
       warmCsm();
+      loadMemoPanel().catch(() => {});
       loadAIVoicePanel()
         .then((m) => m.prefetchAIVoice())
         .catch(() => {});
@@ -5765,6 +5793,14 @@ export default function SimpleCRM() {
             >
               <Icon size={17} strokeWidth={page === key ? 2.4 : 1.8} />
               {label}
+              {key === "memo" && memoUnread > 0 && (
+                <span
+                  title={`${memoUnread} unread message${memoUnread === 1 ? "" : "s"}`}
+                  className="ml-auto min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold flex items-center justify-center"
+                >
+                  {memoUnread > 99 ? "99+" : memoUnread}
+                </span>
+              )}
               {key === "csm" && (csmUnread.total > 0 || csmUnread.mentions > 0) && (
                 <span className="ml-auto flex items-center gap-1">
                   {csmUnread.mentions > 0 && (
@@ -10817,6 +10853,13 @@ export default function SimpleCRM() {
           <Suspense fallback={<TabLoading />}>
             <AIVoicePanel />
           </Suspense>
+        )}
+        {(page === "memo" || memoMounted) && !isClientRole && (
+          <div className={page === "memo" ? "flex-1 flex min-h-0 min-w-0" : "hidden"}>
+            <Suspense fallback={<TabLoading />}>
+              <MemoPanel active={page === "memo"} currentUserId={authUser?.id} onUnreadChange={setMemoUnread} />
+            </Suspense>
+          </div>
         )}
         {(page === "csm" || csmMounted) && (
           <div className={page === "csm" ? "flex-1 flex min-h-0 min-w-0" : "hidden"}>

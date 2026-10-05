@@ -196,6 +196,9 @@ export async function ensureSchema() {
           WHERE table_name = 'csm_clients' AND column_name = 'ad_account_rule'
         )
         AND to_regclass('public.csm_ad_leads') IS NOT NULL
+        AND to_regclass('public.memo_messages') IS NOT NULL
+        AND to_regclass('public.memo_files') IS NOT NULL
+        AND to_regclass('public.memo_seen') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'messages' AND column_name = 'recording_sid'
@@ -705,6 +708,38 @@ export async function ensureSchema() {
         client_id INTEGER NOT NULL REFERENCES csm_clients(id) ON DELETE CASCADE,
         last_read_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (user_id, client_id)
+      )
+    `);
+    // Inbox / Memo tab: chats between team members (never clients).
+    // conv_key is "team" (everyone) or "dm:<lower id>:<higher id>".
+    await query(`
+      CREATE TABLE IF NOT EXISTS memo_messages (
+        id SERIAL PRIMARY KEY,
+        conv_key TEXT NOT NULL,
+        sender_id INTEGER NOT NULL,
+        sender_name TEXT NOT NULL DEFAULT '',
+        text TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS memo_messages_conv_idx ON memo_messages (conv_key, id)`);
+    await query(`
+      CREATE TABLE IF NOT EXISTS memo_files (
+        id SERIAL PRIMARY KEY,
+        message_id INTEGER NOT NULL REFERENCES memo_messages(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        data BYTEA NOT NULL
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS memo_files_message_idx ON memo_files (message_id)`);
+    await query(`
+      CREATE TABLE IF NOT EXISTS memo_seen (
+        user_id INTEGER NOT NULL,
+        conv_key TEXT NOT NULL,
+        last_read_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (user_id, conv_key)
       )
     `);
     // @mentions in CSM comments: one row per person tagged, until they
@@ -3165,4 +3200,127 @@ export async function markCsmRead(userId, clientId) {
     userId,
     clientId,
   ]);
+}
+
+// ---------- Inbox / Memo (team chats) ----------
+
+export const MEMO_TEAM = "team";
+export const memoDmKey = (a, b) => `dm:${Math.min(a, b)}:${Math.max(a, b)}`;
+
+// The other person in a DM, or null for the team chat / a chat this
+// user isn't part of.
+export function memoOtherUserId(convKey, userId) {
+  const m = /^dm:(\d+):(\d+)$/.exec(convKey || "");
+  if (!m) return null;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === userId) return b;
+  if (b === userId) return a;
+  return null;
+}
+
+function memoMessageFromRow(r) {
+  return {
+    id: r.id,
+    conv: r.conv_key,
+    senderId: r.sender_id,
+    author: r.sender_name,
+    text: r.text || "",
+    createdAt: r.created_at,
+  };
+}
+
+// The user's chats: the team chat plus a DM with every other team
+// member — each with its last message and how many are unread.
+export async function getMemoOverview(userId) {
+  const people = (await getCsmPeople()).filter((p) => p.id !== userId);
+  const keys = [MEMO_TEAM, ...people.map((p) => memoDmKey(userId, p.id))];
+  const rows = await query(
+    `SELECT k.conv_key, lm.text, lm.sender_name, lm.sender_id, lm.created_at, lm.file_count,
+            (SELECT count(*)::int FROM memo_messages m
+              WHERE m.conv_key = k.conv_key AND m.sender_id <> $1
+                AND m.created_at > COALESCE(
+                  (SELECT last_read_at FROM memo_seen s WHERE s.user_id = $1 AND s.conv_key = k.conv_key),
+                  'epoch'::timestamptz)) AS unread
+       FROM unnest($2::text[]) AS k(conv_key)
+       LEFT JOIN LATERAL (
+         SELECT m.text, m.sender_name, m.sender_id, m.created_at,
+                (SELECT count(*)::int FROM memo_files f WHERE f.message_id = m.id) AS file_count
+           FROM memo_messages m WHERE m.conv_key = k.conv_key ORDER BY m.id DESC LIMIT 1
+       ) lm ON true`,
+    [userId, keys]
+  );
+  const byKey = new Map(rows.map((r) => [r.conv_key, r]));
+  const summary = (key) => {
+    const r = byKey.get(key);
+    return {
+      unread: r?.unread || 0,
+      lastMessage: r?.created_at
+        ? { text: r.text || "", author: r.sender_name, fromMe: r.sender_id === userId, files: r.file_count, createdAt: r.created_at }
+        : null,
+    };
+  };
+  const conversations = [
+    { key: MEMO_TEAM, kind: "team", name: "Team", ...summary(MEMO_TEAM) },
+    ...people.map((p) => {
+      const key = memoDmKey(userId, p.id);
+      return { key, kind: "dm", userId: p.id, name: p.name, ...summary(key) };
+    }),
+  ];
+  return { conversations, unreadTotal: conversations.reduce((n, c) => n + c.unread, 0) };
+}
+
+export async function getMemoMessages(convKey, afterId = 0) {
+  const [rows, files] = await Promise.all([
+    query("SELECT * FROM memo_messages WHERE conv_key = $1 AND id > $2 ORDER BY id LIMIT 1000", [convKey, afterId]),
+    query(
+      `SELECT f.id, f.message_id, f.name, f.mime_type, f.size FROM memo_files f
+         JOIN memo_messages m ON m.id = f.message_id
+        WHERE m.conv_key = $1 AND m.id > $2 ORDER BY f.id`,
+      [convKey, afterId]
+    ),
+  ]);
+  const byMessage = new Map();
+  for (const f of files) {
+    if (!byMessage.has(f.message_id)) byMessage.set(f.message_id, []);
+    byMessage.get(f.message_id).push(csmFileMeta(f));
+  }
+  return rows.map((r) => ({ ...memoMessageFromRow(r), files: byMessage.get(r.id) || [] }));
+}
+
+// files: [{ name, mimeType, data: Buffer }]
+export async function addMemoMessage(convKey, sender, text, files = []) {
+  const [row] = await query(
+    "INSERT INTO memo_messages (conv_key, sender_id, sender_name, text) VALUES ($1, $2, $3, $4) RETURNING *",
+    [convKey, sender.id, sender.name, text]
+  );
+  const message = { ...memoMessageFromRow(row), files: [] };
+  for (const f of files) {
+    const [fr] = await query(
+      "INSERT INTO memo_files (message_id, name, mime_type, size, data) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, mime_type, size",
+      [row.id, f.name, f.mimeType, f.data.length, f.data]
+    );
+    message.files.push(csmFileMeta(fr));
+  }
+  // Sending counts as having read the chat up to now.
+  await markMemoRead(sender.id, convKey);
+  return message;
+}
+
+export async function markMemoRead(userId, convKey) {
+  await query(
+    `INSERT INTO memo_seen (user_id, conv_key, last_read_at) VALUES ($1, $2, now())
+     ON CONFLICT (user_id, conv_key) DO UPDATE SET last_read_at = now()`,
+    [userId, convKey]
+  );
+}
+
+// A file's bytes plus which chat it belongs to (for the access check).
+export async function getMemoFile(id) {
+  const rows = await query(
+    `SELECT f.id, f.name, f.mime_type, f.size, f.data, m.conv_key
+       FROM memo_files f JOIN memo_messages m ON m.id = f.message_id WHERE f.id = $1`,
+    [id]
+  );
+  if (!rows[0]) return null;
+  return { ...csmFileMeta(rows[0]), data: rows[0].data, conv: rows[0].conv_key };
 }
