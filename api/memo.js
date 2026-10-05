@@ -1,8 +1,10 @@
 // Inbox / Memo tab — chats between team members: one "Team" chat for
 // everyone plus a private chat between any two of them (see
-// src/components/MemoPanel.jsx). Never clients: client-role users and
-// the API key (which isn't a person) are refused, and a private chat
-// can only be read or written by its two members.
+// src/components/MemoPanel.jsx). Never clients: client-role users are
+// refused, and a private chat can only be read or written by its two
+// members. The API key acts as the CRM owner (the super admin): it sees
+// the owner's chats and sends as them (marked "via API"), without
+// marking anything read for them.
 //
 //   GET                         → { conversations: [{ key, kind, name, userId?, unread, lastMessage }], unreadTotal }
 //   GET ?op=unread              → { unreadTotal }
@@ -16,6 +18,7 @@ import {
   getMemoOverview,
   getMemoMessages,
   addMemoMessage,
+  getMemoOwner,
   markMemoRead,
   getMemoFile,
   memoOtherUserId,
@@ -43,17 +46,24 @@ export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
-  if (user.isApiKey || !Number.isInteger(user.id)) {
-    return res.status(403).json({ error: "The Inbox is for signed-in team members only." });
-  }
   try {
     await schema;
+
+    // Who's chatting: the signed-in person, or — for the API key — the owner.
+    let me = user;
+    if (user.isApiKey) {
+      const owner = await getMemoOwner();
+      if (!owner) return res.status(403).json({ error: "No owner account to send as." });
+      me = { ...owner, viaApi: true };
+    } else if (!Number.isInteger(user.id)) {
+      return res.status(403).json({ error: "The Inbox is for signed-in team members only." });
+    }
 
     // A chat this user may use: the team chat, or a private chat they're
     // one of the two people in (and the other is still a team member).
     const canUse = async (conv) => {
       if (conv === MEMO_TEAM) return true;
-      const other = memoOtherUserId(conv, user.id);
+      const other = memoOtherUserId(conv, me.id);
       if (!other) return false;
       return (await getCsmPeople()).some((p) => p.id === other);
     };
@@ -77,7 +87,7 @@ export default async function handler(req, res) {
         return res.status(200).end(file.data);
       }
       if (req.query?.op === "unread") {
-        const { unreadTotal } = await getMemoOverview(user.id);
+        const { unreadTotal } = await getMemoOverview(me.id);
         return res.status(200).json({ unreadTotal });
       }
       const conv = String(req.query?.conv || "");
@@ -86,7 +96,7 @@ export default async function handler(req, res) {
         const after = Math.max(0, Number(req.query?.after) || 0);
         return res.status(200).json({ messages: await getMemoMessages(conv, after) });
       }
-      return res.status(200).json(await getMemoOverview(user.id));
+      return res.status(200).json(await getMemoOverview(me.id));
     }
 
     if (req.method === "POST") {
@@ -95,7 +105,7 @@ export default async function handler(req, res) {
       if (!(await canUse(conv))) return res.status(404).json({ error: "Chat not found" });
 
       if (action === "mark-read") {
-        await markMemoRead(user.id, conv);
+        if (!me.viaApi) await markMemoRead(me.id, conv);
         return res.status(200).json({ ok: true });
       }
 
@@ -114,7 +124,9 @@ export default async function handler(req, res) {
         if (files.reduce((n, f) => n + f.data.length, 0) > MAX_ATTACHMENT_BYTES) {
           return res.status(413).json({ error: "That's too big — attachments are limited to 3MB per message." });
         }
-        const message = await addMemoMessage(conv, { id: user.id, name: user.name || user.email || "Someone" }, text, files);
+        const message = await addMemoMessage(conv, { id: me.id, name: me.name || me.email || "Someone" }, text, files, {
+          via: me.viaApi ? "api" : null,
+        });
         return res.status(201).json({ message });
       }
 
