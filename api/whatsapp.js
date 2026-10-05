@@ -4,7 +4,8 @@
 //   GET  ?op=status   → { state, qr, me, error, canManage }  (state "unreachable" if the service can't be reached;
 //                       the QR code is only included for super admins)
 //   GET  ?op=chats    → { chats }                          super admins only
-//   POST { op: "send", clientId, text }   → { messageId }  anyone — only ever to the client's assigned chat
+//   POST { op: "send", clientId, text, author? }   → { messageId }  anyone — only ever to the client's assigned chat
+//                                      (author: API key callers only — the name shown on the timeline)
 //   POST { op: "logout" }                 → unlinks the WhatsApp account   super admins only
 import { ensureSchema, getCsmClientById } from "../server/db.js";
 import { requireAuth, forbidClientRole, canManageWhatsApp } from "../server/auth.js";
@@ -52,7 +53,14 @@ export default async function handler(req, res) {
         if (!client.whatsappChatId) return res.status(400).json({ error: `${client.name} isn't linked to a WhatsApp chat yet.` });
         const result = await callWhatsAppGateway("/whatsapp/send", {
           method: "POST",
-          body: { chatId: client.whatsappChatId, text, author: user.name || user.email || "Team" },
+          body: {
+            chatId: client.whatsappChatId,
+            text,
+            // Who the timeline shows as the sender (the API key may name itself).
+            author: user.isApiKey
+              ? String(req.body?.author || "").trim().slice(0, 80) || "API"
+              : user.name || user.email || "Team",
+          },
         });
         return res.status(200).json(result);
       }

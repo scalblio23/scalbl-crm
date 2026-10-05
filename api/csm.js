@@ -13,7 +13,8 @@
 //                                 after: only entries newer than that id
 //   GET ?fileId=                → the attached file itself (inline; ?download=1 to save it)
 //   POST { action: "add-client", name }
-//   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }], mentions?: [userId] }
+//   POST { action: "comment", clientId, text, files?: [{ name, mimeType, data (base64) }], mentions?: [userId], author? }
+//                                 (author: API key callers only — who the comment shows as)
 //   POST { action: "confidence", clientId, value }   0.1 … 1.0
 //   POST { action: "mood", clientId, mood }          see CSM_MOODS
 //   POST { action: "ad-account", clientId, url, rule? }  the client's ad account link ("" clears it)
@@ -72,7 +73,16 @@ export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
-  const author = user.name || user.email || "Someone";
+  // The API key (scripts/agents) isn't a person: it has no unread
+  // counts or mentions of its own, and may say who it's writing as
+  // ("author" in a POST body) instead of showing up as "API key".
+  const author = user.isApiKey
+    ? String(req.body?.author || "").trim().slice(0, 80) || "API"
+    : user.name || user.email || "Someone";
+  const unreadFor = (u) =>
+    u.isApiKey
+      ? Promise.resolve({ total: 0, byClient: {}, mentions: { total: 0, byClient: {}, items: [] } })
+      : getCsmUnread(u.id);
   try {
     await schema;
 
@@ -96,7 +106,7 @@ export default async function handler(req, res) {
         res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox");
         return res.status(200).end(file.data);
       }
-      if (req.query?.op === "unread") return res.status(200).json(await getCsmUnread(user.id));
+      if (req.query?.op === "unread") return res.status(200).json(await unreadFor(user));
       if (req.query?.op === "people") return res.status(200).json({ people: await getCsmPeople() });
       if (req.query?.op === "ad-leads") {
         const id = Number(req.query?.clientId);
@@ -133,7 +143,7 @@ export default async function handler(req, res) {
         const after = Math.max(0, Number(req.query?.after) || 0);
         return res.status(200).json({ entries: await getCsmEntries(clientId, after) });
       }
-      const [clients, unread] = await Promise.all([getCsmClients(), getCsmUnread(user.id)]);
+      const [clients, unread] = await Promise.all([getCsmClients(), unreadFor(user)]);
       return res.status(200).json({ clients, unread });
     }
 
@@ -179,8 +189,8 @@ export default async function handler(req, res) {
       }
 
       if (action === "mark-read") {
-        await markCsmRead(user.id, clientId);
-        return res.status(200).json(await getCsmUnread(user.id));
+        if (!user.isApiKey) await markCsmRead(user.id, clientId);
+        return res.status(200).json(await unreadFor(user));
       }
 
       if (action === "confidence") {
