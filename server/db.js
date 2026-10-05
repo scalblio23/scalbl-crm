@@ -201,6 +201,10 @@ export async function ensureSchema() {
         AND to_regclass('public.memo_seen') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'memo_messages' AND column_name = 'via'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
           WHERE table_name = 'messages' AND column_name = 'recording_sid'
         )
         AND EXISTS (
@@ -723,6 +727,8 @@ export async function ensureSchema() {
       )
     `);
     await query(`CREATE INDEX IF NOT EXISTS memo_messages_conv_idx ON memo_messages (conv_key, id)`);
+    // "api" when sent through the API key on the owner's behalf.
+    await query(`ALTER TABLE memo_messages ADD COLUMN IF NOT EXISTS via TEXT`);
     await query(`
       CREATE TABLE IF NOT EXISTS memo_files (
         id SERIAL PRIMARY KEY,
@@ -3225,6 +3231,7 @@ function memoMessageFromRow(r) {
     senderId: r.sender_id,
     author: r.sender_name,
     text: r.text || "",
+    via: r.via || null,
     createdAt: r.created_at,
   };
 }
@@ -3287,11 +3294,12 @@ export async function getMemoMessages(convKey, afterId = 0) {
   return rows.map((r) => ({ ...memoMessageFromRow(r), files: byMessage.get(r.id) || [] }));
 }
 
-// files: [{ name, mimeType, data: Buffer }]
-export async function addMemoMessage(convKey, sender, text, files = []) {
+// files: [{ name, mimeType, data: Buffer }]; via: "api" when sent
+// through the API key on the sender's behalf.
+export async function addMemoMessage(convKey, sender, text, files = [], { via = null } = {}) {
   const [row] = await query(
-    "INSERT INTO memo_messages (conv_key, sender_id, sender_name, text) VALUES ($1, $2, $3, $4) RETURNING *",
-    [convKey, sender.id, sender.name, text]
+    "INSERT INTO memo_messages (conv_key, sender_id, sender_name, text, via) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+    [convKey, sender.id, sender.name, text, via]
   );
   const message = { ...memoMessageFromRow(row), files: [] };
   for (const f of files) {
@@ -3301,8 +3309,9 @@ export async function addMemoMessage(convKey, sender, text, files = []) {
     );
     message.files.push(csmFileMeta(fr));
   }
-  // Sending counts as having read the chat up to now.
-  await markMemoRead(sender.id, convKey);
+  // Sending counts as having read the chat up to now — unless it was
+  // sent through the API, which shouldn't clear the owner's unread.
+  if (!via) await markMemoRead(sender.id, convKey);
   return message;
 }
 
@@ -3323,4 +3332,13 @@ export async function getMemoFile(id) {
   );
   if (!rows[0]) return null;
   return { ...csmFileMeta(rows[0]), data: rows[0].data, conv: rows[0].conv_key };
+}
+
+// The CRM owner's account — who the API key speaks as in the Inbox.
+export async function getMemoOwner() {
+  const rows = await query(
+    "SELECT id, name, email FROM users WHERE role = 'owner' ORDER BY (email = $1) DESC, id LIMIT 1",
+    [OWNER_EMAIL]
+  );
+  return rows[0] ? { id: rows[0].id, name: rows[0].name || rows[0].email } : null;
 }

@@ -433,6 +433,14 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
                               <div className="flex items-baseline gap-2 mb-1">
                                 <span className="text-sm font-semibold text-gray-900">{mine ? "You" : m.author || "Someone"}</span>
                                 <span className="text-xs text-gray-400">{formatTime(m.createdAt)}</span>
+                                {m.via === "api" && (
+                                  <span
+                                    title="Sent on your behalf through the CRM's API key (e.g. by Hermes)"
+                                    className="text-[10px] font-medium uppercase tracking-wide text-gray-400 border border-gray-200 rounded px-1"
+                                  >
+                                    via API
+                                  </span>
+                                )}
                               </div>
                               {m.text && (
                                 <div className="text-sm text-gray-700 whitespace-pre-wrap break-words">
