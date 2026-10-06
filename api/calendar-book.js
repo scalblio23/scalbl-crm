@@ -2,17 +2,16 @@
 // { slug, startUTC, endUTC, name, email, phone, timezone, notes }.
 // This is the one endpoint that does everything the feature promises
 // once a visitor picks a slot: re-validates it's still free, books it,
-// creates the Google Calendar event (if connected), and sends the
+// creates the Google and/or Outlook calendar event (if connected), and sends the
 // confirmation email (SendGrid) + confirmation SMS (Twilio).
 import {
   ensureSchema,
   getCalendarBySlug,
   getConfirmedBookingsInRange,
   createCalendarBooking,
-  setCalendarBookingGoogleEventId,
   getUserById,
 } from "../server/db.js";
-import { getValidAccessToken, getFreeBusy, createGoogleEvent } from "../server/googleCalendar.js";
+import { getExternalBusy, pushBookingToCalendars } from "../server/calendarSync.js";
 import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAvailability.js";
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "../server/email.js";
 import { sendSms, missingTwilioEnv, publicBaseUrl } from "../server/twilioCore.js";
@@ -67,22 +66,9 @@ export default async function handler(req, res) {
     nextDateStr.setUTCDate(nextDateStr.getUTCDate() + 1);
     const dayStartISO = `${prevDateStr.toISOString().slice(0, 10)}T00:00:00.000Z`;
     const dayEndISO = `${nextDateStr.toISOString().slice(0, 10)}T23:59:59.999Z`;
-    let googleBusy = [];
-    if (calendar.googleConnected) {
-      try {
-        const accessToken = await getValidAccessToken(calendar);
-        googleBusy = await getFreeBusy({
-          accessToken,
-          calendarId: calendar.googleCalendarId,
-          timeMinISO: dayStartISO,
-          timeMaxISO: dayEndISO,
-        });
-      } catch (err) {
-        console.error("[api/calendar-book] freebusy lookup failed", err);
-      }
-    }
+    const externalBusy = await getExternalBusy(calendar, dayStartISO, dayEndISO, "[api/calendar-book]");
     const existingBookings = await getConfirmedBookingsInRange(calendar.id, dayStartISO, dayEndISO);
-    const daySlots = computeAvailableSlots({ calendar, fromDate: dateStr, toDate: dateStr, googleBusy, existingBookings });
+    const daySlots = computeAvailableSlots({ calendar, fromDate: dateStr, toDate: dateStr, googleBusy: externalBusy, existingBookings });
     const stillFree = daySlots.some((s) => s.startUTC === startUTC && s.endUTC === endUTC);
     if (!stillFree) {
       return res.status(409).json({ error: "That time was just booked — please pick another slot." });
@@ -108,37 +94,11 @@ export default async function handler(req, res) {
       throw err;
     }
 
-    if (calendar.googleConnected) {
-      try {
-        const accessToken = await getValidAccessToken(calendar);
-        // The video conference link (Zoom, Meet, …) configured on the
-        // calendar, if any, is surfaced in brackets after the booker's
-        // name in the event title and set as the event's location —
-        // that's what makes it show up on both the Google Calendar
-        // event card and in the Meet/join button Google renders for a
-        // recognized link.
-        const summary = calendar.videoConferenceLink
-          ? `${calendar.name} with ${name} (${calendar.videoConferenceLink})`
-          : `${calendar.name} with ${name}`;
-        const eventId = await createGoogleEvent({
-          accessToken,
-          calendarId: calendar.googleCalendarId,
-          summary,
-          description: notes || "",
-          location: calendar.videoConferenceLink || undefined,
-          startISO: startUTC,
-          endISO: endUTC,
-          timezone: calendar.timezone,
-          attendeeEmail: email || undefined,
-        });
-        await setCalendarBookingGoogleEventId(booking.id, eventId);
-      } catch (err) {
-        // The booking itself is already saved — a Google-side failure
-        // shouldn't undo a real reservation the visitor thinks they
-        // have. Surfaced in logs so it can be reconciled manually.
-        console.error("[api/calendar-book] failed to create Google event", err);
-      }
-    }
+    // The booking itself is already saved — a Google/Outlook failure
+    // shouldn't undo a real reservation the visitor thinks they have.
+    // It's recorded on the booking + calendar instead (shown in
+    // Calendar settings with a retry button) — see server/calendarSync.js.
+    await pushBookingToCalendars(calendar, booking);
 
     const owner = calendar.ownerUserId ? await getUserById(calendar.ownerUserId) : null;
     const bookerWhen = formatInZone(startUTC, timezone || calendar.timezone);

@@ -1,9 +1,9 @@
 // GET /api/calendar-slots?slug=...&from=YYYY-MM-DD&to=YYYY-MM-DD —
 // public, unauthenticated. Returns the actual bookable UTC slots for
-// that range: availability rules minus Google freebusy (if connected)
+// that range: availability rules minus Google/Outlook busy time (if connected)
 // minus the calendar's own existing confirmed bookings.
 import { ensureSchema, getCalendarBySlug, getConfirmedBookingsInRange } from "../server/db.js";
-import { getValidAccessToken, getFreeBusy } from "../server/googleCalendar.js";
+import { getExternalBusy } from "../server/calendarSync.js";
 import { computeAvailableSlots } from "../server/calendarAvailability.js";
 
 export default async function handler(req, res) {
@@ -18,26 +18,12 @@ export default async function handler(req, res) {
     const fromISO = `${from}T00:00:00.000Z`;
     const toISO = `${to}T23:59:59.999Z`;
 
-    let googleBusy = [];
-    if (calendar.googleConnected) {
-      try {
-        const accessToken = await getValidAccessToken(calendar);
-        googleBusy = await getFreeBusy({
-          accessToken,
-          calendarId: calendar.googleCalendarId,
-          timeMinISO: fromISO,
-          timeMaxISO: toISO,
-        });
-      } catch (err) {
-        // Surface nothing extra to the visitor — an availability check
-        // failing open (no Google busy applied) is safer for a booking
-        // widget than failing the whole page over a token hiccup.
-        console.error("[api/calendar-slots] freebusy lookup failed", err);
-      }
-    }
+    // Fails open per provider (no busy time applied) — safer for a
+    // booking widget than failing the whole page over a token hiccup.
+    const externalBusy = await getExternalBusy(calendar, fromISO, toISO, "[api/calendar-slots]");
     const existingBookings = await getConfirmedBookingsInRange(calendar.id, fromISO, toISO);
 
-    const slots = computeAvailableSlots({ calendar, fromDate: from, toDate: to, googleBusy, existingBookings });
+    const slots = computeAvailableSlots({ calendar, fromDate: from, toDate: to, googleBusy: externalBusy, existingBookings });
     return res.status(200).json({ slots });
   } catch (err) {
     console.error("[api/calendar-slots]", err);

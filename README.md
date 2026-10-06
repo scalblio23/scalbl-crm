@@ -492,6 +492,23 @@ which only works while the account has no password yet. After that, only
 Nobody can create an account for an email that wasn't invited — both
 endpoints check the `users` table first.
 
+### Roles
+
+Set in **Settings → Users**:
+
+- **Owner** — pinned by email in code (`OWNER_EMAILS` in `server/db.js`:
+  Henry and Cody). Everything, and nobody can edit or delete an owner.
+- **Super Admin** — everything, plus inviting/editing/deleting users (not
+  owners).
+- **Admin** — every tab and every lead; can't manage users.
+- **Client** — Conversation, Contacts, Reports and Portal, only for leads
+  with one of their allowed tags.
+- **Client Team** — everything a Client gets, plus the **Calendars** tab
+  for the calendars they've been assigned to (Calendar settings → **Team
+  access**). They can connect their own Google or Outlook calendar there
+  and set availability. With no calendar assigned they can add one
+  themselves; it's assigned to them automatically.
+
 ### 3. Adding another user later
 
 Add a `{ name, email }` entry to `INVITED_USERS` in `server/db.js` and
@@ -507,14 +524,15 @@ redeploy — the next schema check seeds the row (`password_hash` starts
   requires a valid session cookie except the Twilio webhooks
   (`/api/voice`, `/api/status`, `/api/sms-inbound`) and `/api/health`.
 
-## Calendars (Google Calendar + booking widget)
+## Calendars (Google / Outlook + booking widget)
 
 Sidebar → **Calendars** → **Add Calendar** → name it → lands in that
-calendar's settings, with five sections: **Integrate** (connect a Google
-account), **Timezone**, **Availability** (weekly hours), **Booking rules**
+calendar's settings, with these sections: **Integrate** (connect a Google
+and/or Outlook account), **Timezone**, **Availability** (weekly hours), **Booking rules**
 (call length, buffer, minimum notice, booking window, max per day), and
 **Share & embed** (the public booking link, an iframe embed snippet, and
-the list of bookings on that calendar).
+the list of bookings on that calendar), and **Team access** (which Client
+Team users can use it; owners/admins only).
 
 ### 1. Connect Google
 
@@ -540,6 +558,37 @@ Once connected, a calendar's bookings are created as real Google Calendar
 events (with the booker as an attendee), and existing events on that
 Google Calendar automatically block off time in the booking widget.
 
+If Google rejects an event, the booking still stands. The error is shown
+in red in Calendar settings → Integrate, and next to the booking under
+Share & embed → Bookings, with a **Retry** button. The usual causes:
+
+- **"Google access has expired or was revoked"**: the OAuth consent
+  screen is still in **Testing**, and Google expires refresh tokens after
+  7 days in that mode. Publish it (OAuth consent screen → Publish app),
+  then disconnect and reconnect Google on the calendar.
+- **Missing permission**: the "View and edit events" box was unticked on
+  Google's consent screen. The app now refuses that connection and says
+  so; reconnect and tick every box.
+
+### 1b. Connect Outlook
+
+Same idea as Google, through Microsoft Entra (Azure):
+
+1. [entra.microsoft.com](https://entra.microsoft.com) → **App registrations
+   → New registration**. Supported account types: **any organizational
+   directory and personal Microsoft accounts**.
+2. Redirect URI: platform **Web**, `{your domain}/api/calendar-outlook-callback`.
+3. **Certificates & secrets → New client secret**. Copy the *Value*.
+4. **API permissions → Microsoft Graph → Delegated**: `Calendars.ReadWrite`,
+   `User.Read`, `offline_access`.
+5. Put the Application (client) ID and secret in `MICROSOFT_CLIENT_ID` /
+   `MICROSOFT_CLIENT_SECRET`, locally and in Vercel.
+
+Busy time on the connected Outlook calendar blocks off slots, and each
+booking is added to it. The booker goes in the event description rather
+than as an attendee, because Outlook always emails an invite to attendees
+and the booker already gets the app's own confirmation.
+
 ### 2. Set up SendGrid (confirmation emails)
 
 Create an API key at [app.sendgrid.com](https://app.sendgrid.com) → Settings
@@ -563,6 +612,10 @@ the text rather than failing the booking.
 - `server/googleCalendar.js` — the OAuth flow, token refresh, and
   freebusy/create/delete event calls, all plain `fetch` (no `googleapis`
   dependency).
+- `server/outlookCalendar.js` — the same for Outlook, over Microsoft Graph.
+- `server/calendarSync.js` — busy-time lookup and event create/delete
+  across whichever of Google/Outlook a calendar has connected, and
+  recording sync failures on the booking and calendar.
 - `server/calendarAvailability.js` — turns a calendar's weekly availability
   + booking rules + existing busy time into actual bookable UTC slots,
   using the runtime's built-in `Intl` for timezone conversion (no
@@ -570,7 +623,9 @@ the text rather than failing the booking.
 - `server/email.js` — SendGrid + a minimal `.ics` builder.
 - `api/calendars.js`, `api/calendar-google-connect.js`,
   `api/calendar-google-callback.js`, `api/calendar-google-disconnect.js`,
-  `api/calendar-bookings.js` — the authenticated, CRM-side endpoints.
+  `api/calendar-outlook-*.js`, `api/calendar-bookings.js` — the
+  authenticated, CRM-side endpoints (the two `-callback` ones are public
+  and verify a signed state token instead).
 - `api/calendar-public.js`, `api/calendar-slots.js`, `api/calendar-book.js`,
   `api/calendar-cancel.js` — the public endpoints the booking widget uses;
   no login required.
