@@ -210,6 +210,10 @@ export async function ensureSchema() {
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'calendars' AND column_name = 'video_conference_link'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'calendars' AND column_name = 'meta_pixel_id'
         ) AS exists
     `);
     if (!exists) {
