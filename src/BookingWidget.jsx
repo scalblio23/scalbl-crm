@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Loader2, ChevronLeft, ChevronRight, ChevronDown, CalendarDays, CheckCircle2 } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
@@ -44,6 +44,21 @@ function loadMetaPixel(pixelId) {
   window.fbq("track", "PageView");
 }
 
+// When the widget is embedded with the snippet from Calendar settings →
+// Share & embed, the host page answers our "scalbl:ready" with
+// "scalbl:parent-tracking" and fires the pixel itself — events fired
+// inside a cross-site iframe miss the host page's cookies and don't
+// show up in Meta's pixel helper for that page. A bare <iframe> embed
+// (no listener) never answers, so we fall back to firing in here.
+const isFramed = (() => {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+})();
+const PARENT_ACK_WAIT_MS = 1500;
+
 // Standalone public page — /book/<slug>, no CRM chrome (see the
 // routing check in src/main.jsx). Reuses the same input/button
 // classNames as the rest of the app plus the new Dropdown component,
@@ -67,6 +82,17 @@ export default function BookingWidget({ slug }) {
   const [confirmation, setConfirmation] = useState(null);
   const [showAllSlots, setShowAllSlots] = useState(false);
   const VISIBLE_SLOT_COUNT = 6;
+  const parentTracksRef = useRef(false);
+
+  useEffect(() => {
+    if (!isFramed) return;
+    const onMessage = (e) => {
+      if (e.source === window.parent && e.data?.type === "scalbl:parent-tracking") parentTracksRef.current = true;
+    };
+    window.addEventListener("message", onMessage);
+    window.parent.postMessage({ type: "scalbl:ready", slug }, "*");
+    return () => window.removeEventListener("message", onMessage);
+  }, [slug]);
 
   const tzOptions = useMemo(() => timezoneOptions(), []);
   const visibleDays = useMemo(() => Array.from({ length: 7 }, (_, i) => {
@@ -92,7 +118,9 @@ export default function BookingWidget({ slug }) {
       .get(`/api/calendar-public?slug=${encodeURIComponent(slug)}`)
       .then((info) => {
         setCalendarInfo(info);
-        loadMetaPixel(info.metaPixelId);
+        if (!info.metaPixelId) return;
+        if (!isFramed) loadMetaPixel(info.metaPixelId);
+        else setTimeout(() => !parentTracksRef.current && loadMetaPixel(info.metaPixelId), PARENT_ACK_WAIT_MS);
       })
       .catch((err) => setLoadError(err.message || "This booking page isn't available."));
   }, [slug]);
@@ -153,8 +181,15 @@ export default function BookingWidget({ slug }) {
         ...form,
       });
       setConfirmation(result);
-      if (calendarInfo?.metaPixelId && window.fbq) {
-        window.fbq("track", "Schedule", { content_name: calendarInfo.name });
+      const eventId = `scalbl-booking-${result.booking?.id ?? Date.now()}`;
+      if (isFramed) {
+        window.parent.postMessage(
+          { type: "scalbl:booked", slug, eventId, calendarName: calendarInfo?.name, metaPixelId: calendarInfo?.metaPixelId || null },
+          "*"
+        );
+      }
+      if (calendarInfo?.metaPixelId && window.fbq && !parentTracksRef.current) {
+        window.fbq("trackSingle", calendarInfo.metaPixelId, "Schedule", { content_name: calendarInfo.name }, { eventID: eventId });
       }
     } catch (err) {
       setBookError(err.message || "Could not complete the booking.");

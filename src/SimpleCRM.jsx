@@ -919,6 +919,24 @@ const CALENDAR_SETTINGS_SECTIONS = [
   { key: "share", label: "Share & embed", icon: Link2 },
 ];
 
+// Share & embed's embed code: the iframe plus a small listener so the
+// booking's Meta Pixel "Schedule" event fires on the host page itself
+// (see the scalbl:* postMessage handshake in src/BookingWidget.jsx).
+// The pixel ID comes from the booked message, not this snippet, so
+// changing it in Tracking doesn't require re-embedding.
+function bookingEmbedCode(slug) {
+  const origin = window.location.origin;
+  return `<iframe src="${origin}/book/${slug}" width="100%" height="700" frameborder="0"></iframe>
+<script>
+(function(){var O="${origin}";window.addEventListener("message",function(e){if(e.origin!==O||!e.data)return;var d=e.data;
+if(d.type==="scalbl:ready"){e.source.postMessage({type:"scalbl:parent-tracking"},O);return}
+if(d.type!=="scalbl:booked"||!d.metaPixelId)return;
+!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version="2.0";n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,"script","https://connect.facebook.net/en_US/fbevents.js");
+var ids=window.fbq.instance&&window.fbq.instance.pixelsByID;if(!ids||!ids[d.metaPixelId])fbq("init",d.metaPixelId);
+fbq("trackSingle",d.metaPixelId,"Schedule",{content_name:d.calendarName},{eventID:d.eventId});});})();
+</script>`;
+}
+
 // Automations — a trigger + an ordered chain of actions, same linear
 // shape as GoHighLevel's workflow builder (see server/automations.js
 // for how these are actually interpreted when a trigger fires).
@@ -9991,21 +10009,20 @@ export default function SimpleCRM() {
                         <div>
                           <h2 className="text-base font-bold mb-2">Embed</h2>
                           <p className="text-sm text-gray-500 mb-3">
-                            Paste this into any website to embed the booking widget directly.
+                            Paste this into any website to embed the booking widget directly. The script fires the
+                            Meta Pixel “Schedule” event (Tracking) on your page when someone books.
                           </p>
                           <div className="flex items-start gap-2">
                             <textarea
                               readOnly
-                              rows={3}
-                              value={`<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`}
+                              rows={6}
+                              value={bookingEmbedCode(openCalendar.slug)}
                               onFocus={(e) => e.target.select()}
                               className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50 font-mono"
                             />
                             <button
                               onClick={() =>
-                                navigator.clipboard.writeText(
-                                  `<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`
-                                )
+                                navigator.clipboard.writeText(bookingEmbedCode(openCalendar.slug))
                               }
                               className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
                             >
