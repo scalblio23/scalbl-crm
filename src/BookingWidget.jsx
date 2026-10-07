@@ -33,7 +33,11 @@ export default function BookingWidget({ slug }) {
   const [windowSlots, setWindowSlots] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState(null);
-  const [form, setForm] = useState({ name: "", email: "", phone: "", notes: "" });
+  // ?name=&email=&phone= pre-fill the form, e.g. when embedded after a lead-capture survey.
+  const [form, setForm] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return { name: params.get("name") || "", email: params.get("email") || "", phone: params.get("phone") || "", notes: "" };
+  });
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
   const [confirmation, setConfirmation] = useState(null);
