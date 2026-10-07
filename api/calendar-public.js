@@ -16,6 +16,7 @@ export default async function handler(req, res) {
       timezone: calendar.timezone,
       eventLengthMinutes: calendar.eventLengthMinutes,
       bookingWindowDays: calendar.bookingWindowDays,
+      metaPixelId: calendar.metaPixelId || null,
     });
   } catch (err) {
     console.error("[api/calendar-public]", err);

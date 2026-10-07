@@ -25,7 +25,19 @@ export default async function handler(req, res) {
     if (req.method === "PATCH") {
       const id = req.query.id;
       if (!id) return res.status(400).json({ error: "Missing id" });
-      const calendar = await updateCalendar(id, req.body || {});
+      const patch = { ...(req.body || {}) };
+      if (patch.name !== undefined) {
+        patch.name = String(patch.name || "").trim();
+        if (!patch.name) return res.status(400).json({ error: "Calendar name can't be empty" });
+      }
+      // Pixel IDs are all digits; "" clears it.
+      if (patch.metaPixelId !== undefined) {
+        patch.metaPixelId = String(patch.metaPixelId || "").trim();
+        if (patch.metaPixelId && !/^\d{5,20}$/.test(patch.metaPixelId)) {
+          return res.status(400).json({ error: "Meta Pixel ID should be a number, e.g. 1234567890123456" });
+        }
+      }
+      const calendar = await updateCalendar(id, patch);
       if (!calendar) return res.status(404).json({ error: "Calendar not found" });
       return res.status(200).json(calendar);
     }

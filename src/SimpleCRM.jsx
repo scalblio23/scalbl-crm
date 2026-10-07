@@ -909,11 +909,13 @@ const navItems = [
 // → Booking rules → Share & embed, per the sidebar tab → Add Calendar →
 // Calendar settings → options flow.
 const CALENDAR_SETTINGS_SECTIONS = [
+  { key: "general", label: "General", icon: Settings },
   { key: "integrate", label: "Integrate", icon: Globe },
   { key: "timezone", label: "Timezone", icon: Clock },
   { key: "availability", label: "Availability", icon: Calendar },
   { key: "rules", label: "Booking rules", icon: ListChecks },
   { key: "video", label: "Video conference", icon: Video },
+  { key: "tracking", label: "Tracking", icon: BarChart3 },
   { key: "share", label: "Share & embed", icon: Link2 },
 ];
 
@@ -1348,6 +1350,8 @@ export default function SimpleCRM() {
   const [availabilityDraft, setAvailabilityDraft] = useState(null);
   const [rulesDraft, setRulesDraft] = useState(null);
   const [videoDraft, setVideoDraft] = useState(null);
+  const [calendarNameDraft, setCalendarNameDraft] = useState("");
+  const [metaPixelDraft, setMetaPixelDraft] = useState("");
   useEffect(() => {
     if (!openCalendar) return;
     setAvailabilityDraft(openCalendar.availability);
@@ -1359,6 +1363,8 @@ export default function SimpleCRM() {
       maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
+    setCalendarNameDraft(openCalendar.name);
+    setMetaPixelDraft(openCalendar.metaPixelId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCalendar?.id]);
 
@@ -9640,6 +9646,35 @@ export default function SimpleCRM() {
                   </div>
 
                   <div className="flex-1 p-8">
+                    {calendarSettingsTab === "general" && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">General</h2>
+                          <button
+                            onClick={() => patchCalendar(openCalendar.id, { name: calendarNameDraft.trim() })}
+                            disabled={
+                              savingCalendar || !calendarNameDraft.trim() || calendarNameDraft.trim() === openCalendar.name
+                            }
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Calendar name</label>
+                          <input
+                            value={calendarNameDraft}
+                            onChange={(e) => setCalendarNameDraft(e.target.value)}
+                            placeholder="e.g. Sales Call"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Shown on the booking page and in event titles. The booking link stays the same.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
                     {calendarSettingsTab === "integrate" && (
                       <div className="max-w-lg space-y-4">
                         <h2 className="text-base font-bold">Integrate with Google</h2>
@@ -9880,6 +9915,50 @@ export default function SimpleCRM() {
                         {openCalendar.videoConferenceLink && (
                           <p className="text-xs text-gray-400">
                             Event title will read: “{openCalendar.name} with Jane Smith ({openCalendar.videoConferenceLink})”
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "tracking" && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Tracking</h2>
+                          <button
+                            onClick={() => {
+                              // Accept a pasted pixel snippet too — pull the ID out of fbq('init', '…').
+                              const raw = metaPixelDraft.trim();
+                              const fromSnippet = raw.match(/fbq\(\s*['"]init['"]\s*,\s*['"](\d+)['"]/);
+                              const metaPixelId = fromSnippet ? fromSnippet[1] : raw.replace(/\s+/g, "");
+                              setMetaPixelDraft(metaPixelId);
+                              patchCalendar(openCalendar.id, { metaPixelId });
+                            }}
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <p className="text-sm text-gray-500">
+                          Add your Meta Pixel ID and the booking page loads the pixel automatically, firing a{" "}
+                          <span className="font-medium text-gray-700">Schedule</span> event every time someone books a
+                          call on this calendar.
+                        </p>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Meta Pixel ID</label>
+                          <input
+                            value={metaPixelDraft}
+                            onChange={(e) => setMetaPixelDraft(e.target.value)}
+                            placeholder="e.g. 1234567890123456"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Find it in Meta Events Manager → Data sources. Leave blank and save to turn tracking off.
+                          </p>
+                        </div>
+                        {openCalendar.metaPixelId && (
+                          <p className="text-xs text-emerald-600 flex items-center gap-1">
+                            <CheckCircle2 size={12} /> Tracking “Schedule” events on pixel {openCalendar.metaPixelId}
                           </p>
                         )}
                       </div>

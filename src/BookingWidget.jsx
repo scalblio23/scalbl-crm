@@ -20,6 +20,30 @@ function timeLabel(iso, timeZone) {
   return new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 }
 
+// Meta Pixel base code (the standard snippet, minus the <noscript>
+// image) — injected only when the calendar has a Pixel ID set in
+// Calendar settings → Tracking. Fires PageView on load; the booking
+// itself fires the standard "Schedule" event (see submitBooking).
+function loadMetaPixel(pixelId) {
+  if (!pixelId || typeof window === "undefined") return;
+  if (!window.fbq) {
+    const n = (window.fbq = function () {
+      n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments);
+    });
+    if (!window._fbq) window._fbq = n;
+    n.push = n;
+    n.loaded = true;
+    n.version = "2.0";
+    n.queue = [];
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://connect.facebook.net/en_US/fbevents.js";
+    document.head.appendChild(script);
+  }
+  window.fbq("init", pixelId);
+  window.fbq("track", "PageView");
+}
+
 // Standalone public page — /book/<slug>, no CRM chrome (see the
 // routing check in src/main.jsx). Reuses the same input/button
 // classNames as the rest of the app plus the new Dropdown component,
@@ -66,7 +90,10 @@ export default function BookingWidget({ slug }) {
   useEffect(() => {
     api
       .get(`/api/calendar-public?slug=${encodeURIComponent(slug)}`)
-      .then(setCalendarInfo)
+      .then((info) => {
+        setCalendarInfo(info);
+        loadMetaPixel(info.metaPixelId);
+      })
       .catch((err) => setLoadError(err.message || "This booking page isn't available."));
   }, [slug]);
 
@@ -126,6 +153,9 @@ export default function BookingWidget({ slug }) {
         ...form,
       });
       setConfirmation(result);
+      if (calendarInfo?.metaPixelId && window.fbq) {
+        window.fbq("track", "Schedule", { content_name: calendarInfo.name });
+      }
     } catch (err) {
       setBookError(err.message || "Could not complete the booking.");
     } finally {
