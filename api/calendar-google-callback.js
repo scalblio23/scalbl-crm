@@ -7,7 +7,7 @@
 // Google Cloud Console.
 import jwt from "jsonwebtoken";
 import { ensureSchema, getCalendarById, setCalendarGoogleTokens } from "../server/db.js";
-import { exchangeCodeForTokens, fetchGoogleEmail, requestBaseUrl } from "../server/googleCalendar.js";
+import { exchangeCodeForTokens, fetchGoogleEmail, requestBaseUrl, hasGoogleEventsScope } from "../server/googleCalendar.js";
 
 export default async function handler(req, res) {
   const baseUrl = requestBaseUrl(req);
@@ -33,7 +33,13 @@ export default async function handler(req, res) {
     const calendar = await getCalendarById(calendarId);
     if (!calendar) return redirectToCrm({ google: "error", reason: "calendar_not_found" });
 
-    const { accessToken, refreshToken, expiresAt } = await exchangeCodeForTokens({ code: String(code), baseUrl });
+    const { accessToken, refreshToken, expiresAt, scope } = await exchangeCodeForTokens({ code: String(code), baseUrl });
+    // The "View and edit events" box was unticked on Google's consent
+    // screen — without it every booking's event insert fails, so don't
+    // save a connection that only looks like it works.
+    if (!hasGoogleEventsScope(scope)) {
+      return redirectToCrm({ calendar: calendarId, google: "error", reason: "missing_events_permission" });
+    }
     const googleEmail = await fetchGoogleEmail(accessToken);
     await setCalendarGoogleTokens(calendarId, { googleEmail, accessToken, refreshToken, expiry: expiresAt });
 

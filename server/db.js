@@ -792,18 +792,42 @@ export async function ensureSchema() {
     // `status`, which is deliberately limited to four values.
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS closer_notes TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deal_outcome TEXT DEFAULT 'Pending'`);
+    // Calendars: which client_team users a calendar is assigned to
+    // (owners/admins see every calendar regardless), an Outlook
+    // connection alongside the Google one (same token shape — see
+    // server/outlookCalendar.js; outlook_calendar_id NULL = the
+    // account's default calendar), and the last error syncing a
+    // booking out to Google/Outlook, so a failed sync shows up in
+    // Calendar settings instead of only in server logs.
+    await query(`
+      ALTER TABLE calendars
+        ADD COLUMN IF NOT EXISTS assigned_user_ids JSONB NOT NULL DEFAULT '[]',
+        ADD COLUMN IF NOT EXISTS outlook_connected BOOLEAN NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS outlook_email TEXT,
+        ADD COLUMN IF NOT EXISTS outlook_access_token TEXT,
+        ADD COLUMN IF NOT EXISTS outlook_refresh_token TEXT,
+        ADD COLUMN IF NOT EXISTS outlook_token_expiry TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS outlook_calendar_id TEXT,
+        ADD COLUMN IF NOT EXISTS sync_error TEXT,
+        ADD COLUMN IF NOT EXISTS sync_error_at TIMESTAMPTZ
+    `);
+    await query(`
+      ALTER TABLE calendar_bookings
+        ADD COLUMN IF NOT EXISTS outlook_event_id TEXT,
+        ADD COLUMN IF NOT EXISTS sync_error TEXT
+    `);
     await migrateLegacyStageToStatus();
     await ensureTransferNumberColumn();
     await seedIfEmpty();
     await ensureStageColumn();
     await seedUsersIfMissing();
-    // Owner is pinned to one specific email rather than being a role
+    // Owner is pinned to specific emails rather than being a role
     // anyone can grant — self-healing here (after seeding, so it also
-    // catches a brand-new database where Henry's row didn't exist a
-    // moment ago) means even a bad edit elsewhere can't strip it or
-    // hand it to someone else.
-    await query(`UPDATE users SET role = 'owner' WHERE email = $1 AND role IS DISTINCT FROM 'owner'`, [
-      OWNER_EMAIL,
+    // catches a brand-new database where a row didn't exist a moment
+    // ago) means even a bad edit elsewhere can't strip it or hand it
+    // to someone else.
+    await query(`UPDATE users SET role = 'owner' WHERE email = ANY($1) AND role IS DISTINCT FROM 'owner'`, [
+      OWNER_EMAILS,
     ]);
   })();
   return schemaReady;
@@ -866,9 +890,12 @@ async function ensureStageColumn() {
 // "set password" — anyone else's email just won't exist here, so
 // there's no open self-registration. Roles for anyone invited this
 // way default to 'admin' (see the users table's column default) —
-// Henry's is corrected to 'owner' by the self-heal above regardless
-// of what's written here.
+// every OWNER_EMAILS row is corrected to 'owner' by the self-heal
+// above regardless of what's written here.
+// OWNER_EMAIL is the primary owner — who the API key speaks as in the
+// Inbox. Cody is a second owner with exactly the same permissions.
 const OWNER_EMAIL = "henryfortunatow@gmail.com";
+const OWNER_EMAILS = [OWNER_EMAIL, "codyadrury90@gmail.com"];
 const INVITED_USERS = [
   { name: "Henry", email: "henryfortunatow@gmail.com" },
   { name: "Jem", email: "jem.scalbl@gmail.com" },
@@ -2354,15 +2381,25 @@ function calendarFromRow(r, { includeSecrets = false } = {}) {
     googleConnected: r.google_connected,
     googleEmail: r.google_email,
     googleCalendarId: r.google_calendar_id || "primary",
+    outlookConnected: Boolean(r.outlook_connected),
+    outlookEmail: r.outlook_email || null,
+    outlookCalendarId: r.outlook_calendar_id || null,
+    assignedUserIds: (r.assigned_user_ids || []).map(Number),
+    syncError: r.sync_error || null,
+    syncErrorAt: r.sync_error_at || null,
     active: r.active,
     createdAt: r.created_at,
   };
   // Access/refresh tokens never leave the server — only
-  // server/googleCalendar.js reads them directly off the DB row.
+  // server/googleCalendar.js / server/outlookCalendar.js read them
+  // directly off the DB row.
   if (includeSecrets) {
     base.googleAccessToken = r.google_access_token;
     base.googleRefreshToken = r.google_refresh_token;
     base.googleTokenExpiry = r.google_token_expiry;
+    base.outlookAccessToken = r.outlook_access_token;
+    base.outlookRefreshToken = r.outlook_refresh_token;
+    base.outlookTokenExpiry = r.outlook_token_expiry;
   }
   return base;
 }
@@ -2404,12 +2441,12 @@ export async function getCalendarBySlug(slug, opts) {
   return rows[0] ? calendarFromRow(rows[0], opts) : null;
 }
 
-export async function createCalendar({ name, ownerUserId }) {
+export async function createCalendar({ name, ownerUserId, assignedUserIds = [] }) {
   const slug = slugifyCalendarName(name);
   const rows = await query(
-    `INSERT INTO calendars (owner_user_id, name, slug, availability)
-     VALUES ($1,$2,$3,$4) RETURNING *`,
-    [ownerUserId || null, name, slug, JSON.stringify(DEFAULT_AVAILABILITY)]
+    `INSERT INTO calendars (owner_user_id, name, slug, availability, assigned_user_ids)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [ownerUserId || null, name, slug, JSON.stringify(DEFAULT_AVAILABILITY), JSON.stringify(assignedUserIds.map(Number))]
   );
   return calendarFromRow(rows[0]);
 }
@@ -2436,7 +2473,11 @@ export async function updateCalendar(id, patch) {
        availability = COALESCE($11::jsonb, availability),
        active = COALESCE($12, active),
        google_calendar_id = COALESCE($13, google_calendar_id),
-       video_conference_link = COALESCE($14, video_conference_link)
+       video_conference_link = COALESCE($14, video_conference_link),
+       assigned_user_ids = COALESCE($15::jsonb, assigned_user_ids),
+       -- outlook_calendar_id is nullable by design (null = the
+       -- account's default calendar), same reasoning as $9 above.
+       outlook_calendar_id = CASE WHEN $16 THEN $17 ELSE outlook_calendar_id END
      WHERE id = $1
      RETURNING *`,
     [
@@ -2454,6 +2495,9 @@ export async function updateCalendar(id, patch) {
       patch.active ?? null,
       patch.googleCalendarId ?? null,
       patch.videoConferenceLink ?? null,
+      Array.isArray(patch.assignedUserIds) ? JSON.stringify(patch.assignedUserIds.map(Number)) : null,
+      Object.prototype.hasOwnProperty.call(patch, "outlookCalendarId"),
+      patch.outlookCalendarId || null,
     ]
   );
   return rows[0] ? calendarFromRow(rows[0]) : null;
@@ -2474,7 +2518,9 @@ export async function setCalendarGoogleTokens(id, { googleEmail, accessToken, re
        google_email = $2,
        google_access_token = $3,
        google_refresh_token = COALESCE($4, google_refresh_token),
-       google_token_expiry = $5
+       google_token_expiry = $5,
+       sync_error = NULL,
+       sync_error_at = NULL
      WHERE id = $1
      RETURNING *`,
     [id, googleEmail, accessToken, refreshToken || null, expiry]
@@ -2508,6 +2554,63 @@ export async function clearCalendarGoogleTokens(id) {
   return rows[0] ? calendarFromRow(rows[0]) : null;
 }
 
+// Outlook equivalents of the Google token helpers above. Microsoft
+// rotates refresh tokens — every refresh can hand back a new one —
+// so the access-token update takes an optional new refresh token too.
+export async function setCalendarOutlookTokens(id, { outlookEmail, accessToken, refreshToken, expiry }) {
+  const rows = await query(
+    `UPDATE calendars SET
+       outlook_connected = true,
+       outlook_email = $2,
+       outlook_access_token = $3,
+       outlook_refresh_token = COALESCE($4, outlook_refresh_token),
+       outlook_token_expiry = $5,
+       sync_error = NULL,
+       sync_error_at = NULL
+     WHERE id = $1
+     RETURNING *`,
+    [id, outlookEmail, accessToken, refreshToken || null, expiry]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+export async function updateCalendarOutlookAccessToken(id, { accessToken, refreshToken, expiry }) {
+  await query(
+    `UPDATE calendars SET
+       outlook_access_token = $2,
+       outlook_refresh_token = COALESCE($3, outlook_refresh_token),
+       outlook_token_expiry = $4
+     WHERE id = $1`,
+    [id, accessToken, refreshToken || null, expiry]
+  );
+}
+
+export async function clearCalendarOutlookTokens(id) {
+  const rows = await query(
+    `UPDATE calendars SET
+       outlook_connected = false,
+       outlook_email = NULL,
+       outlook_access_token = NULL,
+       outlook_refresh_token = NULL,
+       outlook_token_expiry = NULL,
+       outlook_calendar_id = NULL
+     WHERE id = $1
+     RETURNING *`,
+    [id]
+  );
+  return rows[0] ? calendarFromRow(rows[0]) : null;
+}
+
+// The most recent Google/Outlook sync failure on a calendar (null
+// clears it) — shown as a banner in Calendar settings so a broken
+// connection is visible instead of bookings silently not appearing.
+export async function setCalendarSyncError(id, message) {
+  await query("UPDATE calendars SET sync_error = $2, sync_error_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END WHERE id = $1", [
+    id,
+    message || null,
+  ]);
+}
+
 // ---------- Calendar bookings ----------
 
 function calendarBookingFromRow(r) {
@@ -2523,6 +2626,8 @@ function calendarBookingFromRow(r) {
     bookerTimezone: r.booker_timezone,
     status: r.status,
     googleEventId: r.google_event_id,
+    outlookEventId: r.outlook_event_id || null,
+    syncError: r.sync_error || null,
     cancelToken: r.cancel_token,
     createdAt: r.created_at,
   };
@@ -2583,6 +2688,14 @@ export async function createCalendarBooking(b) {
 
 export async function setCalendarBookingGoogleEventId(id, googleEventId) {
   await query("UPDATE calendar_bookings SET google_event_id = $2 WHERE id = $1", [id, googleEventId]);
+}
+
+export async function setCalendarBookingOutlookEventId(id, outlookEventId) {
+  await query("UPDATE calendar_bookings SET outlook_event_id = $2 WHERE id = $1", [id, outlookEventId]);
+}
+
+export async function setCalendarBookingSyncError(id, message) {
+  await query("UPDATE calendar_bookings SET sync_error = $2 WHERE id = $1", [id, message || null]);
 }
 
 export async function getCalendarBookingByCancelToken(token) {
@@ -3000,10 +3113,10 @@ export async function deleteCsmClient(id) {
 }
 
 // The team members who can be @mentioned in CSM comments (everyone
-// except client-portal users).
+// except client-portal users — client and client_team).
 export async function getCsmPeople() {
   const rows = await query(
-    "SELECT id, name, email FROM users WHERE COALESCE(role, 'admin') <> 'client' ORDER BY lower(name), id"
+    "SELECT id, name, email FROM users WHERE COALESCE(role, 'admin') IN ('owner', 'super_admin', 'admin') ORDER BY lower(name), id"
   );
   return rows.map((r) => ({ id: r.id, name: r.name || r.email }));
 }

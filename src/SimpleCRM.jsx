@@ -71,6 +71,7 @@ import {
   PhoneForwarded,
   Grid3x3,
   PhoneIncoming,
+  Mail,
 } from "lucide-react";
 import {
   placeCall,
@@ -915,6 +916,8 @@ const CALENDAR_SETTINGS_SECTIONS = [
   { key: "rules", label: "Booking rules", icon: ListChecks },
   { key: "video", label: "Video conference", icon: Video },
   { key: "share", label: "Share & embed", icon: Link2 },
+  // Full-access roles only — which Client Team users can use this calendar.
+  { key: "team", label: "Team access", icon: Users },
 ];
 
 // Automations — a trigger + an ordered chain of actions, same linear
@@ -1286,16 +1289,35 @@ export default function SimpleCRM() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
-  // Picks up ?calendar=<id>&google=connected|error after the "Integrate
-  // with Google" OAuth round trip lands back on the CRM (see
-  // api/calendar-google-callback.js) — reopens that calendar's
-  // Integrate section and refreshes its state so the newly-connected
-  // account shows up immediately.
+  // Picks up ?calendar=<id>&google|outlook=connected|error after the
+  // "Connect with Google/Outlook" OAuth round trip lands back on the CRM
+  // (see api/calendar-google-callback.js / calendar-outlook-callback.js)
+  // — reopens that calendar's Integrate section, refreshes its state so
+  // the newly-connected account shows up immediately, and says why if
+  // the connection didn't go through.
+  const [calendarConnectNotice, setCalendarConnectNotice] = useState(null); // { ok, text }
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const google = params.get("google");
+    const provider = params.get("google") ? "google" : params.get("outlook") ? "outlook" : null;
     const calendarParam = params.get("calendar");
-    if (!google) return;
+    if (!provider) return;
+    const providerName = provider === "google" ? "Google" : "Outlook";
+    const reason = params.get("reason");
+    if (params.get(provider) === "connected") {
+      setCalendarConnectNotice({ ok: true, text: `${providerName} connected.` });
+    } else if (reason === "missing_events_permission") {
+      setCalendarConnectNotice({
+        ok: false,
+        text: `${providerName} wasn't connected: the permission to view and edit calendar events was not granted. Click Connect again and tick every permission box on the consent screen.`,
+      });
+    } else if (reason === "access_denied") {
+      setCalendarConnectNotice({ ok: false, text: `${providerName} connection was cancelled.` });
+    } else {
+      setCalendarConnectNotice({
+        ok: false,
+        text: `${providerName} couldn't be connected${reason ? ` (${reason})` : ""}. Try again.`,
+      });
+    }
     setPage("calendars");
     setCalendarSettingsTab("integrate");
     if (calendarParam) setOpenCalendarId(Number(calendarParam));
@@ -1340,6 +1362,28 @@ export default function SimpleCRM() {
       .finally(() => setGoogleCalendarsLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCalendarId, openCalendar?.googleConnected]);
+
+  // Same picker for the connected Outlook account.
+  const [outlookCalendarOptions, setOutlookCalendarOptions] = useState([]);
+  const [outlookCalendarsLoading, setOutlookCalendarsLoading] = useState(false);
+  const [outlookCalendarsError, setOutlookCalendarsError] = useState("");
+  useEffect(() => {
+    setOutlookCalendarsError("");
+    if (!openCalendarId || !openCalendar?.outlookConnected) {
+      setOutlookCalendarOptions([]);
+      return;
+    }
+    setOutlookCalendarsLoading(true);
+    api
+      .get(`/api/calendar-outlook-calendars?calendarId=${openCalendarId}`)
+      .then((list) => setOutlookCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary, primary: c.primary }))))
+      .catch((err) => {
+        setOutlookCalendarOptions([]);
+        setOutlookCalendarsError(err.message || "Could not load your Outlook calendars.");
+      })
+      .finally(() => setOutlookCalendarsLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openCalendarId, openCalendar?.outlookConnected]);
 
   // Availability and booking-rules edits are drafted locally and saved
   // with an explicit button (like the rest of Settings) rather than
@@ -1437,6 +1481,34 @@ export default function SimpleCRM() {
       setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
     } catch (err) {
       alert(err.message || "Could not disconnect Google");
+    }
+  };
+
+  const connectOutlookCalendar = (id) => {
+    window.location.href = `/api/calendar-outlook-connect?calendarId=${id}`;
+  };
+
+  const disconnectOutlookCalendar = async (id) => {
+    try {
+      const updated = await api.post("/api/calendar-outlook-disconnect", { calendarId: id });
+      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+    } catch (err) {
+      alert(err.message || "Could not disconnect Outlook");
+    }
+  };
+
+  // Re-sends a booking whose Google/Outlook event failed to create.
+  const [resyncingBookingId, setResyncingBookingId] = useState(null);
+  const resyncCalendarBooking = async (id) => {
+    setResyncingBookingId(id);
+    try {
+      const updated = await api.post(`/api/calendar-bookings?id=${id}&action=resync`, {});
+      setCalendarBookings((bs) => bs.map((b) => (b.id === id ? updated : b)));
+      setCalendars((cs) => cs.map((c) => (c.id === updated.calendarId ? { ...c, syncError: null } : c)));
+    } catch (err) {
+      alert(err.message || "Could not sync this booking");
+    } finally {
+      setResyncingBookingId(null);
     }
   };
 
@@ -2707,7 +2779,12 @@ export default function SimpleCRM() {
   // omitted it, an old cached shape) is treated as a client — a
   // missing field must narrow access, never widen it.
   const isClientRole = Boolean(authUser) && (authUser.role === "client" || !FULL_ACCESS_ROLES.includes(authUser.role));
-  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal"];
+  // A Client Team user is a client who also gets the Calendars tab, for
+  // the calendars assigned to them (server/auth.js's CLIENT_TEAM_TABS).
+  const isClientTeamRole = authUser?.role === "client_team";
+  const CLIENT_NAV_KEYS = isClientTeamRole
+    ? ["conversation", "contacts", "reports", "portal", "calendars"]
+    : ["conversation", "contacts", "reports", "portal"];
   const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
   // Fetch the CSM tab's code and client list in the background once the
   // app is up (and again on hovering the tab), so opening it doesn't
@@ -2809,7 +2886,7 @@ export default function SimpleCRM() {
         name: inviteForm.name.trim(),
         email: inviteForm.email.trim(),
         role: inviteForm.role,
-        allowedTags: inviteForm.role === "client" ? inviteForm.allowedTags : [],
+        allowedTags: inviteForm.role === "client" || inviteForm.role === "client_team" ? inviteForm.allowedTags : [],
       });
       setTeamUsers((us) => [...us, created]);
       setInviteForm(emptyInviteForm);
@@ -3676,7 +3753,7 @@ export default function SimpleCRM() {
 
   useEffect(() => {
     // Only roles that can dial get a phone line (and inbound calls).
-    if (!authUser || authUser.role === "client") return;
+    if (!authUser || !FULL_ACCESS_ROLES.includes(authUser.role)) return;
     initVoice();
     const offStatus = onVoiceStatus(setVoiceStatus);
     const offIncoming = onIncomingCall((call) => {
@@ -9533,12 +9610,16 @@ export default function SimpleCRM() {
               <>
                 <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
                   <h1 className="text-xl font-bold">Calendars</h1>
-                  <button
-                    onClick={() => setShowAddCalendarModal(true)}
-                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
-                  >
-                    <Plus size={15} /> Add Calendar
-                  </button>
+                  {/* A Client Team user can add a calendar only while they have
+                      none assigned (api/calendars.js enforces the same). */}
+                  {(!isClientRole || (calendarsLoaded && calendars.length === 0)) && (
+                    <button
+                      onClick={() => setShowAddCalendarModal(true)}
+                      className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                    >
+                      <Plus size={15} /> Add Calendar
+                    </button>
+                  )}
                 </div>
                 <div className="p-8">
                   {calendarsLoading ? (
@@ -9548,7 +9629,9 @@ export default function SimpleCRM() {
                   ) : calendars.length === 0 ? (
                     <div className="text-center py-16 text-sm text-gray-400">
                       <Calendar size={28} className="mx-auto mb-3 text-gray-300" />
-                      No calendars yet. Add one to start taking bookings.
+                      {isClientRole
+                        ? "You haven't been assigned a calendar yet. Add one to set your availability and connect your Google or Outlook calendar."
+                        : "No calendars yet. Add one to start taking bookings."}
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -9570,12 +9653,21 @@ export default function SimpleCRM() {
                             <Clock size={12} /> {cal.eventLengthMinutes} min · {cal.timezone}
                           </p>
                           <p className="text-xs mb-4">
-                            {cal.googleConnected ? (
+                            {cal.googleConnected || cal.outlookConnected ? (
                               <span className="text-emerald-600 flex items-center gap-1">
-                                <CheckCircle2 size={12} /> Google connected
+                                <CheckCircle2 size={12} />{" "}
+                                {[cal.googleConnected && "Google", cal.outlookConnected && "Outlook"]
+                                  .filter(Boolean)
+                                  .join(" + ")}{" "}
+                                connected
                               </span>
                             ) : (
-                              <span className="text-gray-400">Google not connected</span>
+                              <span className="text-gray-400">No calendar connected</span>
+                            )}
+                            {cal.syncError && (
+                              <span className="text-red-600 flex items-center gap-1 mt-1">
+                                <AlertTriangle size={12} /> Sync problem — open to fix
+                              </span>
                             )}
                           </p>
                           <div className="flex items-center gap-2">
@@ -9588,12 +9680,14 @@ export default function SimpleCRM() {
                             >
                               Open
                             </button>
-                            <button
-                              onClick={() => deleteCalendar(cal.id)}
-                              className="text-gray-400 hover:text-red-600 p-2"
-                            >
-                              <Trash2 size={15} />
-                            </button>
+                            {!isClientRole && (
+                              <button
+                                onClick={() => deleteCalendar(cal.id)}
+                                className="text-gray-400 hover:text-red-600 p-2"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -9624,7 +9718,7 @@ export default function SimpleCRM() {
                 </div>
                 <div className="flex">
                   <div className="w-48 shrink-0 border-r border-gray-100 py-6 px-3 space-y-1">
-                    {CALENDAR_SETTINGS_SECTIONS.map(({ key, label, icon: Icon }) => (
+                    {CALENDAR_SETTINGS_SECTIONS.filter(({ key }) => key !== "team" || !isClientRole).map(({ key, label, icon: Icon }) => (
                       <button
                         key={key}
                         onClick={() => setCalendarSettingsTab(key)}
@@ -9642,6 +9736,38 @@ export default function SimpleCRM() {
                   <div className="flex-1 p-8">
                     {calendarSettingsTab === "integrate" && (
                       <div className="max-w-lg space-y-4">
+                        {calendarConnectNotice && (
+                          <div
+                            className={`flex items-start gap-2 rounded-lg border px-4 py-3 text-sm ${
+                              calendarConnectNotice.ok
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                                : "border-red-200 bg-red-50 text-red-700"
+                            }`}
+                          >
+                            {calendarConnectNotice.ok ? (
+                              <CheckCircle2 size={15} className="mt-0.5 shrink-0" />
+                            ) : (
+                              <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                            )}
+                            <span className="flex-1">{calendarConnectNotice.text}</span>
+                            <button onClick={() => setCalendarConnectNotice(null)} className="opacity-60 hover:opacity-100">
+                              <X size={14} />
+                            </button>
+                          </div>
+                        )}
+                        {openCalendar.syncError && (
+                          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                            <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                            <div>
+                              <p className="font-medium">The last booking couldn't be added to your calendar.</p>
+                              <p className="text-xs mt-1 break-words">{openCalendar.syncError}</p>
+                              <p className="text-xs mt-1">
+                                Fix the connection below, then use Retry next to the booking under Share &amp; embed →
+                                Bookings.
+                              </p>
+                            </div>
+                          </div>
+                        )}
                         <h2 className="text-base font-bold">Integrate with Google</h2>
                         <p className="text-sm text-gray-500">
                           Connect a Google account so booked calls are added straight to that calendar, and existing
@@ -9696,6 +9822,105 @@ export default function SimpleCRM() {
                           >
                             <Globe size={15} /> Connect with Google
                           </button>
+                        )}
+
+                        <h2 className="text-base font-bold pt-4">Integrate with Outlook</h2>
+                        <p className="text-sm text-gray-500">
+                          Connect a Microsoft 365 or Outlook.com account the same way — busy time on it blocks off slots
+                          here, and booked calls are added to it.
+                        </p>
+                        {openCalendar.outlookConnected ? (
+                          <>
+                            <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
+                              <div>
+                                <p className="text-sm font-medium">Connected</p>
+                                <p className="text-xs text-gray-500">{openCalendar.outlookEmail}</p>
+                              </div>
+                              <button
+                                onClick={() => disconnectOutlookCalendar(openCalendar.id)}
+                                className="text-sm text-red-600 hover:text-red-700 font-medium"
+                              >
+                                Disconnect
+                              </button>
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium block mb-1.5 text-gray-500">
+                                Which Outlook calendar should bookings use?
+                              </label>
+                              <Dropdown
+                                value={
+                                  openCalendar.outlookCalendarId ||
+                                  outlookCalendarOptions.find((o) => o.primary)?.value ||
+                                  ""
+                                }
+                                onChange={(outlookCalendarId) => patchCalendar(openCalendar.id, { outlookCalendarId })}
+                                options={
+                                  outlookCalendarOptions.length
+                                    ? outlookCalendarOptions
+                                    : [{ value: openCalendar.outlookCalendarId || "", label: "Default calendar" }]
+                                }
+                                disabled={outlookCalendarsLoading}
+                                searchable
+                              />
+                              {outlookCalendarsError ? (
+                                <p className="text-xs text-red-600 mt-1.5">{outlookCalendarsError}</p>
+                              ) : (
+                                <p className="text-xs text-gray-400 mt-1.5">
+                                  Events are created here, and busy time on it blocks off slots in the booking widget.
+                                </p>
+                              )}
+                            </div>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => connectOutlookCalendar(openCalendar.id)}
+                            className="flex items-center gap-2 border border-gray-200 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
+                          >
+                            <Mail size={15} /> Connect with Outlook
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {calendarSettingsTab === "team" && !isClientRole && (
+                      <div className="max-w-lg space-y-4">
+                        <h2 className="text-base font-bold">Team access</h2>
+                        <p className="text-sm text-gray-500">
+                          Client Team users ticked here can open this calendar, connect their own Google or Outlook
+                          calendar to it and set its availability.
+                        </p>
+                        {teamUsers.filter((u) => u.role === "client_team").length === 0 ? (
+                          <p className="text-sm text-gray-400">
+                            No Client Team users yet. Invite one from Settings → Users with the Client Team role.
+                          </p>
+                        ) : (
+                          <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                            {teamUsers
+                              .filter((u) => u.role === "client_team")
+                              .map((u) => {
+                                const assigned = (openCalendar.assignedUserIds || []).includes(Number(u.id));
+                                return (
+                                  <label key={u.id} className="flex items-center gap-3 px-4 py-3 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={assigned}
+                                      disabled={savingCalendar}
+                                      onChange={() =>
+                                        patchCalendar(openCalendar.id, {
+                                          assignedUserIds: assigned
+                                            ? openCalendar.assignedUserIds.filter((id) => id !== Number(u.id))
+                                            : [...(openCalendar.assignedUserIds || []), Number(u.id)],
+                                        })
+                                      }
+                                    />
+                                    <div>
+                                      <p className="text-sm font-medium">{u.name}</p>
+                                      <p className="text-xs text-gray-500">{u.email}</p>
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                          </div>
                         )}
                       </div>
                     )}
@@ -9952,6 +10177,18 @@ export default function SimpleCRM() {
                                     <p className="text-xs text-gray-500 flex items-center gap-1">
                                       <MapPin size={11} /> {b.contactEmail || b.contactPhone || "—"}
                                     </p>
+                                    {b.syncError && b.status !== "cancelled" && (
+                                      <p className="text-xs text-red-600 flex items-center gap-1 mt-0.5" title={b.syncError}>
+                                        <AlertTriangle size={11} /> Not on your calendar
+                                        <button
+                                          onClick={() => resyncCalendarBooking(b.id)}
+                                          disabled={resyncingBookingId === b.id}
+                                          className="ml-1 underline font-medium disabled:opacity-50"
+                                        >
+                                          {resyncingBookingId === b.id ? "Retrying…" : "Retry"}
+                                        </button>
+                                      </p>
+                                    )}
                                   </div>
                                   <div className="flex items-center gap-3">
                                     <span className="text-xs text-gray-500">
@@ -10406,6 +10643,7 @@ export default function SimpleCRM() {
                         <option value="admin">Admin</option>
                         <option value="super_admin">Super Admin</option>
                         <option value="client">Client</option>
+                        <option value="client_team">Client Team</option>
                       </select>
                     </div>
                     <button
@@ -10419,7 +10657,7 @@ export default function SimpleCRM() {
                   </form>
                 )}
 
-                {canManageUsers && inviteForm.role === "client" && (
+                {canManageUsers && (inviteForm.role === "client" || inviteForm.role === "client_team") && (
                   <div className="mt-3 border border-gray-200 rounded-lg p-3 max-w-md">
                     <div className="text-xs font-medium text-gray-500 mb-1.5">Which tags can they see?</div>
                     {contactTagNames.length === 0 ? (
@@ -10476,13 +10714,14 @@ export default function SimpleCRM() {
                                 <option value="admin">Admin</option>
                                 <option value="super_admin">Super Admin</option>
                                 <option value="client">Client</option>
+                                <option value="client_team">Client Team</option>
                               </select>
                             ) : (
                               <span className="text-xs text-gray-600 capitalize">{u.role.replace("_", " ")}</span>
                             )}
                           </td>
                           <td className="px-4 py-3">
-                            {u.role !== "client" ? (
+                            {u.role !== "client" && u.role !== "client_team" ? (
                               <span className="text-gray-300 text-xs">—</span>
                             ) : (
                               <div className="relative">

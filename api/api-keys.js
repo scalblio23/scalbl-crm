@@ -1,5 +1,5 @@
 import { ensureSchema, getApiKey, regenerateApiKey, deleteApiKey } from "../server/db.js";
-import { getSessionUser, generateApiKey, hashApiKey } from "../server/auth.js";
+import { getSessionUser, generateApiKey, hashApiKey, hasFullAccess } from "../server/auth.js";
 
 // A single global API key — see server/db.js's getApiKey/
 // regenerateApiKey. It's shown in full any time it's fetched (not
@@ -18,7 +18,7 @@ export default async function handler(req, res) {
   if (!user) {
     return res.status(401).json({ error: "Log in to manage the API key." });
   }
-  if (user.role === "client") {
+  if (!hasFullAccess(user.role)) {
     return res.status(403).json({ error: "Not available on this account." });
   }
   try {

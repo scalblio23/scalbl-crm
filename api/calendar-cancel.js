@@ -4,7 +4,7 @@
 // alone is enough — no separate "are you sure" page/form needed for
 // v1); returns the same result either way.
 import { ensureSchema, getCalendarBookingByCancelToken, cancelCalendarBooking, getCalendarById } from "../server/db.js";
-import { getValidAccessToken, deleteGoogleEvent } from "../server/googleCalendar.js";
+import { removeBookingFromCalendars } from "../server/calendarSync.js";
 
 export default async function handler(req, res) {
   try {
@@ -18,16 +18,9 @@ export default async function handler(req, res) {
       return res.status(200).send("<p>This booking is already cancelled.</p>");
     }
 
-    if (booking.googleEventId) {
+    if (booking.googleEventId || booking.outlookEventId) {
       const calendar = await getCalendarById(booking.calendarId, { includeSecrets: true });
-      if (calendar?.googleConnected) {
-        try {
-          const accessToken = await getValidAccessToken(calendar);
-          await deleteGoogleEvent({ accessToken, calendarId: calendar.googleCalendarId, eventId: booking.googleEventId });
-        } catch (err) {
-          console.error("[api/calendar-cancel] failed to delete Google event", err);
-        }
-      }
+      await removeBookingFromCalendars(calendar, booking, "[api/calendar-cancel]");
     }
     await cancelCalendarBooking(booking.id);
 
