@@ -164,9 +164,9 @@ export default function BookingWidget({ slug }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 px-4 py-10">
+    <div className="min-h-screen bg-gray-50 px-3 sm:px-4 py-6 sm:py-10">
       <div className="max-w-3xl mx-auto bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-        <div className="px-6 py-5 border-b border-gray-100 flex items-start justify-between gap-4">
+        <div className="px-4 sm:px-6 py-5 border-b border-gray-100 flex flex-col sm:flex-row items-start justify-between gap-4">
           <div>
             <h1 className="text-lg font-bold flex items-center gap-2">
               <CalendarDays size={18} className="text-gray-400" /> {calendarInfo.name}
@@ -174,14 +174,14 @@ export default function BookingWidget({ slug }) {
             {calendarInfo.description && <p className="text-sm text-gray-500 mt-1">{calendarInfo.description}</p>}
             <p className="text-xs text-gray-400 mt-1">{calendarInfo.eventLengthMinutes} minute call</p>
           </div>
-          <div className="w-56 shrink-0">
+          <div className="w-full sm:w-56 shrink-0">
             <label className="text-xs font-medium block mb-1.5 text-gray-500">Choose Your Timezone</label>
             <Dropdown value={timezone} onChange={setTimezone} options={tzOptions} searchable />
           </div>
         </div>
 
         {!selectedSlot ? (
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <button
                 onClick={() => setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; })}
@@ -199,7 +199,7 @@ export default function BookingWidget({ slug }) {
                 <ChevronRight size={18} />
               </button>
             </div>
-            <div className="grid grid-cols-7 gap-1.5 mb-6">
+            <div className="grid grid-cols-7 gap-1 sm:gap-1.5 mb-6">
               {visibleDays.map((d) => {
                 const key = dateKeyInZone(d, timezone);
                 const active = key === selectedDayKey;
@@ -213,7 +213,7 @@ export default function BookingWidget({ slug }) {
                     type="button"
                     onClick={() => setSelectedDayKey(key)}
                     disabled={unavailable}
-                    className={`flex flex-col items-center py-2.5 rounded-lg text-xs font-medium border ${
+                    className={`flex flex-col items-center py-2.5 px-0.5 rounded-lg text-[11px] sm:text-xs leading-tight text-center font-medium border ${
                       active
                         ? "bg-gray-900 text-white border-gray-900"
                         : unavailable

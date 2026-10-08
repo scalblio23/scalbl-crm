@@ -71,6 +71,8 @@ import {
   PhoneForwarded,
   Grid3x3,
   PhoneIncoming,
+  Menu,
+  ArrowLeft,
 } from "lucide-react";
 import {
   placeCall,
@@ -941,6 +943,14 @@ const MERGE_FIELDS = [
 
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
+  // Phone-width layout: the sidebars become slide-in drawers opened
+  // from the top bar. Both close whenever the page changes.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [mobileSubNavOpen, setMobileSubNavOpen] = useState(false);
+  useEffect(() => {
+    setMobileNavOpen(false);
+    setMobileSubNavOpen(false);
+  }, [page]);
 
   // ---------- Auth ----------
   // Checked once on mount via the session cookie. Everything else in
@@ -1994,13 +2004,15 @@ export default function SimpleCRM() {
   };
   // Sidebar shortcut — sets/replaces the one Tag filter rather than
   // stacking duplicates when you click around the tag list.
-  const setTagQuickFilter = (op, value) =>
+  const setTagQuickFilter = (op, value) => {
+    setMobileSubNavOpen(false);
     setContactFilters((fs) => {
       const without = fs.filter((f) => f.column !== "__tag");
       if (op === null) return without;
       const existing = fs.find((f) => f.column === "__tag");
       return [...without, { id: existing?.id ?? nextContactFilterIdRef.current++, column: "__tag", op, value: value ?? "" }];
     });
+  };
   const tagQuickFilter = contactFilters.find((f) => f.column === "__tag");
 
   const contactMatchesFilters = (c) =>
@@ -5468,7 +5480,7 @@ export default function SimpleCRM() {
   if (inviteToken && !authUser) {
     return (
       <div
-        className="flex h-screen items-center justify-center bg-gray-50"
+        className="flex min-h-screen items-center justify-center bg-gray-50 px-4"
         style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
       >
         <div className="w-full max-w-sm">
@@ -5589,7 +5601,7 @@ export default function SimpleCRM() {
   if (!authUser) {
     return (
       <div
-        className="flex h-screen items-center justify-center bg-gray-50"
+        className="flex min-h-screen items-center justify-center bg-gray-50 px-4"
         style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}
       >
         <div className="w-full max-w-sm">
@@ -5685,7 +5697,7 @@ export default function SimpleCRM() {
   }
 
   return (
-    <div className="flex h-screen bg-white text-gray-900" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+    <div className="flex h-screen supports-[height:100dvh]:h-dvh bg-white text-gray-900" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
       {/* Phone line status + inbound calls (SIP trunk) — shown on every
           page, since a callback can come in whatever the rep is doing. */}
       {(incomingCall ||
@@ -5694,7 +5706,7 @@ export default function SimpleCRM() {
           getVoiceProvider() === "sip" &&
           (["failed", "unregistered"].includes(voiceStatus.registration?.state) ||
             (!voiceStatus.connected && voiceStatus.lastError)))) && (
-        <div className="fixed bottom-5 right-5 z-50 flex flex-col items-end gap-2 w-80">
+        <div className="fixed bottom-5 right-3 sm:right-5 z-50 flex flex-col items-end gap-2 w-80 max-w-[calc(100vw-1.5rem)]">
           {voiceStatus &&
             getVoiceProvider() === "sip" &&
             (["failed", "unregistered"].includes(voiceStatus.registration?.state) ||
@@ -5773,8 +5785,22 @@ export default function SimpleCRM() {
           )}
         </div>
       )}
+      {/* Backdrop behind an open mobile drawer */}
+      {(mobileNavOpen || mobileSubNavOpen) && (
+        <div
+          className="fixed inset-0 z-30 bg-black/30 md:hidden"
+          onClick={() => {
+            setMobileNavOpen(false);
+            setMobileSubNavOpen(false);
+          }}
+        />
+      )}
       {/* Sidebar */}
-      <aside className="w-56 border-r border-gray-200 flex flex-col shrink-0">
+      <aside
+        className={`w-56 border-r border-gray-200 flex flex-col shrink-0 bg-white fixed inset-y-0 left-0 z-40 overflow-y-auto transition-transform md:static md:z-auto md:translate-x-0 ${
+          mobileNavOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
         <div className="px-5 py-5 border-b border-gray-100">
           <div className="text-lg font-bold tracking-tight">Scalbl CRM</div>
           <div className="text-xs text-gray-400 mt-0.5">Lead operations</div>
@@ -5843,7 +5869,11 @@ export default function SimpleCRM() {
           Multi Line, which shares the same powerlists) by saved
           powerlist without leaving the page. */}
       {(page === "contacts" || page === "powerdialler" || page === "multiline") && (
-        <aside className="w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto">
+        <aside
+          className={`w-60 md:w-44 border-r border-gray-200 bg-gray-50 flex flex-col shrink-0 overflow-y-auto fixed inset-y-0 left-0 z-40 transition-transform md:static md:z-auto md:translate-x-0 ${
+            mobileSubNavOpen ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
           {page === "contacts" && (
             <>
               <div className="px-4 pt-5 pb-2 flex items-center justify-between">
@@ -5951,7 +5981,10 @@ export default function SimpleCRM() {
               </div>
               <nav className="flex-1 pb-4">
                 <button
-                  onClick={() => setDialListFilter("all")}
+                  onClick={() => {
+                    setMobileSubNavOpen(false);
+                    setDialListFilter("all");
+                  }}
                   className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
                     dialListFilter === "all"
                       ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
@@ -5964,7 +5997,10 @@ export default function SimpleCRM() {
                 {dialLists.map((list) => (
                   <button
                     key={list.id}
-                    onClick={() => setDialListFilter(list.id)}
+                    onClick={() => {
+                    setMobileSubNavOpen(false);
+                    setDialListFilter(list.id);
+                  }}
                     className={`w-full flex items-center justify-between gap-2 px-4 py-2 text-sm text-left transition-colors ${
                       dialListFilter === list.id
                         ? "bg-white font-semibold text-gray-900 border-r-2 border-gray-900"
@@ -5985,7 +6021,33 @@ export default function SimpleCRM() {
       )}
 
       {/* Main */}
-      <main className="flex-1 overflow-hidden flex flex-col">
+      <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+        {/* Mobile top bar — opens the sidebar drawers */}
+        <div className="md:hidden flex items-center gap-2 border-b border-gray-200 px-3 py-2 shrink-0">
+          <button
+            data-mobile-nav-toggle
+            onClick={() => setMobileNavOpen(true)}
+            aria-label="Open menu"
+            className="relative p-2 -ml-1 rounded-lg text-gray-600 hover:bg-gray-100"
+          >
+            <Menu size={20} />
+            {(memoUnread > 0 || csmUnread.total > 0 || csmUnread.mentions > 0) && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
+            )}
+          </button>
+          <div className="flex-1 min-w-0 truncate font-semibold text-sm">
+            {visibleNavItems.find((item) => item.key === page)?.label || "Scalbl CRM"}
+          </div>
+          {(page === "contacts" || page === "powerdialler" || page === "multiline") && (
+            <button
+              onClick={() => setMobileSubNavOpen(true)}
+              className="flex items-center gap-1.5 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg px-2.5 py-1.5"
+            >
+              {page === "contacts" ? <Tag size={13} /> : <ListChecks size={13} />}
+              {page === "contacts" ? "Tags" : "Powerlists"}
+            </button>
+          )}
+        </div>
         {dbError && (
           <div className="flex items-start gap-2.5 bg-red-50 border-b border-red-200 px-4 py-2.5 text-sm text-red-700 shrink-0">
             <AlertTriangle size={16} className="mt-0.5 shrink-0" />
@@ -6012,7 +6074,11 @@ export default function SimpleCRM() {
         <CrazytelSmsInbox active={page === "conversation" && inboxView === "crazytel"} contacts={contacts} />
         {page === "conversation" && inboxView === "legacy" && (
           <div className="flex flex-1 overflow-hidden">
-            <div className="w-80 border-r border-gray-200 flex flex-col">
+            <div
+              className={`w-full md:w-80 border-r border-gray-200 flex-col ${
+                activeConversation ? "hidden md:flex" : "flex"
+              }`}
+            >
               <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
                 <span className="font-semibold">Conversations</span>
                 <div className="flex items-center gap-3">
@@ -6112,11 +6178,20 @@ export default function SimpleCRM() {
                 ))}
               </div>
             </div>
-            <div className="flex-1 flex flex-col">
+            <div className={`flex-1 min-w-0 flex-col ${activeConversation ? "flex" : "hidden md:flex"}`}>
               {activeConversation ? (
                 <>
-                  <div className="px-6 py-4 border-b border-gray-100 font-semibold">{activeConversation.name}</div>
-                  <div className="flex-1 p-6 space-y-3 overflow-y-auto bg-gray-50/50">
+                  <div className="px-4 md:px-6 py-4 border-b border-gray-100 font-semibold flex items-center gap-2">
+                    <button
+                      onClick={() => setActiveConvo(null)}
+                      aria-label="Back to conversations"
+                      className="md:hidden -ml-1 p-1 rounded text-gray-500 hover:bg-gray-100"
+                    >
+                      <ArrowLeft size={18} />
+                    </button>
+                    <span className="truncate">{activeConversation.name}</span>
+                  </div>
+                  <div className="flex-1 p-4 md:p-6 space-y-3 overflow-y-auto bg-gray-50/50">
                     {(activeConversation.messages || []).map((m) =>
                       m.type === "recording" ? (
                         <div key={m.id} className="flex justify-center">
@@ -6165,7 +6240,7 @@ export default function SimpleCRM() {
                         }}
                         disabled={!activeConversationPhone}
                         placeholder={activeConversationPhone ? "Type a message…" : "No phone number on file"}
-                        className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 disabled:bg-gray-50 disabled:text-gray-400"
+                        className="flex-1 min-w-0 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 disabled:bg-gray-50 disabled:text-gray-400"
                       />
                       <button
                         onClick={handleSendMessage}
@@ -6194,7 +6269,7 @@ export default function SimpleCRM() {
         {/* Contacts */}
         {page === "contacts" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
+            <div className="px-4 md:px-8 py-6 flex items-center justify-between flex-wrap gap-3 border-b border-gray-100">
               <div>
                 <h1 className="text-xl font-bold">Contacts</h1>
                 <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
@@ -6310,12 +6385,12 @@ export default function SimpleCRM() {
                   </button>
                 </div>
               </div>
-              <div className="flex gap-3">
+              <div className="flex flex-wrap gap-3">
                 {selectedContactIds.length > 0 && (
                   <div className="relative">
                     <button
                       onClick={() => setShowBulkStatusMenu((v) => !v)}
-                      className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
+                      className="flex items-center gap-1.5 whitespace-nowrap border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
                     >
                       Set status for {selectedContactIds.length} <ChevronDown size={14} className="text-gray-400" />
                     </button>
@@ -6340,7 +6415,7 @@ export default function SimpleCRM() {
                 {selectedContactIds.length > 0 && !isClientRole && (
                   <button
                     onClick={() => setShowAddToPowerlist(true)}
-                    className="flex items-center gap-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 text-sm px-4 py-2 rounded-lg font-medium"
+                    className="flex items-center gap-1.5 whitespace-nowrap bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 text-sm px-4 py-2 rounded-lg font-medium"
                   >
                     <ListChecks size={15} /> Add to Powerlist
                   </button>
@@ -6348,7 +6423,7 @@ export default function SimpleCRM() {
                 {selectedContactIds.length > 0 && !isClientRole && (
                   <button
                     onClick={deleteSelectedContacts}
-                    className="flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
+                    className="flex items-center gap-1.5 whitespace-nowrap bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
                   >
                     <Trash2 size={15} /> Delete {selectedContactIds.length} selected
                   </button>
@@ -6378,7 +6453,7 @@ export default function SimpleCRM() {
                       setColumnSettingsSearch("");
                       setShowColumnSettings((v) => !v);
                     }}
-                    className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
+                    className="flex items-center gap-1.5 whitespace-nowrap border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
                   >
                     <Settings size={15} /> Columns
                     {hiddenContactColumnKeys.size > 0 && (
@@ -6390,7 +6465,7 @@ export default function SimpleCRM() {
                   {showColumnSettings && (
                     <>
                       <div className="fixed inset-0 z-40" onClick={() => setShowColumnSettings(false)} />
-                      <div className="absolute right-0 top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-3 w-80">
+                      <div className="fixed inset-x-4 top-56 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full mt-1.5 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-3 sm:w-80">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-sm font-medium text-gray-700">Show / hide criteria columns</span>
                           {hiddenContactColumnKeys.size > 0 && (
@@ -6441,14 +6516,14 @@ export default function SimpleCRM() {
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search contacts"
-                    className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-64"
+                    className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-full sm:w-64"
                   />
                 </div>
                 {!isClientRole && (
                   <button
                     onClick={handleImportContacts}
                     disabled={importingContacts}
-                    className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center gap-1.5 whitespace-nowrap border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {importingContacts ? (
                       <Loader2 size={15} className="animate-spin" />
@@ -6467,7 +6542,7 @@ export default function SimpleCRM() {
                     setShowMoreContactFields(false);
                     setShowAddContact(true);
                   }}
-                  className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                  className="flex items-center gap-1.5 whitespace-nowrap bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
                 >
                   <Plus size={15} /> Add contact
                 </button>
@@ -6627,7 +6702,7 @@ export default function SimpleCRM() {
                     <tr>
                       <td
                         colSpan={visibleContactColumns.length + 11}
-                        className="px-8 py-10 text-center text-sm text-gray-400"
+                        className="px-4 md:px-8 py-10 text-center text-sm text-gray-400"
                       >
                         No contacts
                         {contactFilters.length > 0 ? ` matching ${contactFilters.length} filter${contactFilters.length === 1 ? "" : "s"}` : ""}
@@ -6639,7 +6714,7 @@ export default function SimpleCRM() {
               </table>
             </div>
             {filteredContacts.length > CONTACTS_PAGE_SIZE && (
-              <div className="flex items-center justify-between px-8 py-3 border-t border-gray-100 text-sm text-gray-500">
+              <div className="flex items-center justify-between px-4 md:px-8 py-3 border-t border-gray-100 text-sm text-gray-500">
                 <span>
                   {contactsPage * CONTACTS_PAGE_SIZE + 1}–
                   {Math.min((contactsPage + 1) * CONTACTS_PAGE_SIZE, filteredContacts.length)} of{" "}
@@ -6673,9 +6748,9 @@ export default function SimpleCRM() {
 
         {/* Bulk SMS */}
         {page === "bulk-sms" && (
-          <div className="flex flex-1 overflow-hidden">
+          <div className="flex flex-1 flex-col md:flex-row overflow-y-auto md:overflow-hidden">
             {/* Contact picker */}
-            <div className="flex-1 flex flex-col overflow-hidden border-r border-gray-200">
+            <div className="h-[70vh] shrink-0 md:h-auto md:shrink md:flex-1 flex flex-col overflow-hidden border-b md:border-b-0 md:border-r border-gray-200">
               <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
                 <div>
                   <h1 className="text-xl font-bold">Bulk SMS</h1>
@@ -6702,7 +6777,7 @@ export default function SimpleCRM() {
                       value={bulkSmsSearch}
                       onChange={(e) => setBulkSmsSearch(e.target.value)}
                       placeholder="Search name or phone"
-                      className="border border-gray-200 rounded-lg pl-8 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-48"
+                      className="border border-gray-200 rounded-lg pl-8 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-full sm:w-48"
                     />
                   </div>
                 </div>
@@ -6766,7 +6841,7 @@ export default function SimpleCRM() {
             </div>
 
             {/* Compose */}
-            <div className="w-96 flex flex-col shrink-0">
+            <div className="w-full md:w-96 flex flex-col shrink-0">
               <div className="px-6 py-4 border-b border-gray-100">
                 <span className="font-semibold">Message</span>
               </div>
@@ -6814,7 +6889,7 @@ export default function SimpleCRM() {
         {/* Powerdialler */}
         {page === "powerdialler" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
+            <div className="px-4 md:px-8 py-6 flex items-center justify-between flex-wrap gap-3 border-b border-gray-100">
               <div>
                 <h1 className="text-xl font-bold">Powerdialler</h1>
                 <div className="text-sm text-gray-400 mt-0.5">
@@ -6823,10 +6898,13 @@ export default function SimpleCRM() {
                     ` · ${dialLists.find((dl) => dl.id === dialListFilter)?.name || "list"}`}
                 </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 {dialListFilter !== "all" && (
                   <button
-                    onClick={() => setDialListFilter("all")}
+                    onClick={() => {
+                    setMobileSubNavOpen(false);
+                    setDialListFilter("all");
+                  }}
                     className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
                   >
                     <X size={14} /> Clear powerlist
@@ -6844,7 +6922,7 @@ export default function SimpleCRM() {
             </div>
 
             {/* Dialler lists — segments the Power Dialler can run through */}
-            <div className="px-8 pt-6">
+            <div className="px-4 md:px-8 pt-6">
               <div className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
                 Dialler lists
               </div>
@@ -6968,7 +7046,7 @@ export default function SimpleCRM() {
             )}
 
             {/* Hotseat — the live call, or the post-call wrap-up */}
-            <div className="px-8 pt-6">
+            <div className="px-4 md:px-8 pt-6">
               {wrapUp ? (
                 <div className="bg-amber-50 border border-amber-200 rounded-2xl px-6 py-5">
                   <div className="flex items-start justify-between gap-4">
@@ -7339,9 +7417,9 @@ export default function SimpleCRM() {
               )}
             </div>
 
-            <div className="p-8">
+            <div className="p-4 md:p-8">
               <div className="border border-gray-200 rounded-xl overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full min-w-[900px] text-sm">
                   <thead>
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 py-3 font-medium w-8" />
@@ -7571,7 +7649,7 @@ export default function SimpleCRM() {
             `lines` argument and dialNextInQueue) */}
         {page === "multiline" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
+            <div className="px-4 md:px-8 py-6 flex items-center justify-between flex-wrap gap-3 border-b border-gray-100">
               <div>
                 <h1 className="text-xl font-bold">Multi Line</h1>
                 <div className="text-sm text-gray-400 mt-0.5">
@@ -7580,10 +7658,13 @@ export default function SimpleCRM() {
                     ` · ${dialLists.find((dl) => dl.id === dialListFilter)?.name || "list"}`}
                 </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 {dialListFilter !== "all" && (
                   <button
-                    onClick={() => setDialListFilter("all")}
+                    onClick={() => {
+                    setMobileSubNavOpen(false);
+                    setDialListFilter("all");
+                  }}
                     className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800"
                   >
                     <X size={14} /> Clear powerlist
@@ -7601,7 +7682,7 @@ export default function SimpleCRM() {
             </div>
 
             {/* Dialler lists — segments the Power Dialler can run through */}
-            <div className="px-8 pt-6">
+            <div className="px-4 md:px-8 pt-6">
               <div className="flex items-center justify-between flex-wrap gap-3 mb-2">
                 <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Dialler lists</div>
                 <div className="flex items-center gap-2">
@@ -7744,7 +7825,7 @@ export default function SimpleCRM() {
             )}
 
             {/* Hotseat — the live call, or the post-call wrap-up */}
-            <div className="px-8 pt-6">
+            <div className="px-4 md:px-8 pt-6">
               {multilineBatch ? (
                 <div className="bg-blue-50 border border-blue-200 rounded-2xl px-6 py-5">
                   <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -8178,9 +8259,9 @@ export default function SimpleCRM() {
               )}
             </div>
 
-            <div className="p-8">
+            <div className="p-4 md:p-8">
               <div className="border border-gray-200 rounded-xl overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full min-w-[900px] text-sm">
                   <thead>
                     <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                       <th className="pl-5 pr-2 py-3 font-medium w-8" />
@@ -8408,68 +8489,70 @@ export default function SimpleCRM() {
         {/* Log */}
         {page === "log" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 border-b border-gray-100">
+            <div className="px-4 md:px-8 py-6 border-b border-gray-100">
               <h1 className="text-xl font-bold">Call log</h1>
               <div className="text-sm text-gray-400 mt-0.5">
                 {callLog.length} call{callLog.length === 1 ? "" : "s"} logged
               </div>
             </div>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
-                  <th className="px-8 py-3 font-medium">Lead</th>
-                  <th className="py-3 font-medium">Client</th>
-                  <th className="py-3 font-medium">Phone</th>
-                  <th className="py-3 font-medium">Outcome</th>
-                  <th className="py-3 font-medium">Notes</th>
-                  <th className="py-3 font-medium">Rep</th>
-                  <th className="py-3 font-medium">Duration</th>
-                  <th className="py-3 font-medium">Called</th>
-                </tr>
-              </thead>
-              <tbody>
-                {callLog.map((entry) => (
-                  <tr key={entry.id} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="px-8 py-3.5 font-medium">{entry.name}</td>
-                    <td className="py-3.5 text-gray-600">{entry.client}</td>
-                    <td className="py-3.5 text-gray-600">{entry.phone}</td>
-                    <td className="py-3.5">
-                      {entry.status ? (
-                        <span className={`${STATUS_CHIP} ${callOutcomeColor(entry.status)}`}>
-                          {entry.status}
-                        </span>
-                      ) : (
-                        <span className="text-gray-300 text-xs">—</span>
-                      )}
-                    </td>
-                    <td className="py-3.5 text-gray-500 max-w-xs truncate" title={entry.notes}>
-                      {entry.notes || "—"}
-                    </td>
-                    <td className="py-3.5 text-gray-500 whitespace-nowrap">{entry.userName || "—"}</td>
-                    <td className="py-3.5 text-gray-500 whitespace-nowrap">
-                      {entry.durationSeconds != null ? formatCallDuration(entry.durationSeconds * 1000) : "—"}
-                    </td>
-                    <td className="py-3.5 text-gray-400">
-                      {new Date(entry.calledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                    <th className="px-4 md:px-8 py-3 font-medium">Lead</th>
+                    <th className="py-3 font-medium">Client</th>
+                    <th className="py-3 font-medium">Phone</th>
+                    <th className="py-3 font-medium">Outcome</th>
+                    <th className="py-3 font-medium">Notes</th>
+                    <th className="py-3 font-medium">Rep</th>
+                    <th className="py-3 font-medium">Duration</th>
+                    <th className="py-3 font-medium">Called</th>
                   </tr>
-                ))}
-                {callLog.length === 0 && (
-                  <tr>
-                    <td colSpan={8} className="px-8 py-10 text-center text-sm text-gray-400">
-                      No calls logged yet — run the Power Dialler to start logging calls.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {callLog.map((entry) => (
+                    <tr key={entry.id} className="border-b border-gray-50 hover:bg-gray-50">
+                      <td className="px-4 md:px-8 py-3.5 font-medium">{entry.name}</td>
+                      <td className="py-3.5 text-gray-600">{entry.client}</td>
+                      <td className="py-3.5 text-gray-600">{entry.phone}</td>
+                      <td className="py-3.5">
+                        {entry.status ? (
+                          <span className={`${STATUS_CHIP} ${callOutcomeColor(entry.status)}`}>
+                            {entry.status}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300 text-xs">—</span>
+                        )}
+                      </td>
+                      <td className="py-3.5 text-gray-500 max-w-xs truncate" title={entry.notes}>
+                        {entry.notes || "—"}
+                      </td>
+                      <td className="py-3.5 text-gray-500 whitespace-nowrap">{entry.userName || "—"}</td>
+                      <td className="py-3.5 text-gray-500 whitespace-nowrap">
+                        {entry.durationSeconds != null ? formatCallDuration(entry.durationSeconds * 1000) : "—"}
+                      </td>
+                      <td className="py-3.5 text-gray-400">
+                        {new Date(entry.calledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                      </td>
+                    </tr>
+                  ))}
+                  {callLog.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-4 md:px-8 py-10 text-center text-sm text-gray-400">
+                        No calls logged yet — run the Power Dialler to start logging calls.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
         {/* Reports */}
         {page === "reports" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
+            <div className="px-4 md:px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
               <div>
                 <h1 className="text-xl font-bold">Reports</h1>
                 <div className="text-sm text-gray-400 mt-0.5">
@@ -8530,7 +8613,7 @@ export default function SimpleCRM() {
               </div>
             </div>
 
-            <div className="p-8 space-y-8">
+            <div className="p-4 md:p-8 space-y-8">
               {/* Big-number KPIs */}
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                 <div className="border border-gray-200 rounded-2xl p-5">
@@ -8579,7 +8662,7 @@ export default function SimpleCRM() {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <div className="border border-gray-200 rounded-2xl overflow-hidden">
                     <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per rep</div>
-                    <div className="max-h-80 overflow-y-auto">
+                    <div className="max-h-80 overflow-auto">
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
@@ -8614,7 +8697,7 @@ export default function SimpleCRM() {
 
                   <div className="border border-gray-200 rounded-2xl overflow-hidden">
                     <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per client</div>
-                    <div className="max-h-80 overflow-y-auto">
+                    <div className="max-h-80 overflow-auto">
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
@@ -8742,7 +8825,7 @@ export default function SimpleCRM() {
 
               <div className="border border-gray-200 rounded-2xl overflow-hidden">
                 <div className="px-5 py-3.5 border-b border-gray-100 font-semibold text-sm">Calls per tag</div>
-                <div className="max-h-96 overflow-y-auto">
+                <div className="max-h-96 overflow-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
@@ -8795,7 +8878,7 @@ export default function SimpleCRM() {
                 <div className="px-5 py-3.5 border-b border-green-100 bg-green-50/40 font-semibold text-sm text-green-800">
                   Booked leads ({reportsBookedList.length})
                 </div>
-                <div className="max-h-96 overflow-y-auto">
+                <div className="max-h-96 overflow-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
@@ -8850,7 +8933,7 @@ export default function SimpleCRM() {
             from the dropdown to preview that client's view. */}
         {page === "portal" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
+            <div className="px-4 md:px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
               <div>
                 <h1 className="text-xl font-bold flex items-center gap-2">
                   <Globe size={20} className="text-gray-400" />
@@ -8889,7 +8972,7 @@ export default function SimpleCRM() {
             </div>
 
             {!portalHasScope ? (
-              <div className="p-8">
+              <div className="p-4 md:p-8">
                 <div className="border border-dashed border-gray-200 rounded-2xl py-16 text-center text-sm text-gray-400">
                   {portalIsClientRole
                     ? "No client tag is assigned to your account yet — ask your account manager to assign one."
@@ -8899,7 +8982,7 @@ export default function SimpleCRM() {
                 </div>
               </div>
             ) : (
-              <div className="p-8 space-y-8">
+              <div className="p-4 md:p-8 space-y-8">
                 {/* KPIs */}
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                   <div className="border border-gray-200 rounded-2xl p-5">
@@ -9064,7 +9147,7 @@ export default function SimpleCRM() {
         {/* Working Hours */}
         {page === "working-hours" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
+            <div className="px-4 md:px-8 py-6 flex items-center justify-between border-b border-gray-100 flex-wrap gap-3">
               <div>
                 <h1 className="text-xl font-bold">Working Hours</h1>
                 <div className="text-sm text-gray-400 mt-0.5">
@@ -9119,7 +9202,7 @@ export default function SimpleCRM() {
               </div>
             </div>
 
-            <div className="p-8 space-y-8">
+            <div className="p-4 md:p-8 space-y-8">
               {/* Big-number KPIs */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="border border-green-200 bg-green-50/40 rounded-2xl p-5">
@@ -9175,51 +9258,53 @@ export default function SimpleCRM() {
                     </span>
                   )}
                 </div>
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
-                      <th className="px-5 py-2.5 font-medium">Rep</th>
-                      <th className="px-5 py-2.5 font-medium text-right">Days</th>
-                      <th className="px-5 py-2.5 font-medium text-right">Calls</th>
-                      <th className="px-5 py-2.5 font-medium text-right">Credited</th>
-                      <th className="px-5 py-2.5 font-medium text-right">Avg / day</th>
-                      <th className="px-5 py-2.5 font-medium text-right">Span</th>
-                      <th className="px-5 py-2.5 font-medium text-right">Gaps</th>
-                      <th className="px-5 py-2.5 font-medium text-right">Last call</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {workHoursByRep.map((s) => (
-                      <tr key={s.rep} className="border-b border-gray-50 last:border-0">
-                        <td className="px-5 py-3 font-medium">{s.rep}</td>
-                        <td className="px-5 py-3 text-right tabular-nums">{s.days}</td>
-                        <td className="px-5 py-3 text-right tabular-nums">{s.calls}</td>
-                        <td className="px-5 py-3 text-right tabular-nums font-semibold text-green-800">
-                          {formatWorkMinutes(s.creditedMinutes)}
-                        </td>
-                        <td className="px-5 py-3 text-right tabular-nums">
-                          {formatWorkMinutes(s.creditedMinutes / s.days)}
-                        </td>
-                        <td className="px-5 py-3 text-right tabular-nums text-gray-400">
-                          {formatWorkMinutes(s.spanMinutes)}
-                        </td>
-                        <td className={`px-5 py-3 text-right tabular-nums ${s.gaps > 0 ? "text-amber-700" : ""}`}>
-                          {s.gaps}
-                        </td>
-                        <td className="px-5 py-3 text-right tabular-nums text-gray-500">
-                          {formatWorkDay(workHoursParts(s.lastCall).day)} {workHoursTime(s.lastCall)}
-                        </td>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[520px] text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                        <th className="px-5 py-2.5 font-medium">Rep</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Days</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Credited</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Avg / day</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Span</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Gaps</th>
+                        <th className="px-5 py-2.5 font-medium text-right">Last call</th>
                       </tr>
-                    ))}
-                    {workHoursByRep.length === 0 && (
-                      <tr>
-                        <td colSpan={8} className="px-5 py-8 text-center text-sm text-gray-400">
-                          No calls in this range.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {workHoursByRep.map((s) => (
+                        <tr key={s.rep} className="border-b border-gray-50 last:border-0">
+                          <td className="px-5 py-3 font-medium">{s.rep}</td>
+                          <td className="px-5 py-3 text-right tabular-nums">{s.days}</td>
+                          <td className="px-5 py-3 text-right tabular-nums">{s.calls}</td>
+                          <td className="px-5 py-3 text-right tabular-nums font-semibold text-green-800">
+                            {formatWorkMinutes(s.creditedMinutes)}
+                          </td>
+                          <td className="px-5 py-3 text-right tabular-nums">
+                            {formatWorkMinutes(s.creditedMinutes / s.days)}
+                          </td>
+                          <td className="px-5 py-3 text-right tabular-nums text-gray-400">
+                            {formatWorkMinutes(s.spanMinutes)}
+                          </td>
+                          <td className={`px-5 py-3 text-right tabular-nums ${s.gaps > 0 ? "text-amber-700" : ""}`}>
+                            {s.gaps}
+                          </td>
+                          <td className="px-5 py-3 text-right tabular-nums text-gray-500">
+                            {formatWorkDay(workHoursParts(s.lastCall).day)} {workHoursTime(s.lastCall)}
+                          </td>
+                        </tr>
+                      ))}
+                      {workHoursByRep.length === 0 && (
+                        <tr>
+                          <td colSpan={8} className="px-5 py-8 text-center text-sm text-gray-400">
+                            No calls in this range.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               {/* Day-by-day detail — the evidence behind the rollup */}
@@ -9338,18 +9423,18 @@ export default function SimpleCRM() {
         {/* Clients */}
         {page === "clients" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 flex items-center justify-between border-b border-gray-100">
+            <div className="px-4 md:px-8 py-6 flex items-center justify-between flex-wrap gap-3 border-b border-gray-100">
               <div>
                 <h1 className="text-xl font-bold">Clients</h1>
                 <div className="text-sm text-gray-400 mt-0.5">
                   {clients.length} client{clients.length === 1 ? "" : "s"}
                 </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 {selectedClientIds.length > 0 && (
                   <button
                     onClick={deleteSelectedClients}
-                    className="flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
+                    className="flex items-center gap-1.5 whitespace-nowrap bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 text-sm px-4 py-2 rounded-lg font-medium"
                   >
                     <Trash2 size={15} /> Delete {selectedClientIds.length} selected
                   </button>
@@ -9374,18 +9459,18 @@ export default function SimpleCRM() {
                 </div>
                 <button
                   onClick={handleImportClients}
-                  className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
+                  className="flex items-center gap-1.5 whitespace-nowrap border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2 rounded-lg font-medium"
                 >
                   <Upload size={15} /> Import client list
                 </button>
-                <button className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium">
+                <button className="flex items-center gap-1.5 whitespace-nowrap bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium">
                   <Plus size={15} /> Add client
                 </button>
               </div>
             </div>
 
             {clientView === "list" ? (
-              <div className="p-8">
+              <div className="p-4 md:p-8">
                 <div className="border border-gray-200 rounded-xl overflow-x-auto">
                   <table className="text-sm">
                     <thead>
@@ -9486,7 +9571,7 @@ export default function SimpleCRM() {
                 </div>
               </div>
             ) : (
-              <div className="p-8 grid grid-cols-2 gap-4">
+              <div className="p-4 md:p-8 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {clients.map((cl) => (
                   <div key={cl.id} className="border border-gray-200 rounded-xl p-5 hover:shadow-sm transition-shadow">
                     <div className="flex justify-between items-start">
@@ -9531,16 +9616,16 @@ export default function SimpleCRM() {
           <div className="flex-1 overflow-y-auto">
             {!openCalendar ? (
               <>
-                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                <div className="px-4 md:px-8 py-6 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
                   <h1 className="text-xl font-bold">Calendars</h1>
                   <button
                     onClick={() => setShowAddCalendarModal(true)}
-                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                    className="flex items-center gap-1.5 whitespace-nowrap bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
                   >
                     <Plus size={15} /> Add Calendar
                   </button>
                 </div>
-                <div className="p-8">
+                <div className="p-4 md:p-8">
                   {calendarsLoading ? (
                     <div className="flex justify-center py-16">
                       <Loader2 className="animate-spin text-gray-400" size={20} />
@@ -9603,7 +9688,7 @@ export default function SimpleCRM() {
               </>
             ) : (
               <>
-                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                <div className="px-4 md:px-8 py-6 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <button
                       onClick={() => setOpenCalendarId(null)}
@@ -9622,13 +9707,13 @@ export default function SimpleCRM() {
                     Active
                   </label>
                 </div>
-                <div className="flex">
-                  <div className="w-48 shrink-0 border-r border-gray-100 py-6 px-3 space-y-1">
+                <div className="flex flex-col md:flex-row">
+                  <div className="w-full md:w-48 shrink-0 border-b md:border-b-0 md:border-r border-gray-100 py-3 md:py-6 px-3 flex gap-1 overflow-x-auto md:block md:space-y-1">
                     {CALENDAR_SETTINGS_SECTIONS.map(({ key, label, icon: Icon }) => (
                       <button
                         key={key}
                         onClick={() => setCalendarSettingsTab(key)}
-                        className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg text-left ${
+                        className={`md:w-full shrink-0 whitespace-nowrap flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg text-left ${
                           calendarSettingsTab === key
                             ? "bg-gray-100 font-semibold text-gray-900"
                             : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
@@ -9639,7 +9724,7 @@ export default function SimpleCRM() {
                     ))}
                   </div>
 
-                  <div className="flex-1 p-8">
+                  <div className="flex-1 p-4 md:p-8">
                     {calendarSettingsTab === "integrate" && (
                       <div className="max-w-lg space-y-4">
                         <h2 className="text-base font-bold">Integrate with Google</h2>
@@ -9989,7 +10074,7 @@ export default function SimpleCRM() {
           <div className="flex-1 overflow-y-auto">
             {!openAutomation ? (
               <>
-                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                <div className="px-4 md:px-8 py-6 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <h1 className="text-xl font-bold">Automations</h1>
                     <p className="text-sm text-gray-500 mt-1">
@@ -9998,12 +10083,12 @@ export default function SimpleCRM() {
                   </div>
                   <button
                     onClick={() => setShowAddAutomationModal(true)}
-                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
+                    className="flex items-center gap-1.5 whitespace-nowrap bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium"
                   >
                     <Plus size={15} /> Add Automation
                   </button>
                 </div>
-                <div className="p-8">
+                <div className="p-4 md:p-8">
                   {automationsLoading ? (
                     <div className="flex justify-center py-16">
                       <Loader2 className="animate-spin text-gray-400" size={20} />
@@ -10059,7 +10144,7 @@ export default function SimpleCRM() {
               </>
             ) : (
               <>
-                <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
+                <div className="px-4 md:px-8 py-6 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <button
                       onClick={() => {
@@ -10077,7 +10162,7 @@ export default function SimpleCRM() {
                     </button>
                     <h1 className="text-xl font-bold">{openAutomation.name}</h1>
                   </div>
-                  <div className="flex items-center gap-4">
+                  <div className="flex flex-wrap items-center gap-4">
                     <label className="flex items-center gap-2 text-sm text-gray-500">
                       <input
                         type="checkbox"
@@ -10100,20 +10185,20 @@ export default function SimpleCRM() {
                 </div>
 
                 {automationHasUnsavedChanges && (
-                  <div className="px-8 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-800">
+                  <div className="px-4 md:px-8 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-800">
                     You have unsaved changes — nothing above will actually run until you click{" "}
                     <strong>Save changes</strong>.
                   </div>
                 )}
 
                 {!openAutomation.triggerType && (
-                  <div className="px-8 py-2.5 bg-red-50 border-b border-red-200 text-sm text-red-700">
+                  <div className="px-4 md:px-8 py-2.5 bg-red-50 border-b border-red-200 text-sm text-red-700">
                     No trigger is set on the saved automation yet — it will never fire until one is chosen and saved.
                   </div>
                 )}
 
                 {automationDraft && (
-                  <div className="p-8 max-w-xl space-y-8">
+                  <div className="p-4 md:p-8 max-w-xl space-y-8">
                     <div className="border border-gray-100 rounded-lg p-5 space-y-4">
                       <h2 className="text-base font-bold flex items-center gap-2">
                         <Zap size={16} className="text-gray-400" /> Trigger
@@ -10341,10 +10426,10 @@ export default function SimpleCRM() {
         {/* Settings */}
         {page === "settings" && (
           <div className="flex-1 overflow-y-auto">
-            <div className="px-8 py-6 border-b border-gray-100">
+            <div className="px-4 md:px-8 py-6 border-b border-gray-100">
               <h1 className="text-xl font-bold">Settings</h1>
             </div>
-            <div className="p-8 max-w-lg space-y-6">
+            <div className="p-4 md:p-8 max-w-lg space-y-6">
               <div>
                 <label className="text-sm font-medium block mb-1.5">Business name</label>
                 <input defaultValue="Scalbl.io" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400" />
@@ -10366,7 +10451,7 @@ export default function SimpleCRM() {
               <button className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">Save changes</button>
             </div>
 
-            <div className="px-8 pb-10 max-w-3xl">
+            <div className="px-4 md:px-8 pb-10 max-w-3xl">
               <div className="border-t border-gray-100 pt-8">
                 <h2 className="text-base font-bold">Team &amp; permissions</h2>
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
@@ -10411,7 +10496,7 @@ export default function SimpleCRM() {
                     <button
                       type="submit"
                       disabled={invitingUser || !inviteForm.name.trim() || !inviteForm.email.trim()}
-                      className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="flex items-center gap-1.5 whitespace-nowrap bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {invitingUser && <Loader2 size={14} className="animate-spin" />}
                       Invite
@@ -10574,7 +10659,7 @@ export default function SimpleCRM() {
               </div>
             </div>
 
-            <div className="px-8 pb-10 max-w-3xl">
+            <div className="px-4 md:px-8 pb-10 max-w-3xl">
               <div className="border-t border-gray-100 pt-8">
                 <h2 className="text-base font-bold">Portal invite links</h2>
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
@@ -10697,7 +10782,7 @@ export default function SimpleCRM() {
               </div>
             </div>
 
-            <div className="px-8 pb-10 max-w-3xl">
+            <div className="px-4 md:px-8 pb-10 max-w-3xl">
               <div className="border-t border-gray-100 pt-8">
                 <h2 className="text-base font-bold">Booking links by tag</h2>
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
@@ -10732,7 +10817,7 @@ export default function SimpleCRM() {
               </div>
             </div>
 
-            <div className="px-8 pb-10 max-w-2xl">
+            <div className="px-4 md:px-8 pb-10 max-w-2xl">
               <div className="border-t border-gray-100 pt-8">
                 <h2 className="text-base font-bold">API key</h2>
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
@@ -10951,10 +11036,10 @@ export default function SimpleCRM() {
       {/* Soundboard — record a new quick-play clip */}
       {showSoundboardRecorder && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={closeSoundboardRecorder}
         >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-md" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <h2 className="text-lg font-bold">Record a soundboard clip</h2>
               <button onClick={closeSoundboardRecorder} className="text-gray-400 hover:text-gray-700">
@@ -11037,7 +11122,7 @@ export default function SimpleCRM() {
                   <button
                     type="submit"
                     disabled={recorderStatus === "saving" || !recordingLabel.trim()}
-                    className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="flex items-center gap-1.5 whitespace-nowrap bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {recorderStatus === "saving" && <Loader2 size={14} className="animate-spin" />}
                     Save
@@ -11052,11 +11137,11 @@ export default function SimpleCRM() {
       {/* Manage Tag Folders modal */}
       {showManageTagFoldersModal && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={() => setShowManageTagFoldersModal(false)}
         >
           <div
-            className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col"
+            className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-lg max-h-[80vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
@@ -11079,7 +11164,7 @@ export default function SimpleCRM() {
                 <button
                   type="submit"
                   disabled={savingTagFolder}
-                  className="flex items-center gap-1.5 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                  className="flex items-center gap-1.5 whitespace-nowrap bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
                 >
                   {savingTagFolder && <Loader2 size={14} className="animate-spin" />}
                   Add
@@ -11151,10 +11236,10 @@ export default function SimpleCRM() {
       {/* Add Automation modal */}
       {showAddAutomationModal && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={() => setShowAddAutomationModal(false)}
         >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-md" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <h2 className="text-lg font-bold">Add Automation</h2>
               <button onClick={() => setShowAddAutomationModal(false)} className="text-gray-400 hover:text-gray-700">
@@ -11198,10 +11283,10 @@ export default function SimpleCRM() {
       {/* Add Calendar modal */}
       {showAddCalendarModal && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={() => setShowAddCalendarModal(false)}
         >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-md" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <h2 className="text-lg font-bold">Add Calendar</h2>
               <button onClick={() => setShowAddCalendarModal(false)} className="text-gray-400 hover:text-gray-700">
@@ -11245,10 +11330,10 @@ export default function SimpleCRM() {
       {/* Add to Powerlist modal — from Contacts bulk-select */}
       {showAddToPowerlist && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={() => setShowAddToPowerlist(false)}
         >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-md" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <div>
                 <h2 className="text-lg font-bold">Add to Powerlist</h2>
@@ -11316,11 +11401,11 @@ export default function SimpleCRM() {
       {/* Add contact modal */}
       {showAddContact && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={() => setShowAddContact(false)}
         >
           <div
-            className="bg-white rounded-2xl shadow-xl w-full max-w-md"
+            className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-md"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
@@ -11487,10 +11572,10 @@ export default function SimpleCRM() {
       {/* Add client column modal */}
       {showAddColumn && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={() => setShowAddColumn(false)}
         >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-md" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <h2 className="text-lg font-bold">Add column</h2>
               <button onClick={() => setShowAddColumn(false)} className="text-gray-400 hover:text-gray-700">
@@ -11555,10 +11640,10 @@ export default function SimpleCRM() {
       {/* Add contact column modal */}
       {showAddContactColumn && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto"
           onClick={() => setShowAddContactColumn(false)}
         >
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-xl w-full my-auto max-w-md" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <h2 className="text-lg font-bold">Add column</h2>
               <button onClick={() => setShowAddContactColumn(false)} className="text-gray-400 hover:text-gray-700">

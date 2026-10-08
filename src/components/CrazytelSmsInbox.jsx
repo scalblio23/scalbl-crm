@@ -41,6 +41,8 @@ export default function CrazytelSmsInbox({ active, contacts }) {
   const [threads, setThreads] = useState([]);
   const [fromNumbers, setFromNumbers] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  // Phone width shows one pane at a time: the thread list, or the open thread.
+  const [mobileThreadOpen, setMobileThreadOpen] = useState(false);
   const [leadId, setLeadId] = useState("");
   const [fromNumber, setFromNumber] = useState("");
   const [drafts, setDrafts] = useState({});
@@ -96,6 +98,7 @@ export default function CrazytelSmsInbox({ active, contacts }) {
 
   const markRead = async (thread) => {
     setSelectedId(thread.id);
+    setMobileThreadOpen(true);
     setError("");
     if (!thread.unread) return;
     try {
@@ -118,6 +121,7 @@ export default function CrazytelSmsInbox({ active, contacts }) {
       if (!result?.thread?.id || result.error) throw new Error("Thread unavailable");
       setThreads((items) => [result.thread, ...items.filter((item) => item.id !== result.thread.id)]);
       setSelectedId(result.thread.id);
+      setMobileThreadOpen(true);
       setReload((value) => value + 1);
     } catch (err) { setError(smsError(err)); }
     finally { mutationBusy.current = false; setBusy(false); }
@@ -151,9 +155,9 @@ export default function CrazytelSmsInbox({ active, contacts }) {
   if (!active) return null;
   const fieldClass = "border border-gray-300 rounded px-3 py-2 text-sm bg-white disabled:opacity-50";
   return (
-    <section aria-label="Crazytel SMS inbox" className="flex flex-1 min-h-0 flex-col">
+    <section aria-label="Crazytel SMS inbox" className="flex flex-1 min-h-0 flex-col overflow-y-auto md:overflow-visible">
       <div className="p-4 border-b space-y-3">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex items-start sm:items-center justify-between gap-3">
           <div><h2 className="font-semibold">Crazytel SMS</h2>
             <p className="text-xs text-gray-500">Separate SMS threads. Legacy inbox, calls, recordings and Twilio sending are unchanged.</p>
             <p className="text-xs text-amber-700">Inbound replies are not connected to this CRM yet. Outbound sends only; queued does not mean delivered.</p></div>
@@ -180,8 +184,8 @@ export default function CrazytelSmsInbox({ active, contacts }) {
         {loadError && <p role="alert" className="text-sm text-red-700">{loadError} Previously loaded messages may be out of date.</p>}
         {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
       </div>
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        <div aria-label="Crazytel SMS threads" className="w-72 max-w-[40%] shrink-0 border-r overflow-y-auto">
+      <div className="flex flex-1 min-h-[70vh] md:min-h-0 overflow-hidden">
+        <div aria-label="Crazytel SMS threads" className={`w-full md:w-72 md:max-w-[40%] shrink-0 border-r overflow-y-auto ${selected && mobileThreadOpen ? "hidden md:block" : ""}`}>
           {!loading && !loadError && !threads.length && <p className="p-4 text-sm text-gray-500">No Crazytel SMS threads yet.</p>}
           {threads.map((thread) => (
             <button type="button" key={thread.id} onClick={() => markRead(thread)} aria-pressed={selectedId === thread.id}
@@ -194,8 +198,9 @@ export default function CrazytelSmsInbox({ active, contacts }) {
           ))}
         </div>
         {selected ? (
-          <div className="flex-1 min-w-0 flex flex-col">
+          <div className={`flex-1 min-w-0 flex-col ${mobileThreadOpen ? "flex" : "hidden md:flex"}`}>
             <div className="p-4 border-b text-sm">
+              <button type="button" onClick={() => setMobileThreadOpen(false)} className="md:hidden mb-2 text-xs font-medium text-gray-600">← Back to threads</button>
               <h3 className="font-semibold">{selected.name || "Unknown sender"}</h3>
               <p className="break-all">Local DID: {selected.localNumber} · Remote: {selected.remoteNumber}</p>
               <p className="text-xs text-gray-500">Sends use this thread’s selected local DID.</p>
@@ -217,7 +222,7 @@ export default function CrazytelSmsInbox({ active, contacts }) {
               <button className={fieldClass} disabled={busy || !!loadError || !draft.trim()}>{busy ? "Working…" : attempt ? "Retry same send" : "Send via Crazytel"}</button>
             </form>
           </div>
-        ) : <p className="p-6 text-sm text-gray-500">Select a Crazytel SMS thread or start one with a contact.</p>}
+        ) : <p className="hidden md:block p-6 text-sm text-gray-500">Select a Crazytel SMS thread or start one with a contact.</p>}
       </div>
     </section>
   );
