@@ -1266,6 +1266,8 @@ export default function SimpleCRM() {
   const [addingCalendar, setAddingCalendar] = useState(false);
   const [calendarBookings, setCalendarBookings] = useState([]);
   const [savingCalendar, setSavingCalendar] = useState(false);
+  // Inline rename of the open calendar's title. null = not editing.
+  const [calendarTitleDraft, setCalendarTitleDraft] = useState(null);
 
   const loadCalendars = async () => {
     setCalendarsLoading(true);
@@ -9606,12 +9608,42 @@ export default function SimpleCRM() {
                 <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between">
                   <div>
                     <button
-                      onClick={() => setOpenCalendarId(null)}
+                      onClick={() => {
+                        setOpenCalendarId(null);
+                        setCalendarTitleDraft(null);
+                      }}
                       className="text-xs text-gray-400 hover:text-gray-700 mb-1"
                     >
                       ← Back to Calendars
                     </button>
-                    <h1 className="text-xl font-bold">{openCalendar.name}</h1>
+                    {calendarTitleDraft !== null ? (
+                      <input
+                        autoFocus
+                        value={calendarTitleDraft}
+                        onChange={(e) => setCalendarTitleDraft(e.target.value)}
+                        onBlur={() => {
+                          const name = calendarTitleDraft.trim();
+                          setCalendarTitleDraft(null);
+                          if (name && name !== openCalendar.name) patchCalendar(openCalendar.id, { name });
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.currentTarget.blur();
+                          if (e.key === "Escape") setCalendarTitleDraft(null);
+                        }}
+                        className="text-xl font-bold border border-gray-200 rounded-lg px-2 py-0.5 -ml-2 focus:outline-none focus:ring-2 focus:ring-gray-200"
+                      />
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <h1 className="text-xl font-bold">{openCalendar.name}</h1>
+                        <button
+                          onClick={() => setCalendarTitleDraft(openCalendar.name)}
+                          title="Rename calendar"
+                          className="text-gray-400 hover:text-gray-700 p-1"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <label className="flex items-center gap-2 text-sm text-gray-500">
                     <input
