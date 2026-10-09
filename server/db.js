@@ -351,6 +351,10 @@ export async function ensureSchema() {
     // they can manage other users (see server/auth.js).
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'`);
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tags JSONB DEFAULT '[]'`);
+    // Where the Automations "Send SMS to user" step texts this team
+    // member (e.g. "you've got a new booking"). Free text as typed in
+    // Settings → Users; normalised (04… → +614…) only at send time.
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT`);
     // Client self-signup links (see createPortalInvite/claimPortalInvite
     // below) — there's no email infrastructure to send a per-person
     // portal invite, so an admin generates one of these scoped to a set
@@ -1942,6 +1946,7 @@ function userFromRow(r) {
     email: r.email,
     role: r.role || "admin",
     allowedTags: r.allowed_tags || [],
+    phone: r.phone || "",
     hasPassword: Boolean(r.password_hash),
     createdAt: r.created_at,
   };
@@ -1971,14 +1976,24 @@ export async function inviteUser({ name, email, role, allowedTags }) {
   return rows[0] ? userFromRow(rows[0]) : null;
 }
 
-export async function updateUser(id, { name, role, allowedTags }) {
+// `phone` is only touched when passed (undefined = leave as is); an
+// empty string clears it, which COALESCE alone couldn't express.
+export async function updateUser(id, { name, role, allowedTags, phone }) {
   const rows = await query(
     `UPDATE users SET
        name = COALESCE($2, name),
        role = COALESCE($3, role),
-       allowed_tags = COALESCE($4::jsonb, allowed_tags)
+       allowed_tags = COALESCE($4::jsonb, allowed_tags),
+       phone = CASE WHEN $5::boolean THEN NULLIF($6, '') ELSE phone END
      WHERE id = $1 RETURNING *`,
-    [id, name ?? null, role ?? null, allowedTags ? JSON.stringify(allowedTags) : null]
+    [
+      id,
+      name ?? null,
+      role ?? null,
+      allowedTags ? JSON.stringify(allowedTags) : null,
+      phone !== undefined,
+      phone !== undefined ? String(phone).trim() : null,
+    ]
   );
   return rows[0] ? userFromRow(rows[0]) : null;
 }

@@ -56,6 +56,13 @@ export function canAccessCalendar(user, calendar) {
   return calendar.ownerUserId != null && Number(calendar.ownerUserId) === Number(user.id);
 }
 
+// A team member's phone as typed in Settings → Users: digits plus the
+// usual separators, or empty to clear it. Format (04… vs +61…) is
+// sorted out at send time, not here.
+export function isValidUserPhone(phone) {
+  return typeof phone === "string" && phone.length <= 32 && /^[\d +()-]*$/.test(phone);
+}
+
 // Everyone but a client role sees every lead; a client role is scoped
 // to their own allowedTags. Returns null for "no filter" (full
 // access) so callers can pass it straight through to a query.

@@ -24,6 +24,7 @@ import {
   claimAutomationRunById,
   claimDueAutomationRuns,
   updateAutomationRunProgress,
+  getUserById,
 } from "./db.js";
 import { sendCalendarEmail, missingEmailEnv } from "./email.js";
 import { sendCrazytelSms } from "./crazytelSms.js";
@@ -41,6 +42,25 @@ function pickAutomationDid(context) {
   const tag = context.tag || context.contact?.tag;
   const tagMatched = tag ? didsForTags([tag], dids) : [];
   return tagMatched[0] || dids.find((d) => d.adminScope) || null;
+}
+
+// One Crazytel send for an automation step — shared by "Send SMS"
+// (to the contact) and "Send SMS to user" (to a team member), so both
+// use the same sender choice, AU number handling and error reporting.
+// Throws on anything but a confirmed send; advanceAutomationRun()
+// logs that, records it as the run's lastError, and moves on.
+async function sendAutomationSms(to, text, context, stepKey) {
+  if (!process.env.CRAZYTEL_API_KEY) throw new Error("Crazytel SMS is not configured (CRAZYTEL_API_KEY)");
+  const did = pickAutomationDid(context);
+  if (!did) throw new Error("No Crazytel sender number available (CRAZYTEL_SMS_DIDS)");
+  const result = await sendCrazytelSms({
+    from: did.number,
+    to: auToInternational(to),
+    text,
+    // Stable per run + step, so Crazytel dedupes if this step is ever re-sent.
+    idempotencyKey: stepKey,
+  });
+  if (result.status !== "queued") throw new Error(`Crazytel SMS ${result.status}: ${result.error}`);
 }
 
 function fillTemplate(text, data) {
@@ -110,17 +130,28 @@ async function runStep(step, automation, context, stepKey) {
     });
   } else if (step.type === "sms") {
     if (!context.contact?.phone) return;
-    if (!process.env.CRAZYTEL_API_KEY) throw new Error("Crazytel SMS is not configured (CRAZYTEL_API_KEY)");
-    const did = pickAutomationDid(context);
-    if (!did) throw new Error("No Crazytel sender number available (CRAZYTEL_SMS_DIDS)");
-    const result = await sendCrazytelSms({
-      from: did.number,
-      to: auToInternational(context.contact.phone),
-      text: fillTemplate(step.body, data),
-      // Stable per run + step, so Crazytel dedupes if this step is ever re-sent.
-      idempotencyKey: stepKey,
-    });
-    if (result.status !== "queued") throw new Error(`Crazytel SMS ${result.status}: ${result.error}`);
+    await sendAutomationSms(context.contact.phone, fillTemplate(step.body, data), context, stepKey);
+  } else if (step.type === "sms_user") {
+    // Texts a team member (e.g. "new booking from {{name}}") rather
+    // than the contact. A manually typed number wins — it's the exact
+    // number asked for; otherwise the picked user's saved phone.
+    const manual = String(step.phone || "").trim();
+    let to = manual;
+    let who = manual;
+    if (!to && step.userId) {
+      const user = await getUserById(step.userId);
+      if (!user) throw new Error(`Send SMS to user: user #${step.userId} no longer exists and no manual number is set`);
+      to = String(user.phone || "").trim();
+      who = user.name;
+    }
+    if (!to) {
+      throw new Error(
+        step.userId
+          ? `Send SMS to user: ${who} has no phone number saved (Settings → Users) and no manual number is set`
+          : "Send SMS to user: no user picked and no manual number is set"
+      );
+    }
+    await sendAutomationSms(to, fillTemplate(step.body, data), context, stepKey);
   }
   // "call" isn't executed automatically yet — see its disabled option
   // in the Automations builder UI.
@@ -131,7 +162,8 @@ async function runStep(step, automation, context, stepKey) {
 // next "wait" step, or marking the run 'done' once the actions array
 // is exhausted. A step that throws is logged and skipped rather than
 // aborting the rest of the chain — one bad send shouldn't block a
-// later step in the same automation.
+// later step in the same automation. A "before appointment" wait whose
+// time has already passed skips its reminder step instead of waiting.
 export async function advanceAutomationRun(run) {
   // Wrapped end-to-end: a run is claimed ('processing') before this is
   // called, and 'processing' is never re-claimed by anything else (see
@@ -152,6 +184,18 @@ export async function advanceAutomationRun(run) {
       const step = actions[index];
       if (step.type === "wait") {
         const runAt = computeWaitRunAt(step, run.context);
+        // "Wait until before appointment" whose moment has already gone
+        // (e.g. booked 2 hours out, "24 hours before" reminder): sending
+        // the reminder now would be wrong, so skip the step right after
+        // this wait and carry on with the rest of the chain — a later
+        // "10 minutes before" wait still schedules normally.
+        if (step.mode === "before_appointment" && run.context.appointmentStartUTC && runAt.getTime() <= Date.now()) {
+          const note = `Step ${index + 2}: skipped – reminder time already passed`;
+          console.log(`[automations] "${automation.name}" run ${run.id}: ${note}`);
+          await updateAutomationRunProgress(run.id, { lastError: note });
+          index += 2;
+          continue;
+        }
         await updateAutomationRunProgress(run.id, { nextStepIndex: index + 1, runAt, status: "pending" });
         return;
       }
