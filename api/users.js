@@ -1,5 +1,5 @@
 import { ensureSchema, getUsers, getUserById, inviteUser, updateUser, deleteUserById } from "../server/db.js";
-import { requireAuth, canManageUsers, canDeleteUser, forbidClientRole, ROLES } from "../server/auth.js";
+import { requireAuth, canManageUsers, canDeleteUser, forbidClientRole, isValidUserPhone, ROLES } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -34,17 +34,23 @@ export default async function handler(req, res) {
       if (!canManageUsers(user.role)) {
         return res.status(403).json({ error: "Only an owner or super admin can edit users." });
       }
-      const { id, name, role, allowedTags } = req.body || {};
+      const { id, name, role, allowedTags, phone } = req.body || {};
       if (!id) return res.status(400).json({ error: "Missing id" });
       if (role && (role === "owner" || !ROLES.includes(role))) {
         return res.status(400).json({ error: "Invalid role" });
       }
+      if (phone !== undefined && !isValidUserPhone(phone)) {
+        return res.status(400).json({ error: "Invalid phone number" });
+      }
       const target = await getUserById(id);
       if (!target) return res.status(404).json({ error: "User not found" });
-      if (target.role === "owner") {
+      // The owner's name/role/tags stay locked, but their phone can be
+      // set so the owner can receive "Send SMS to user" automation texts.
+      const phoneOnly = phone !== undefined && name === undefined && role === undefined && allowedTags === undefined;
+      if (target.role === "owner" && !phoneOnly) {
         return res.status(403).json({ error: "The owner's account can't be edited." });
       }
-      const updated = await updateUser(id, { name, role, allowedTags });
+      const updated = await updateUser(id, { name, role, allowedTags, phone });
       return res.status(200).json(updated);
     }
 

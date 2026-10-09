@@ -11,6 +11,7 @@ import {
 } from "recharts";
 import {
   MessageSquare,
+  UserRound,
   Users,
   Phone,
   Briefcase,
@@ -10198,7 +10199,7 @@ export default function SimpleCRM() {
                       <div>
                         {automationDraft.actions.length === 0 && (
                           <p className="text-sm text-gray-400 text-center pb-1">
-                            No steps yet — click below to add an email, SMS, or wait step.
+                            No steps yet — click below to add an email, SMS, SMS-to-user, or wait step.
                           </p>
                         )}
                         <AddStepMenu onAdd={(a) => insertAutomationAction(0, a)} />
@@ -10255,8 +10256,19 @@ export default function SimpleCRM() {
                               <div className="border border-gray-100 rounded-lg p-4">
                                 <div className="flex items-center justify-between mb-3">
                                   <span className="text-sm font-semibold flex items-center gap-1.5">
-                                    {action.type === "email" ? <Send size={13} /> : <MessageSquare size={13} />}
-                                    Step {i + 1}: {action.type === "email" ? "Send Email" : "Send SMS"}
+                                    {action.type === "email" ? (
+                                      <Send size={13} />
+                                    ) : action.type === "sms_user" ? (
+                                      <UserRound size={13} />
+                                    ) : (
+                                      <MessageSquare size={13} />
+                                    )}
+                                    Step {i + 1}:{" "}
+                                    {action.type === "email"
+                                      ? "Send Email"
+                                      : action.type === "sms_user"
+                                        ? "Send SMS to user"
+                                        : "Send SMS"}
                                   </span>
                                   <button
                                     onClick={() => removeAutomationAction(i)}
@@ -10265,6 +10277,35 @@ export default function SimpleCRM() {
                                     <X size={14} />
                                   </button>
                                 </div>
+                                {action.type === "sms_user" && (
+                                  <div className="flex items-center gap-2 flex-wrap mb-2">
+                                    <Dropdown
+                                      value={action.userId ? String(action.userId) : ""}
+                                      onChange={(v) => updateAutomationAction(i, { userId: v ? Number(v) : null })}
+                                      className="w-64"
+                                      searchable
+                                      placeholder="Pick a team member…"
+                                      options={[
+                                        { value: "", label: "No user (manual number only)" },
+                                        ...teamUsers
+                                          .filter((u) => u.role !== "client")
+                                          .map((u) => ({
+                                            value: String(u.id),
+                                            label: `${u.name} — ${u.phone || "no phone saved"}`,
+                                          })),
+                                      ]}
+                                    />
+                                    <input
+                                      value={action.phone || ""}
+                                      onChange={(e) => updateAutomationAction(i, { phone: e.target.value })}
+                                      placeholder="Or exact number, e.g. 0412 345 678"
+                                      className="flex-1 min-w-[200px] border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                                    />
+                                    <p className="w-full text-xs text-gray-500">
+                                      A number typed here is used instead of the user's saved phone.
+                                    </p>
+                                  </div>
+                                )}
                                 {action.type === "email" && (
                                   <input
                                     value={action.subject}
@@ -10483,6 +10524,7 @@ export default function SimpleCRM() {
                       <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                         <th className="px-4 py-2.5 font-medium">Name</th>
                         <th className="px-4 py-2.5 font-medium">Email</th>
+                        <th className="px-4 py-2.5 font-medium">Phone</th>
                         <th className="px-4 py-2.5 font-medium">Role</th>
                         <th className="px-4 py-2.5 font-medium">Tags</th>
                         <th className="px-4 py-2.5 font-medium">Status</th>
@@ -10494,6 +10536,23 @@ export default function SimpleCRM() {
                         <tr key={u.id} className="border-b border-gray-50 last:border-0">
                           <td className="px-4 py-3 font-medium">{u.name}</td>
                           <td className="px-4 py-3 text-gray-500">{u.email}</td>
+                          <td className="px-4 py-3">
+                            {/* Used by the Automations "Send SMS to user" step. Saved on blur. */}
+                            {canManageUsers ? (
+                              <input
+                                key={u.phone || ""}
+                                defaultValue={u.phone || ""}
+                                onBlur={(e) => {
+                                  const phone = e.target.value.trim();
+                                  if (phone !== (u.phone || "")) patchTeamUser(u.id, { phone });
+                                }}
+                                placeholder="04xx xxx xxx"
+                                className="w-36 border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400"
+                              />
+                            ) : (
+                              <span className="text-xs text-gray-600">{u.phone || "—"}</span>
+                            )}
+                          </td>
                           <td className="px-4 py-3">
                             {u.role === "owner" ? (
                               <span className="text-xs px-2.5 py-1 rounded-full border bg-purple-50 text-purple-700 border-purple-200">
@@ -10588,14 +10647,14 @@ export default function SimpleCRM() {
                       ))}
                       {!teamUsersLoading && teamUsers.length === 0 && (
                         <tr>
-                          <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
+                          <td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-400">
                             No team members yet
                           </td>
                         </tr>
                       )}
                       {teamUsersLoading && (
                         <tr>
-                          <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
+                          <td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-400">
                             <Loader2 size={14} className="animate-spin inline" />
                           </td>
                         </tr>

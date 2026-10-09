@@ -1,10 +1,10 @@
 import React, { useState } from "react";
-import { Plus, Send, MessageSquare, Clock } from "lucide-react";
+import { Plus, Send, MessageSquare, UserRound, Clock } from "lucide-react";
 
 // A small "+" button between automation steps (and one before the
-// first step) that opens a type picker — Email / SMS / Wait — for
-// inserting a new step at that exact position, rather than only ever
-// being able to append to the end of the chain.
+// first step) that opens a type picker — Email / SMS / SMS to user /
+// Wait — for inserting a new step at that exact position, rather than
+// only ever being able to append to the end of the chain.
 export default function AddStepMenu({ onAdd }) {
   const [open, setOpen] = useState(false);
 
@@ -37,6 +37,12 @@ export default function AddStepMenu({ onAdd }) {
               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-50"
             >
               <MessageSquare size={13} /> Send SMS
+            </button>
+            <button
+              onClick={() => add({ type: "sms_user", userId: null, phone: "", body: "" })}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-50"
+            >
+              <UserRound size={13} /> Send SMS to user
             </button>
             <button
               onClick={() => add({ type: "wait", mode: "duration", amount: 1, unit: "hours" })}

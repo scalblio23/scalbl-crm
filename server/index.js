@@ -138,6 +138,7 @@ import {
   canManageUsers,
   canDeleteUser,
   forbidClientRole,
+  isValidUserPhone,
   ROLES,
 } from "./auth.js";
 import {
@@ -439,17 +440,22 @@ app.patch(
     if (!canManageUsers(req.user.role)) {
       return res.status(403).json({ error: "Only an owner or super admin can edit users." });
     }
-    const { id, name, role, allowedTags } = req.body || {};
+    const { id, name, role, allowedTags, phone } = req.body || {};
     if (!id) return res.status(400).json({ error: "Missing id" });
     if (role && (role === "owner" || !ROLES.includes(role))) {
       return res.status(400).json({ error: "Invalid role" });
     }
+    if (phone !== undefined && !isValidUserPhone(phone)) {
+      return res.status(400).json({ error: "Invalid phone number" });
+    }
     const target = await getUserById(id);
     if (!target) return res.status(404).json({ error: "User not found" });
-    if (target.role === "owner") {
+    // Mirrors api/users.js: the owner's phone (only) can be set.
+    const phoneOnly = phone !== undefined && name === undefined && role === undefined && allowedTags === undefined;
+    if (target.role === "owner" && !phoneOnly) {
       return res.status(403).json({ error: "The owner's account can't be edited." });
     }
-    res.json(await updateUser(id, { name, role, allowedTags }));
+    res.json(await updateUser(id, { name, role, allowedTags, phone }));
   })
 );
 app.delete(
