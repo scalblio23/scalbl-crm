@@ -26,7 +26,22 @@ import {
   updateAutomationRunProgress,
 } from "./db.js";
 import { sendCalendarEmail, missingEmailEnv } from "./email.js";
-import { sendSms, missingTwilioEnv } from "./twilioCore.js";
+import { sendCrazytelSms } from "./crazytelSms.js";
+import { parseDids, didsForTags, auToInternational } from "./smsPolicy.js";
+
+// Picks the Crazytel sender for an automation SMS. Same scoping rule
+// as the inbox (smsPolicy.didsForTags): a DID mapped to the contact's
+// tag wins. Otherwise every automation SMS goes out from one shared
+// sender — the FIRST admin-scoped DID (empty allowedTags + clientScope
+// "admin") in CRAZYTEL_SMS_DIDS order. Deterministic, never random, so
+// contacts always see the same number. Automations run with no
+// signed-in user, so there's no user scope to match against.
+function pickAutomationDid(context) {
+  const dids = parseDids(process.env.CRAZYTEL_SMS_DIDS || "");
+  const tag = context.tag || context.contact?.tag;
+  const tagMatched = tag ? didsForTags([tag], dids) : [];
+  return tagMatched[0] || dids.find((d) => d.adminScope) || null;
+}
 
 function fillTemplate(text, data) {
   return String(text || "").replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => data[key] ?? "");
@@ -66,10 +81,12 @@ function computeWaitRunAt(step, context) {
 }
 
 // Runs one non-wait step. A step with no recipient (no email/phone on
-// the contact) or an unconfigured provider is skipped rather than
+// the contact) or an unconfigured email provider is skipped rather than
 // failing the whole run — same fail-open philosophy as the Calendars
-// feature's own confirmation sends.
-async function runStep(step, automation, context) {
+// feature's own confirmation sends. SMS config problems and Crazytel
+// rejections throw instead, so advanceAutomationRun() logs them and
+// records lastError, then carries on with the next step.
+async function runStep(step, automation, context, stepKey) {
   const data = {
     name: context.contact?.name || "",
     email: context.contact?.email || "",
@@ -92,8 +109,18 @@ async function runStep(step, automation, context) {
       html: fillTemplate(step.body, data).replace(/\n/g, "<br/>"),
     });
   } else if (step.type === "sms") {
-    if (!context.contact?.phone || missingTwilioEnv().length) return;
-    await sendSms({ to: context.contact.phone, body: fillTemplate(step.body, data) });
+    if (!context.contact?.phone) return;
+    if (!process.env.CRAZYTEL_API_KEY) throw new Error("Crazytel SMS is not configured (CRAZYTEL_API_KEY)");
+    const did = pickAutomationDid(context);
+    if (!did) throw new Error("No Crazytel sender number available (CRAZYTEL_SMS_DIDS)");
+    const result = await sendCrazytelSms({
+      from: did.number,
+      to: auToInternational(context.contact.phone),
+      text: fillTemplate(step.body, data),
+      // Stable per run + step, so Crazytel dedupes if this step is ever re-sent.
+      idempotencyKey: stepKey,
+    });
+    if (result.status !== "queued") throw new Error(`Crazytel SMS ${result.status}: ${result.error}`);
   }
   // "call" isn't executed automatically yet — see its disabled option
   // in the Automations builder UI.
@@ -129,7 +156,7 @@ export async function advanceAutomationRun(run) {
         return;
       }
       try {
-        await runStep(step, automation, run.context);
+        await runStep(step, automation, run.context, `automation-run-${run.id}-step-${index}`);
       } catch (err) {
         console.error(`[automations] "${automation.name}" step ${index} failed`, err);
         await updateAutomationRunProgress(run.id, { lastError: String(err.message || err).slice(0, 500) });
