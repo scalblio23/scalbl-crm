@@ -20,7 +20,10 @@ import { findApiKeyByHash, touchApiKeyLastUsed, getUserById } from "./db.js";
 // client       — only Conversation/Contacts/Reports, and only leads
 //                whose tag is in that user's allowedTags.
 export const ROLES = ["owner", "super_admin", "admin", "client"];
-const FULL_ACCESS_TABS = [
+// Every tab in the app (matches navItems in src/SimpleCRM.jsx). Each
+// user's own tab list (users.allowed_tabs) is a subset of these; NULL
+// means "the default for their role".
+export const ALL_TABS = [
   "memo",
   "conversation",
   "contacts",
@@ -28,29 +31,80 @@ const FULL_ACCESS_TABS = [
   "multiline",
   "bulk-sms",
   "log",
-  "clients",
   "reports",
   "portal",
   "working-hours",
+  "clients",
+  "csm",
+  "calendars",
+  "automations",
+  "ai-voice",
   "settings",
 ];
 // Portal is the client-facing summary screen — a client role sees their
 // own scoped view, everyone else browses it via the client picker.
-const CLIENT_TABS = ["conversation", "contacts", "reports", "portal"];
+export const CLIENT_TABS = ["conversation", "contacts", "reports", "portal"];
+// Tabs a client role can never be given, whatever is ticked for them —
+// they're internal tools/data, not views of their own leads.
+const CLIENT_FORBIDDEN_TABS = ["memo", "csm", "clients", "settings", "automations", "ai-voice", "calendars", "working-hours"];
+
+// Unknown/missing role fails closed to the client tabs.
+export function defaultTabsForRole(role) {
+  return role === "owner" || role === "super_admin" || role === "admin" ? ALL_TABS : CLIENT_TABS;
+}
 
 export function tabsForRole(role) {
-  return role === "client" ? CLIENT_TABS : FULL_ACCESS_TABS;
+  return defaultTabsForRole(role);
+}
+
+// The tabs one user can actually open: owner always gets everything;
+// otherwise their own list if one is set, else their role's default.
+export function effectiveTabs(user) {
+  if (!user) return [];
+  if (user.role === "owner" || user.isApiKey) return ALL_TABS;
+  const own = Array.isArray(user.allowedTabs) ? user.allowedTabs : null;
+  let tabs = own ? ALL_TABS.filter((t) => own.includes(t)) : defaultTabsForRole(user.role);
+  if (user.role === "client" || !ROLES.includes(user.role)) tabs = tabs.filter((t) => !CLIENT_FORBIDDEN_TABS.includes(t));
+  return tabs;
+}
+
+export function hasTab(user, tab) {
+  return effectiveTabs(user).includes(tab);
+}
+
+// For endpoints that belong to one tab: 403 unless the caller has it.
+// Writes the response itself; callers do `if (forbidWithoutTab(user, "csm", res)) return;`.
+export function forbidWithoutTab(user, tab, res) {
+  if (hasTab(user, tab)) return false;
+  res.status(403).json({ error: "You don't have access to this tab." });
+  return true;
+}
+
+// Does this user see every contact, or only the ones under their tags?
+// Owner and API keys: always everything. Client role: always only
+// their tags. Staff: everything unless "only these tags" was set
+// (users.see_all_contacts = false).
+export function seesAllContacts(user) {
+  if (!user) return false;
+  if (user.role === "owner" || user.isApiKey) return true;
+  if (user.role === "client" || !ROLES.includes(user.role)) return false;
+  return user.seeAllContacts !== false;
 }
 
 export function isDataScoped(role) {
   return role === "client";
 }
 
-// Everyone but a client role sees every lead; a client role is scoped
-// to their own allowedTags. Returns null for "no filter" (full
-// access) so callers can pass it straight through to a query.
+// Returns null for "no filter" (sees every contact) or the list of tags
+// whose contacts this user may see.
 export function scopeTagsForUser(user) {
-  return isDataScoped(user.role) ? user.allowedTags || [] : null;
+  return seesAllContacts(user) ? null : user.allowedTags || [];
+}
+
+// Team comments (lead notes, closer notes, call wrap-up notes) are
+// hidden from client logins — staff limited to some tags still see them.
+export function hidesInternalNotes(user) {
+  return !user || user.role === "client" || !ROLES.includes(user.role);
 }
 
 export function canManageUsers(role) {
@@ -200,13 +254,22 @@ export async function getSessionUser(req) {
     });
   }
   if (!row) return null;
-  return {
-    id: identity.id,
+  return sessionUserFromRow(row);
+}
+
+// The shape every login/session response uses, including the tabs this
+// person can open and whether they see every contact.
+export function sessionUserFromRow(row) {
+  const user = {
+    id: row.id,
     email: row.email,
     name: row.name,
     role: row.role || "admin",
     allowedTags: row.allowed_tags || [],
+    allowedTabs: Array.isArray(row.allowed_tabs) ? row.allowed_tabs : null,
+    seeAllContacts: row.see_all_contacts === false ? false : row.see_all_contacts === true ? true : null,
   };
+  return { ...user, tabs: effectiveTabs(user), seesAllContacts: seesAllContacts(user) };
 }
 
 // ---------- API keys (programmatic/agent access) ----------

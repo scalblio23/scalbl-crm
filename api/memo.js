@@ -24,7 +24,7 @@ import {
   memoOtherUserId,
   MEMO_TEAM,
 } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidClientRole, forbidWithoutTab } from "../server/auth.js";
 
 const MAX_TEXT_LENGTH = 5000;
 // Same limits as CSM comments (the platform caps a request body ~4.5MB).
@@ -46,6 +46,7 @@ export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "memo", res)) return;
   try {
     await schema;
 

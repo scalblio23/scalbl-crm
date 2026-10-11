@@ -351,6 +351,11 @@ export async function ensureSchema() {
     // they can manage other users (see server/auth.js).
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'`);
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tags JSONB DEFAULT '[]'`);
+    // Per-user access, set in Settings → Access. allowed_tabs NULL = the
+    // role's default tabs; see_all_contacts NULL = the role's default
+    // (staff see everything, clients only their allowed_tags).
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tabs JSONB`);
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS see_all_contacts BOOLEAN`);
     // Client self-signup links (see createPortalInvite/claimPortalInvite
     // below) — there's no email infrastructure to send a per-person
     // portal invite, so an admin generates one of these scoped to a set
@@ -1273,12 +1278,14 @@ export function sanitizeClientContactPatch(patch) {
 // allowedTags scopes the result to a client-role user's own leads —
 // pass null/undefined for full access (owner/super_admin/admin, and
 // API keys). Scoped (client) results also have team comments removed.
-export async function getContacts(allowedTags) {
+// hideInternal strips team comments (client logins) — it defaults to
+// "whenever scoped" so a caller that forgets it fails closed.
+export async function getContacts(allowedTags, hideInternal = Boolean(allowedTags)) {
   const rows = allowedTags
     ? await query("SELECT * FROM contacts WHERE tag = ANY($1::text[]) ORDER BY created_at DESC", [allowedTags])
     : await query("SELECT * FROM contacts ORDER BY created_at DESC");
   const contacts = rows.map(contactFromRow);
-  return allowedTags ? contacts.map(contactForClient) : contacts;
+  return hideInternal ? contacts.map(contactForClient) : contacts;
 }
 
 // Used by the API layer to check a client-role caller's tag access
@@ -1916,13 +1923,13 @@ function callLogFromRow(r) {
   };
 }
 
-export async function getCallLog(allowedTags) {
+export async function getCallLog(allowedTags, hideInternal = Boolean(allowedTags)) {
   const rows = allowedTags
     ? await query("SELECT * FROM call_log WHERE tag = ANY($1::text[]) ORDER BY called_at DESC", [allowedTags])
     : await query("SELECT * FROM call_log ORDER BY called_at DESC");
   const entries = rows.map(callLogFromRow);
   // A client never sees the team's wrap-up notes or which rep called.
-  return allowedTags ? entries.map((e) => ({ ...e, notes: "", userId: null, userName: "" })) : entries;
+  return hideInternal ? entries.map((e) => ({ ...e, notes: "", userId: null, userName: "" })) : entries;
 }
 
 export async function addCallLogEntry(entry) {
@@ -1971,6 +1978,8 @@ function userFromRow(r) {
     email: r.email,
     role: r.role || "admin",
     allowedTags: r.allowed_tags || [],
+    allowedTabs: Array.isArray(r.allowed_tabs) ? r.allowed_tabs : null,
+    seeAllContacts: typeof r.see_all_contacts === "boolean" ? r.see_all_contacts : null,
     hasPassword: Boolean(r.password_hash),
     createdAt: r.created_at,
   };
@@ -2001,14 +2010,27 @@ export async function inviteUser({ name, email, role, allowedTags }) {
   return rows[0] ? userFromRow(rows[0]) : null;
 }
 
-export async function updateUser(id, { name, role, allowedTags }) {
+// allowedTabs / seeAllContacts: undefined leaves them alone, null
+// resets them to the role's default.
+export async function updateUser(id, { name, role, allowedTags, allowedTabs, seeAllContacts }) {
   const rows = await query(
     `UPDATE users SET
        name = COALESCE($2, name),
        role = COALESCE($3, role),
-       allowed_tags = COALESCE($4::jsonb, allowed_tags)
+       allowed_tags = COALESCE($4::jsonb, allowed_tags),
+       allowed_tabs = CASE WHEN $5 THEN $6::jsonb ELSE allowed_tabs END,
+       see_all_contacts = CASE WHEN $7 THEN $8::boolean ELSE see_all_contacts END
      WHERE id = $1 RETURNING *`,
-    [id, name ?? null, role ?? null, allowedTags ? JSON.stringify(allowedTags) : null]
+    [
+      id,
+      name ?? null,
+      role ?? null,
+      allowedTags ? JSON.stringify(allowedTags) : null,
+      allowedTabs !== undefined,
+      allowedTabs ? JSON.stringify(allowedTabs) : null,
+      seeAllContacts !== undefined,
+      typeof seeAllContacts === "boolean" ? seeAllContacts : null,
+    ]
   );
   return rows[0] ? userFromRow(rows[0]) : null;
 }

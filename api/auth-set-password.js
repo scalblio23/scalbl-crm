@@ -1,5 +1,5 @@
 import { ensureSchema, getUserByEmail, claimUserPassword } from "../server/db.js";
-import { hashPassword, createSessionCookie } from "../server/auth.js";
+import { hashPassword, createSessionCookie, sessionUserFromRow } from "../server/auth.js";
 
 // POST /api/auth-set-password — lets someone claim their invited
 // account (a users row that exists but has no password yet). Once
@@ -33,13 +33,7 @@ export default async function handler(req, res) {
     // Must include role/allowedTags — the frontend gates tabs and
     // client-side actions off this response until the next reload.
     // Same shape as server/index.js and getSessionUser.
-    const user = {
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      role: row.role || "admin",
-      allowedTags: row.allowed_tags || [],
-    };
+    const user = sessionUserFromRow(row);
     res.setHeader("Set-Cookie", createSessionCookie(user));
     return res.status(200).json({ user });
   } catch (err) {
