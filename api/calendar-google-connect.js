@@ -7,13 +7,13 @@
 // *their* calendar, not a public endpoint).
 import jwt from "jsonwebtoken";
 import { ensureSchema, getCalendarById } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidWithoutTab } from "../server/auth.js";
 import { buildGoogleAuthUrl, missingGoogleEnv, requestBaseUrl } from "../server/googleCalendar.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "calendars", res)) return;
   try {
     await ensureSchema();
     const missing = missingGoogleEnv();

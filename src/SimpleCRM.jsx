@@ -885,8 +885,13 @@ function auPhoneKey(raw) {
 // Roles that get every tab and every lead. Anything else (including a
 // missing/unknown role) is treated as a tag-scoped client.
 const FULL_ACCESS_ROLES = ["owner", "super_admin", "admin"];
-// Tabs a client login can never be given (mirrors server/auth.js).
-const CLIENT_LOCKED_TABS = ["memo", "csm", "clients", "settings", "automations", "ai-voice", "calendars", "working-hours"];
+// Tabs a client login can never be given (mirrors server/auth.js's
+// CLIENT_FORBIDDEN_TABS): the diallers/Bulk SMS reach any lead, AI Voice
+// holds API keys, Settings manages the team.
+const CLIENT_LOCKED_TABS = ["powerdialler", "multiline", "bulk-sms", "ai-voice", "settings"];
+// Tabs a client can be given, but which show everything in them rather
+// than only the client's tags — Settings asks before ticking these.
+const CLIENT_UNSCOPED_TABS = ["memo", "csm", "clients", "calendars", "automations"];
 
 const navItems = [
   { key: "memo", label: "Inbox / Memo", icon: Inbox },
@@ -2736,7 +2741,7 @@ export default function SimpleCRM() {
   }, [page]);
   // Inbox unread count for the sidebar badge, every 20s from anywhere.
   useEffect(() => {
-    if (!authUser || isClientRole || !hasTabAccess("memo")) return undefined;
+    if (!authUser || !hasTabAccess("memo")) return undefined;
     let cancelled = false;
     const check = () => {
       if (document.visibilityState === "hidden") return;
@@ -2767,7 +2772,7 @@ export default function SimpleCRM() {
   }, [authUser, isClientRole]);
 
   useEffect(() => {
-    if (!authUser || isClientRole || !hasTabAccess("csm")) return undefined;
+    if (!authUser || !hasTabAccess("csm")) return undefined;
     let cancelled = false;
     const check = () =>
       api
@@ -2915,7 +2920,16 @@ export default function SimpleCRM() {
   };
   const toggleTeamUserTab = (u, tab) => {
     const current = Array.isArray(u.tabs) ? u.tabs : [];
-    const next = current.includes(tab) ? current.filter((t) => t !== tab) : [...current, tab];
+    const adding = !current.includes(tab);
+    if (adding && u.role === "client" && CLIENT_UNSCOPED_TABS.includes(tab)) {
+      const label = navItems.find((i) => i.key === tab)?.label || tab;
+      const ok = window.confirm(
+        `${u.name} is a Client. The ${label} tab isn't limited to their tags — they'll see everything in it, ` +
+          `including other clients' data. Give ${u.name} the ${label} tab?`
+      );
+      if (!ok) return;
+    }
+    const next = adding ? [...current, tab] : current.filter((t) => t !== tab);
     patchTeamUser(u.id, { allowedTabs: next });
   };
   const canDeleteTeamUser = (targetRole) => canManageUsers && targetRole !== "owner";
@@ -2965,8 +2979,8 @@ export default function SimpleCRM() {
     let cancelled = false;
     const steps = [
       () => !tagFoldersLoaded && loadTagFolders(),
-      () => !isClientRole && !calendarsLoaded && !calendarsLoading && loadCalendars(),
-      () => !isClientRole && !automationsLoaded && !automationsLoading && loadAutomations(),
+      () => hasTabAccess("calendars") && !calendarsLoaded && !calendarsLoading && loadCalendars(),
+      () => hasTabAccess("automations") && !automationsLoaded && !automationsLoading && loadAutomations(),
       () => !isClientRole && loadApiKey({ quiet: true }),
       () => !isClientRole && loadTeamUsers({ quiet: true }),
       () => !isClientRole && loadPortalInvites({ quiet: true }),
@@ -10418,7 +10432,7 @@ export default function SimpleCRM() {
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
                   Each row shows exactly what that person can open and see. Tick the tabs they get, and choose
                   which contacts they see — every contact, or only contacts under the tags listed. Client logins
-                  never see the team's notes and can't be given internal tabs. Owner and Super Admin can change
+                  never see the team's notes; a "—" means that tab can't be given to a Client. Owner and Super Admin can change
                   access; Admin can see it but not edit it.
                 </p>
                 <p className="text-sm text-gray-700 mt-2 max-w-lg">
@@ -10506,18 +10520,13 @@ export default function SimpleCRM() {
 
                 {[
                   {
-                    key: "team",
-                    title: "Our team",
-                    hint: "Staff logins. They see the team's notes; their contacts can be limited to some tags.",
-                    sectionUsers: teamUsers.filter((u) => u.role !== "client"),
-                    emptyText: "No team members yet",
-                  },
-                  {
-                    key: "clients",
-                    title: "Client team",
-                    hint: "Client logins. Only the tags listed, never the team's notes, never internal tabs.",
-                    sectionUsers: teamUsers.filter((u) => u.role === "client"),
-                    emptyText: "No client users yet — invite one above with the Client role, or share a portal invite link below.",
+                    key: "users",
+                    title: "Users",
+                    hint: "Everyone who can log in. Staff see the team's notes; Client logins never do.",
+                    sectionUsers: [...teamUsers].sort(
+                      (x, y) => (x.role === "owner" ? 0 : 1) - (y.role === "owner" ? 0 : 1)
+                    ),
+                    emptyText: "No users yet",
                   },
                 ].map(({ key, title, hint, sectionUsers, emptyText }) => (
                   <div key={key} className="mt-6">
@@ -10673,11 +10682,15 @@ export default function SimpleCRM() {
                                 </td>
                                 {navItems.map((item) => {
                                   const locked = u.role === "client" && CLIENT_LOCKED_TABS.includes(item.key);
+                                  const unscoped = u.role === "client" && CLIENT_UNSCOPED_TABS.includes(item.key);
                                   const checked = userTabs.includes(item.key);
                                   return (
                                     <td key={item.key} className="px-1 py-3 text-center">
                                       {locked ? (
-                                        <span className="text-gray-300 text-xs" title="Not available to client logins">
+                                        <span
+                                          className="text-gray-300 text-xs cursor-help"
+                                          title={`${item.label} isn't available to Client logins — change their role to Admin to give it.`}
+                                        >
                                           —
                                         </span>
                                       ) : (
@@ -10687,7 +10700,9 @@ export default function SimpleCRM() {
                                           disabled={!editable}
                                           onChange={() => toggleTeamUserTab(u, item.key)}
                                           className="w-3.5 h-3.5 rounded border-gray-300 disabled:opacity-60"
-                                          title={`${item.label}: ${checked ? "can open" : "hidden"}`}
+                                          title={`${item.label}: ${checked ? "can open" : "hidden"}${
+                                            unscoped ? " — not limited to their tags" : ""
+                                          }`}
                                         />
                                       )}
                                     </td>
@@ -11048,14 +11063,14 @@ export default function SimpleCRM() {
             <AIVoicePanel />
           </Suspense>
         )}
-        {(page === "memo" || memoMounted) && !isClientRole && (
+        {(page === "memo" || memoMounted) && hasTabAccess("memo") && (
           <div className={page === "memo" ? "flex-1 flex min-h-0 min-w-0" : "hidden"}>
             <Suspense fallback={<TabLoading />}>
               <MemoPanel active={page === "memo"} currentUserId={authUser?.id} onUnreadChange={setMemoUnread} />
             </Suspense>
           </div>
         )}
-        {(page === "csm" || csmMounted) && (
+        {(page === "csm" || csmMounted) && hasTabAccess("csm") && (
           <div className={page === "csm" ? "flex-1 flex min-h-0 min-w-0" : "hidden"}>
             <Suspense fallback={<TabLoading />}>
               <CsmPanel

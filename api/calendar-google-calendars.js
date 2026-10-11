@@ -4,13 +4,13 @@
 // Requires that calendarId's Google connection to already be live —
 // there's nothing to list before "Connect with Google" has run.
 import { ensureSchema, getCalendarById } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidWithoutTab } from "../server/auth.js";
 import { getValidAccessToken, listGoogleCalendars } from "../server/googleCalendar.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "calendars", res)) return;
   try {
     await ensureSchema();
     const calendarId = req.query.calendarId;

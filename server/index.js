@@ -228,8 +228,6 @@ app.use(async (req, res, next) => {
 // render their own leads' criteria.
 app.use(
   [
-    "/api/clients",
-    "/api/client-columns",
     "/api/clients-import",
     "/api/contacts-import",
     "/api/contacts-bulk-import",
@@ -246,12 +244,6 @@ app.use(
     "/api/soundboard-clips",
     "/api/users", // team roster (names/emails) is internal-only
     "/api/portal-invites",
-    "/api/calendars",
-    "/api/calendar-google-connect",
-    "/api/calendar-google-disconnect",
-    "/api/calendar-google-calendars",
-    "/api/calendar-bookings",
-    "/api/automations",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -262,6 +254,12 @@ app.use(
 // the matching api/*.js files.
 for (const [path, tab] of [
   ["/api/clients", "clients"],
+  ["/api/client-columns", "clients"],
+  ["/api/calendars", "calendars"],
+  ["/api/calendar-google-connect", "calendars"],
+  ["/api/calendar-google-disconnect", "calendars"],
+  ["/api/calendar-google-calendars", "calendars"],
+  ["/api/calendar-bookings", "calendars"],
   ["/api/clients-import", "clients"],
   ["/api/multiline-start", "multiline"],
   ["/api/sms-bulk-send", "bulk-sms"],
@@ -501,10 +499,11 @@ app.get(
     const allowedTags = scopeTagsForUser(req.user);
     const scoped = req.user.role === "client";
     const hideInternal = hidesInternalNotes(req.user);
+    const showClients = !scoped || hasTab(req.user, "clients");
     const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, callLog] =
       await Promise.all([
-        scoped ? [] : getClients(),
-        scoped ? [] : getClientColumns(),
+        showClients ? getClients() : [],
+        showClients ? getClientColumns() : [],
         getContacts(allowedTags, hideInternal),
         getContactColumns(),
         getConversations(allowedTags),

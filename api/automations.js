@@ -11,12 +11,11 @@ import {
   deleteAutomation,
   getAutomationRunsByAutomationId,
 } from "../server/db.js";
-import { requireAuth, forbidClientRole, forbidWithoutTab } from "../server/auth.js";
+import { requireAuth, forbidWithoutTab } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  if (forbidClientRole(user, res)) return;
   if (forbidWithoutTab(user, "automations", res)) return;
   try {
     await ensureSchema();

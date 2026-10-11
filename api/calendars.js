@@ -2,12 +2,12 @@
 // Sidebar → Calendars → Add Calendar → Calendar settings flow. Full-
 // access roles only, same as Clients/Dial lists.
 import { ensureSchema, getCalendars, createCalendar, updateCalendar, deleteCalendar } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidWithoutTab } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "calendars", res)) return;
   try {
     await ensureSchema();
 

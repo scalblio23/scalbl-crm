@@ -44,9 +44,12 @@ export const ALL_TABS = [
 // Portal is the client-facing summary screen — a client role sees their
 // own scoped view, everyone else browses it via the client picker.
 export const CLIENT_TABS = ["conversation", "contacts", "reports", "portal"];
-// Tabs a client role can never be given, whatever is ticked for them —
-// they're internal tools/data, not views of their own leads.
-const CLIENT_FORBIDDEN_TABS = ["memo", "csm", "clients", "settings", "automations", "ai-voice", "calendars", "working-hours"];
+// Tabs a client role can never be given, whatever is ticked for them:
+// the diallers and Bulk SMS can reach any lead, AI Voice holds API keys,
+// Settings manages the team. Every other tab can be ticked for a client
+// in Settings (Inbox, CSM, Clients, Calendars and Automations aren't
+// limited by tags — the Settings screen warns before granting those).
+export const CLIENT_FORBIDDEN_TABS = ["powerdialler", "multiline", "bulk-sms", "ai-voice", "settings"];
 
 // Unknown/missing role fails closed to the client tabs.
 export function defaultTabsForRole(role) {

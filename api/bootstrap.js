@@ -8,7 +8,7 @@ import {
   getDialLists,
   getCallLog,
 } from "../server/db.js";
-import { requireAuth, scopeTagsForUser, hidesInternalNotes } from "../server/auth.js";
+import { requireAuth, scopeTagsForUser, hidesInternalNotes, hasTab } from "../server/auth.js";
 
 // GET /api/bootstrap — everything the app needs on first load, in one
 // request. Firing separate requests on mount meant separate
@@ -27,9 +27,11 @@ export default async function handler(req, res) {
     // rather than shipping data down just to hide it client-side.
     const scoped = user.role === "client";
     const hideInternal = hidesInternalNotes(user);
+    // A client only gets the Clients list if that tab was ticked for them.
+    const showClients = !scoped || hasTab(user, "clients");
     const [clients, clientColumns, contacts, contactColumns, conversations, dialLists, callLog] = await Promise.all([
-      scoped ? [] : getClients(),
-      scoped ? [] : getClientColumns(),
+      showClients ? getClients() : [],
+      showClients ? getClientColumns() : [],
       getContacts(allowedTags, hideInternal),
       getContactColumns(),
       getConversations(allowedTags),
