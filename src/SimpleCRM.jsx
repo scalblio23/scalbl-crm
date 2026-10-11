@@ -2832,21 +2832,73 @@ export default function SimpleCRM() {
     }
   };
 
+  // Access changes save as soon as they're made (no Save button): the row
+  // updates straight away, shows "Saving…" then "✓ Saved", and if the
+  // server refuses, it goes back to what's really stored and says why.
+  const [userSaveState, setUserSaveState] = useState({}); // { [userId]: { status: "saving" | "saved" | "error", message? } }
+  const userSaveSeq = useRef({}); // latest request per user, so a slow older reply can't overwrite a newer change
+  const userSavedTimers = useRef({});
+  const setSaveState = (id, state) => {
+    clearTimeout(userSavedTimers.current[id]);
+    setUserSaveState((m) => ({ ...m, [id]: state }));
+    if (state?.status === "saved") {
+      userSavedTimers.current[id] = setTimeout(
+        () => setUserSaveState((m) => (m[id]?.status === "saved" ? { ...m, [id]: undefined } : m)),
+        3000
+      );
+    }
+  };
+  // Mirrors server/auth.js's effectiveTabs closely enough to show the
+  // right ticks instantly; the server's reply replaces it a moment later.
+  const previewUser = (u, patch) => {
+    const next = { ...u, ...patch };
+    if (patch.allowedTabs !== undefined || patch.role !== undefined) {
+      const own = Array.isArray(next.allowedTabs) ? next.allowedTabs : null;
+      let tabs = own
+        ? navItems.map((i) => i.key).filter((k) => own.includes(k))
+        : next.role === "client"
+          ? ["conversation", "contacts", "reports", "portal"]
+          : navItems.map((i) => i.key);
+      if (next.role === "client") tabs = tabs.filter((k) => !CLIENT_LOCKED_TABS.includes(k));
+      next.tabs = tabs;
+    }
+    if (patch.seeAllContacts !== undefined || patch.role !== undefined) {
+      next.seesAllContacts = next.role === "client" ? false : next.seeAllContacts !== false;
+    }
+    return next;
+  };
+
   const patchTeamUser = async (id, patch) => {
+    const seq = (userSaveSeq.current[id] || 0) + 1;
+    userSaveSeq.current[id] = seq;
+    setTeamUsers((us) => us.map((u) => (u.id === id ? previewUser(u, patch) : u)));
+    setSaveState(id, { status: "saving" });
     try {
       const updated = await api.patch("/api/users", { id, ...patch });
+      if (userSaveSeq.current[id] !== seq) return; // a newer change is in flight
       setTeamUsers((us) => us.map((u) => (u.id === id ? updated : u)));
+      setSaveState(id, { status: "saved" });
     } catch (err) {
-      setDbError(err.message || "Could not update that user.");
+      if (userSaveSeq.current[id] !== seq) return;
+      setSaveState(id, { status: "error", message: err.message || "Not saved" });
+      setDbError(`Not saved: ${err.message || "could not update that user."}`);
+      loadTeamUsers({ quiet: true }); // show what's actually stored
     }
   };
 
+  const [removingUserIds, setRemovingUserIds] = useState([]);
   const handleDeleteTeamUser = async (id) => {
+    const target = teamUsers.find((u) => u.id === id);
+    if (!window.confirm(`Remove ${target?.name || "this user"}? They won't be able to log in any more.`)) return;
+    // Gone from the list straight away; put back if the server refuses.
+    setRemovingUserIds((ids) => [...ids, id]);
     try {
       await api.delete(`/api/users?id=${id}`);
       setTeamUsers((us) => us.filter((u) => u.id !== id));
     } catch (err) {
-      setDbError(err.message || "Could not remove that user.");
+      setDbError(`Not removed: ${err.message || "could not remove that user."}`);
+    } finally {
+      setRemovingUserIds((ids) => ids.filter((x) => x !== id));
     }
   };
 
@@ -2859,13 +2911,11 @@ export default function SimpleCRM() {
   const [tagMenuPos, setTagMenuPos] = useState({ top: 0, left: 0 }); // viewport coords of the open popover (fixed, so the table's overflow-hidden can't clip it)
   const toggleTeamUserTag = (u, tag) => {
     const next = u.allowedTags.includes(tag) ? u.allowedTags.filter((t) => t !== tag) : [...u.allowedTags, tag];
-    setTeamUsers((us) => us.map((x) => (x.id === u.id ? { ...x, allowedTags: next } : x)));
     patchTeamUser(u.id, { allowedTags: next });
   };
   const toggleTeamUserTab = (u, tab) => {
     const current = Array.isArray(u.tabs) ? u.tabs : [];
     const next = current.includes(tab) ? current.filter((t) => t !== tab) : [...current, tab];
-    setTeamUsers((us) => us.map((x) => (x.id === u.id ? { ...x, tabs: next, allowedTabs: next } : x)));
     patchTeamUser(u.id, { allowedTabs: next });
   };
   const canDeleteTeamUser = (targetRole) => canManageUsers && targetRole !== "owner";
@@ -10371,6 +10421,11 @@ export default function SimpleCRM() {
                   never see the team's notes and can't be given internal tabs. Owner and Super Admin can change
                   access; Admin can see it but not edit it.
                 </p>
+                <p className="text-sm text-gray-700 mt-2 max-w-lg">
+                  <strong>There's no Save button — every change saves on its own.</strong> Watch for{" "}
+                  <span className="text-green-600 font-medium">✓ Saved</span> under the person's name; if it says{" "}
+                  <span className="text-red-600 font-medium">Not saved</span>, the row goes back to what's really stored.
+                </p>
 
                 {!canManageUsers && authUser && (
                   <div className="mt-4 max-w-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm rounded-lg px-4 py-3">
@@ -10493,16 +10548,30 @@ export default function SimpleCRM() {
                           </tr>
                         </thead>
                         <tbody>
-                          {sectionUsers.map((u) => {
+                          {sectionUsers.filter((u) => !removingUserIds.includes(u.id)).map((u) => {
                             const isOwnerRow = u.role === "owner";
+                            const saveState = userSaveState[u.id];
                             const editable = canManageUsers && !isOwnerRow;
                             const userTabs = Array.isArray(u.tabs) ? u.tabs : [];
-                            const allContacts = u.seesAllContacts ?? (u.role !== "client");
+                            const allContacts = u.role === "client" ? false : (u.seesAllContacts ?? true);
                             return (
                               <tr key={u.id} className="border-b border-gray-50 last:border-0 align-top">
                                 <td className="px-4 py-3">
                                   <div className="font-medium">{u.name}</div>
                                   <div className="text-xs text-gray-500">{u.email}</div>
+                                  {saveState?.status === "saving" && (
+                                    <div className="mt-1 flex items-center gap-1 text-xs text-gray-500">
+                                      <Loader2 size={12} className="animate-spin" /> Saving…
+                                    </div>
+                                  )}
+                                  {saveState?.status === "saved" && (
+                                    <div className="mt-1 text-xs font-medium text-green-600">✓ Saved</div>
+                                  )}
+                                  {saveState?.status === "error" && (
+                                    <div className="mt-1 text-xs font-medium text-red-600" title={saveState.message}>
+                                      ✕ Not saved — {saveState.message}
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="px-4 py-3">
                                   {isOwnerRow ? (

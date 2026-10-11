@@ -210,6 +210,14 @@ export async function ensureSchema() {
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'calendars' AND column_name = 'video_conference_link'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'users' AND column_name = 'allowed_tabs'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'users' AND column_name = 'see_all_contacts'
         ) AS exists
     `);
     if (!exists) {
