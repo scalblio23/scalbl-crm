@@ -2777,7 +2777,9 @@ export default function SimpleCRM() {
   }, [authUser, page]);
   const [teamUsers, setTeamUsers] = useState([]);
   const [teamUsersLoading, setTeamUsersLoading] = useState(false);
-  const emptyInviteForm = { name: "", email: "", role: "admin", allowedTags: [] };
+  // Defaults to Client — the least-access role. Staff roles have to be
+  // picked on purpose so nobody outside the team ends up with full access.
+  const emptyInviteForm = { name: "", email: "", role: "client", allowedTags: [] };
   const [inviteForm, setInviteForm] = useState(emptyInviteForm);
   const [invitingUser, setInvitingUser] = useState(false);
 
@@ -10372,8 +10374,16 @@ export default function SimpleCRM() {
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
                   Owner and Super Admin can invite people and change roles. Admin sees the team but can't edit
                   it. A Client account only ever sees Conversation, Contacts and Reports — scoped to the lead
-                  tag(s) picked for them below.
+                  tag(s) picked for them below. Never give a client Admin or Super Admin — those see every
+                  client's leads and the team's notes.
                 </p>
+
+                {!canManageUsers && authUser && (
+                  <div className="mt-4 max-w-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm rounded-lg px-4 py-3">
+                    You're signed in as <strong className="capitalize">{String(authUser.role || "").replace("_", " ")}</strong>.
+                    Only an Owner or Super Admin can add client users or change someone to the Client role.
+                  </div>
+                )}
 
                 {canManageUsers && (
                   <form onSubmit={handleInviteUser} className="flex items-end gap-2 mt-4 flex-wrap">
@@ -10403,9 +10413,9 @@ export default function SimpleCRM() {
                         onChange={(e) => setInviteForm((f) => ({ ...f, role: e.target.value }))}
                         className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
                       >
-                        <option value="admin">Admin</option>
-                        <option value="super_admin">Super Admin</option>
-                        <option value="client">Client</option>
+                        <option value="client">Client (only their own tags)</option>
+                        <option value="admin">Admin (sees everything)</option>
+                        <option value="super_admin">Super Admin (sees everything)</option>
                       </select>
                     </div>
                     <button
@@ -10445,132 +10455,157 @@ export default function SimpleCRM() {
                   </div>
                 )}
 
-                <div className="mt-5 border border-gray-200 rounded-xl overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
-                        <th className="px-4 py-2.5 font-medium">Name</th>
-                        <th className="px-4 py-2.5 font-medium">Email</th>
-                        <th className="px-4 py-2.5 font-medium">Role</th>
-                        <th className="px-4 py-2.5 font-medium">Tags</th>
-                        <th className="px-4 py-2.5 font-medium">Status</th>
-                        <th className="px-4 py-2.5"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {teamUsers.map((u) => (
-                        <tr key={u.id} className="border-b border-gray-50 last:border-0">
-                          <td className="px-4 py-3 font-medium">{u.name}</td>
-                          <td className="px-4 py-3 text-gray-500">{u.email}</td>
-                          <td className="px-4 py-3">
-                            {u.role === "owner" ? (
-                              <span className="text-xs px-2.5 py-1 rounded-full border bg-purple-50 text-purple-700 border-purple-200">
-                                Owner
-                              </span>
-                            ) : canManageUsers ? (
-                              <select
-                                value={u.role}
-                                onChange={(e) => patchTeamUser(u.id, { role: e.target.value })}
-                                className="border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400 bg-white"
-                              >
-                                <option value="admin">Admin</option>
-                                <option value="super_admin">Super Admin</option>
-                                <option value="client">Client</option>
-                              </select>
-                            ) : (
-                              <span className="text-xs text-gray-600 capitalize">{u.role.replace("_", " ")}</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3">
-                            {u.role !== "client" ? (
-                              <span className="text-gray-300 text-xs">—</span>
-                            ) : (
-                              <div className="relative">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    if (!canManageUsers) return;
-                                    const r = e.currentTarget.getBoundingClientRect();
-                                    // keep the popover on-screen: it's up to 224px tall (max-h-56) and 224px wide (w-56)
-                                    setTagMenuPos({
-                                      top: Math.max(8, Math.min(r.bottom + 6, window.innerHeight - 232)),
-                                      left: Math.max(8, Math.min(r.left, window.innerWidth - 232)),
-                                    });
-                                    setTagMenuUserId((cur) => (cur === u.id ? null : u.id));
-                                  }}
-                                  className="flex flex-wrap gap-1 max-w-[220px]"
-                                >
-                                  {u.allowedTags.length ? (
-                                    u.allowedTags.map((tag) => (
-                                      <span
-                                        key={tag}
-                                        className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200 whitespace-nowrap"
-                                      >
-                                        {tag}
-                                      </span>
-                                    ))
-                                  ) : (
-                                    <span className="text-xs text-red-500">No tags — sees nothing</span>
-                                  )}
-                                </button>
-                                {canManageUsers && tagMenuUserId === u.id && (
-                                  <>
-                                    <div className="fixed inset-0 z-40" onClick={() => setTagMenuUserId(null)} />
-                                    <div
-                                      className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-56 max-h-56 overflow-y-auto"
-                                      style={{ top: tagMenuPos.top, left: tagMenuPos.left }}
-                                    >
-                                      {contactTagNames.map((tag) => (
-                                        <label
-                                          key={tag}
-                                          className="flex items-center gap-2 px-1.5 py-1 rounded-md hover:bg-gray-50 text-xs cursor-pointer"
-                                        >
-                                          <input
-                                            type="checkbox"
-                                            checked={u.allowedTags.includes(tag)}
-                                            onChange={() => toggleTeamUserTag(u, tag)}
-                                            className="w-3.5 h-3.5 rounded border-gray-300"
-                                          />
-                                          <span className="truncate">{tag}</span>
-                                        </label>
-                                      ))}
-                                    </div>
-                                  </>
+                {[
+                  {
+                    key: "team",
+                    title: "Our team",
+                    hint: "Owner, Super Admin and Admin — full access to every tab, every client's leads and team notes.",
+                    sectionUsers: teamUsers.filter((u) => u.role !== "client"),
+                    emptyText: "No team members yet",
+                  },
+                  {
+                    key: "clients",
+                    title: "Client team",
+                    hint: "Client logins — only Conversation, Contacts, Reports and Portal, only for the tags shown, and never the team's notes.",
+                    sectionUsers: teamUsers.filter((u) => u.role === "client"),
+                    emptyText: "No client users yet — invite one above with the Client role, or share a portal invite link below.",
+                  },
+                ].map(({ key, title, hint, sectionUsers, emptyText }) => (
+                  <div key={key} className="mt-6">
+                    <div className="flex items-baseline gap-2">
+                      <h3 className="text-sm font-semibold">{title}</h3>
+                      <span className="text-xs text-gray-400">{sectionUsers.length}</span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">{hint}</p>
+                    <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
+                            <th className="px-4 py-2.5 font-medium">Name</th>
+                            <th className="px-4 py-2.5 font-medium">Email</th>
+                            <th className="px-4 py-2.5 font-medium">Role</th>
+                            <th className="px-4 py-2.5 font-medium">Tags</th>
+                            <th className="px-4 py-2.5 font-medium">Status</th>
+                            <th className="px-4 py-2.5"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sectionUsers.map((u) => (
+                            <tr key={u.id} className="border-b border-gray-50 last:border-0">
+                              <td className="px-4 py-3 font-medium">{u.name}</td>
+                              <td className="px-4 py-3 text-gray-500">{u.email}</td>
+                              <td className="px-4 py-3">
+                                {u.role === "owner" ? (
+                                  <span className="text-xs px-2.5 py-1 rounded-full border bg-purple-50 text-purple-700 border-purple-200">
+                                    Owner
+                                  </span>
+                                ) : canManageUsers ? (
+                                  <select
+                                    value={u.role}
+                                    onChange={(e) => patchTeamUser(u.id, { role: e.target.value })}
+                                    className="border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400 bg-white"
+                                  >
+                                    <option value="admin">Admin</option>
+                                    <option value="super_admin">Super Admin</option>
+                                    <option value="client">Client</option>
+                                  </select>
+                                ) : (
+                                  <span className="text-xs text-gray-600 capitalize">{u.role.replace("_", " ")}</span>
                                 )}
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-gray-500">{u.hasPassword ? "Active" : "Invited"}</td>
-                          <td className="px-4 py-3 text-right">
-                            {canDeleteTeamUser(u.role) && u.id !== authUser?.id && (
-                              <button
-                                onClick={() => handleDeleteTeamUser(u.id)}
-                                className="text-gray-300 hover:text-red-500"
-                                title="Remove user"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                      {!teamUsersLoading && teamUsers.length === 0 && (
-                        <tr>
-                          <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
-                            No team members yet
-                          </td>
-                        </tr>
-                      )}
-                      {teamUsersLoading && (
-                        <tr>
-                          <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
-                            <Loader2 size={14} className="animate-spin inline" />
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                {u.role !== "client" ? (
+                                  <span className="text-gray-300 text-xs">—</span>
+                                ) : (
+                                  <div className="relative">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        if (!canManageUsers) return;
+                                        const r = e.currentTarget.getBoundingClientRect();
+                                        // keep the popover on-screen: it's up to 224px tall (max-h-56) and 224px wide (w-56)
+                                        setTagMenuPos({
+                                          top: Math.max(8, Math.min(r.bottom + 6, window.innerHeight - 232)),
+                                          left: Math.max(8, Math.min(r.left, window.innerWidth - 232)),
+                                        });
+                                        setTagMenuUserId((cur) => (cur === u.id ? null : u.id));
+                                      }}
+                                      className="flex flex-wrap gap-1 max-w-[220px]"
+                                    >
+                                      {u.allowedTags.length ? (
+                                        u.allowedTags.map((tag) => (
+                                          <span
+                                            key={tag}
+                                            className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200 whitespace-nowrap"
+                                          >
+                                            {tag}
+                                          </span>
+                                        ))
+                                      ) : (
+                                        <span className="text-xs text-red-500">No tags — sees nothing</span>
+                                      )}
+                                    </button>
+                                    {canManageUsers && tagMenuUserId === u.id && (
+                                      <>
+                                        <div className="fixed inset-0 z-40" onClick={() => setTagMenuUserId(null)} />
+                                        <div
+                                          className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-56 max-h-56 overflow-y-auto"
+                                          style={{ top: tagMenuPos.top, left: tagMenuPos.left }}
+                                        >
+                                          {contactTagNames.map((tag) => (
+                                            <label
+                                              key={tag}
+                                              className="flex items-center gap-2 px-1.5 py-1 rounded-md hover:bg-gray-50 text-xs cursor-pointer"
+                                            >
+                                              <input
+                                                type="checkbox"
+                                                checked={u.allowedTags.includes(tag)}
+                                                onChange={() => toggleTeamUserTag(u, tag)}
+                                                className="w-3.5 h-3.5 rounded border-gray-300"
+                                              />
+                                              <span className="truncate">{tag}</span>
+                                            </label>
+                                          ))}
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-gray-500">{u.hasPassword ? "Active" : "Invited"}</td>
+                              <td className="px-4 py-3 text-right">
+                                {canDeleteTeamUser(u.role) && u.id !== authUser?.id && (
+                                  <button
+                                    onClick={() => handleDeleteTeamUser(u.id)}
+                                    className="text-gray-300 hover:text-red-500"
+                                    title="Remove user"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                          {!teamUsersLoading && sectionUsers.length === 0 && (
+                            <tr>
+                              <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
+                                {emptyText}
+                              </td>
+                            </tr>
+                          )}
+                          {teamUsersLoading && (
+                            <tr>
+                              <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-400">
+                                <Loader2 size={14} className="animate-spin inline" />
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+>
               </div>
             </div>
 

@@ -802,8 +802,8 @@ export async function ensureSchema() {
     // catches a brand-new database where Henry's row didn't exist a
     // moment ago) means even a bad edit elsewhere can't strip it or
     // hand it to someone else.
-    await query(`UPDATE users SET role = 'owner' WHERE email = $1 AND role IS DISTINCT FROM 'owner'`, [
-      OWNER_EMAIL,
+    await query(`UPDATE users SET role = 'owner' WHERE email = ANY($1::text[]) AND role IS DISTINCT FROM 'owner'`, [
+      OWNER_EMAILS,
     ]);
   })();
   return schemaReady;
@@ -868,7 +868,9 @@ async function ensureStageColumn() {
 // way default to 'admin' (see the users table's column default) —
 // Henry's is corrected to 'owner' by the self-heal above regardless
 // of what's written here.
-const OWNER_EMAIL = "henryfortunatow@gmail.com";
+// The business account (admin@scalbl.io) is an owner too, so it can
+// always reach Settings → Team and set people to the Client role.
+const OWNER_EMAILS = ["henryfortunatow@gmail.com", "admin@scalbl.io"];
 const INVITED_USERS = [
   { name: "Henry", email: "henryfortunatow@gmail.com" },
   { name: "Jem", email: "jem.scalbl@gmail.com" },
@@ -1244,14 +1246,39 @@ function contactFromRow(r) {
   };
 }
 
+// Internal team comments on a lead — the setter's notes, the closer's
+// notes and the imported NOTE column. A client-role user never gets
+// these, in responses or by writing over them.
+export const INTERNAL_CONTACT_FIELD_KEYS = ["note"];
+
+export function contactForClient(c) {
+  if (!c) return c;
+  const fields = { ...(c.fields || {}) };
+  for (const key of INTERNAL_CONTACT_FIELD_KEYS) delete fields[key];
+  return { ...c, notes: "", closerNotes: "", fields };
+}
+
+export function sanitizeClientContactPatch(patch) {
+  const out = { ...patch };
+  delete out.notes;
+  delete out.closerNotes;
+  delete out.dealOutcome;
+  if (out.fields && typeof out.fields === "object") {
+    out.fields = { ...out.fields };
+    for (const key of INTERNAL_CONTACT_FIELD_KEYS) delete out.fields[key];
+  }
+  return out;
+}
+
 // allowedTags scopes the result to a client-role user's own leads —
 // pass null/undefined for full access (owner/super_admin/admin, and
-// API keys).
+// API keys). Scoped (client) results also have team comments removed.
 export async function getContacts(allowedTags) {
   const rows = allowedTags
     ? await query("SELECT * FROM contacts WHERE tag = ANY($1::text[]) ORDER BY created_at DESC", [allowedTags])
     : await query("SELECT * FROM contacts ORDER BY created_at DESC");
-  return rows.map(contactFromRow);
+  const contacts = rows.map(contactFromRow);
+  return allowedTags ? contacts.map(contactForClient) : contacts;
 }
 
 // Used by the API layer to check a client-role caller's tag access
@@ -1893,7 +1920,9 @@ export async function getCallLog(allowedTags) {
   const rows = allowedTags
     ? await query("SELECT * FROM call_log WHERE tag = ANY($1::text[]) ORDER BY called_at DESC", [allowedTags])
     : await query("SELECT * FROM call_log ORDER BY called_at DESC");
-  return rows.map(callLogFromRow);
+  const entries = rows.map(callLogFromRow);
+  // A client never sees the team's wrap-up notes or which rep called.
+  return allowedTags ? entries.map((e) => ({ ...e, notes: "", userId: null, userName: "" })) : entries;
 }
 
 export async function addCallLogEntry(entry) {
@@ -1959,14 +1988,15 @@ export async function getUsers() {
 }
 
 // Invites a new user (no password yet — they claim the account the
-// same way INVITED_USERS does). role defaults to 'admin'; 'owner' is
+// same way INVITED_USERS does). role defaults to 'client' (least
+// access — staff have to be picked explicitly); 'owner' is
 // rejected here — see server/auth.js, which enforces that only the
 // one hardcoded owner email can ever hold that role.
 export async function inviteUser({ name, email, role, allowedTags }) {
   const rows = await query(
     `INSERT INTO users (name, email, role, allowed_tags) VALUES ($1,$2,$3,$4)
      ON CONFLICT (email) DO NOTHING RETURNING *`,
-    [name, String(email).toLowerCase().trim(), role || "admin", JSON.stringify(allowedTags || [])]
+    [name, String(email).toLowerCase().trim(), role || "client", JSON.stringify(allowedTags || [])]
   );
   return rows[0] ? userFromRow(rows[0]) : null;
 }
@@ -3338,7 +3368,7 @@ export async function getMemoFile(id) {
 export async function getMemoOwner() {
   const rows = await query(
     "SELECT id, name, email FROM users WHERE role = 'owner' ORDER BY (email = $1) DESC, id LIMIT 1",
-    [OWNER_EMAIL]
+    [OWNER_EMAILS[0]]
   );
   return rows[0] ? { id: rows[0].id, name: rows[0].name || rows[0].email } : null;
 }

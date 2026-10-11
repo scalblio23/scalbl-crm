@@ -40,6 +40,8 @@ import {
   getContacts,
   getContactById,
   getContactsByIds,
+  contactForClient,
+  sanitizeClientContactPatch,
   createContact,
   updateContact,
   deleteContacts,
@@ -1283,15 +1285,17 @@ app.post(
     if (allowedTags && (!body.tag || !allowedTags.includes(body.tag))) {
       return res.status(403).json({ error: "You can only add leads under your own tag." });
     }
-    res.status(201).json(await createContact(body));
+    const created = await createContact(allowedTags ? sanitizeClientContactPatch(body) : body);
+    res.status(201).json(allowedTags ? contactForClient(created) : created);
   })
 );
 app.patch(
   "/api/contacts",
   dbRoute(async (req, res) => {
-    const { id, ...patch } = req.body || {};
+    const { id, ...rawPatch } = req.body || {};
     if (!id) return res.status(400).json({ error: "Missing id" });
     const allowedTags = scopeTagsForUser(req.user);
+    const patch = allowedTags ? sanitizeClientContactPatch(rawPatch) : rawPatch;
     if (allowedTags) {
       const existing = await getContactById(id);
       if (!existing || !allowedTags.includes(existing.tag)) {
@@ -1301,7 +1305,7 @@ app.patch(
     }
     const contact = await updateContact(id, patch);
     if (!contact) return res.status(404).json({ error: "Contact not found" });
-    res.json(contact);
+    res.json(allowedTags ? contactForClient(contact) : contact);
   })
 );
 app.delete(
@@ -1436,10 +1440,17 @@ app.delete(
   })
 );
 
-app.get("/api/called-leads", dbRoute(async (req, res) => res.json(await getCalledLeadIds())));
+app.get(
+  "/api/called-leads",
+  dbRoute(async (req, res) => {
+    if (forbidClientRole(req.user, res)) return;
+    res.json(await getCalledLeadIds());
+  })
+);
 app.post(
   "/api/called-leads",
   dbRoute(async (req, res) => {
+    if (forbidClientRole(req.user, res)) return;
     const { leadId } = req.body || {};
     if (!leadId) return res.status(400).json({ error: "Missing leadId" });
     await markLeadCalled(leadId);

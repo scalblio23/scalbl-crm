@@ -1,4 +1,13 @@
-import { ensureSchema, getContacts, getContactById, createContact, updateContact, deleteContacts } from "../server/db.js";
+import {
+  ensureSchema,
+  getContacts,
+  getContactById,
+  createContact,
+  updateContact,
+  deleteContacts,
+  contactForClient,
+  sanitizeClientContactPatch,
+} from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
 import { runAutomationsForTrigger } from "../server/automations.js";
 
@@ -22,7 +31,7 @@ export default async function handler(req, res) {
       if (allowedTags && (!body.tag || !allowedTags.includes(body.tag))) {
         return res.status(403).json({ error: "You can only add leads under your own tag." });
       }
-      const contact = await createContact(body);
+      const contact = await createContact(allowedTags ? sanitizeClientContactPatch(body) : body);
       // Genuinely awaited, not fire-and-forget — waitUntil() only
       // actually extends the function's lifetime when Vercel's
       // runtime has wired up its special request context, which
@@ -36,12 +45,14 @@ export default async function handler(req, res) {
           console.error("[api/contacts] automation trigger failed", err)
         );
       }
-      return res.status(201).json(contact);
+      return res.status(201).json(allowedTags ? contactForClient(contact) : contact);
     }
 
     if (req.method === "PATCH") {
-      const { id, ...patch } = req.body || {};
+      const { id, ...rawPatch } = req.body || {};
       if (!id) return res.status(400).json({ error: "Missing id" });
+      // A client can't read or overwrite the team's comments on a lead.
+      const patch = allowedTags ? sanitizeClientContactPatch(rawPatch) : rawPatch;
       const existing = await getContactById(id);
       if (allowedTags) {
         if (!existing || !allowedTags.includes(existing.tag)) {
@@ -58,7 +69,7 @@ export default async function handler(req, res) {
           console.error("[api/contacts] automation trigger failed", err)
         );
       }
-      return res.status(200).json(contact);
+      return res.status(200).json(allowedTags ? contactForClient(contact) : contact);
     }
 
     if (req.method === "DELETE") {
