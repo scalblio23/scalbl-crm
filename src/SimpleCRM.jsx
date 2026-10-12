@@ -518,6 +518,18 @@ function formatCallDuration(ms) {
 //
 // Days are bucketed on Adelaide time (ACST/ACDT) regardless of where
 // the person viewing the tab is, so the numbers match the reps' day.
+// A booking's start time in a given zone, with the zone named on it
+// (e.g. "Oct 14, 2026, 10:00 AM ACDT") so it's clear whose clock it is.
+// Falls back to the browser's zone if a stored zone name is invalid.
+function formatBookingTime(iso, timeZone) {
+  const opts = { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" };
+  try {
+    return new Date(iso).toLocaleString("en-US", { ...opts, timeZone, timeZoneName: "short" });
+  } catch {
+    return new Date(iso).toLocaleString("en-US", opts);
+  }
+}
+
 const WORK_HOURS_TIMEZONE = "Australia/Adelaide";
 const WORK_HOURS_GAP_MINUTES = 20;
 const WORK_HOURS_MAX_MINUTES_PER_CALL = 6;
@@ -9954,13 +9966,16 @@ export default function SimpleCRM() {
                                     </p>
                                   </div>
                                   <div className="flex items-center gap-3">
-                                    <span className="text-xs text-gray-500">
-                                      {new Date(b.startTime).toLocaleString("en-US", {
-                                        dateStyle: "medium",
-                                        timeStyle: "short",
-                                        timeZone: openCalendar.timezone,
-                                      })}
-                                    </span>
+                                    <div className="text-right">
+                                      <p className="text-xs text-gray-500">
+                                        {formatBookingTime(b.startTime, openCalendar.timezone)}
+                                      </p>
+                                      {b.bookerTimezone && b.bookerTimezone !== openCalendar.timezone && (
+                                        <p className="text-xs text-gray-400">
+                                          Their time: {formatBookingTime(b.startTime, b.bookerTimezone)}
+                                        </p>
+                                      )}
+                                    </div>
                                     {b.status !== "cancelled" && (
                                       <button
                                         onClick={() => cancelCalendarBooking(b.id)}
