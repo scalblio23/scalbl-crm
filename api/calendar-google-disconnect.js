@@ -3,12 +3,11 @@
 // do that from their Google Account's "Third-party access" page if
 // they want to fully revoke rather than just unlink here).
 import { ensureSchema, clearCalendarGoogleTokens, getCalendarById } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, canAccessCalendar } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  if (forbidClientRole(user, res)) return;
   try {
     await ensureSchema();
     if (req.method !== "POST") {
@@ -18,7 +17,7 @@ export default async function handler(req, res) {
     const { calendarId } = req.body || {};
     if (!calendarId) return res.status(400).json({ error: "Missing calendarId" });
     const calendar = await getCalendarById(calendarId);
-    if (!calendar) return res.status(404).json({ error: "Calendar not found" });
+    if (!canAccessCalendar(user, calendar)) return res.status(404).json({ error: "Calendar not found" });
     const updated = await clearCalendarGoogleTokens(calendarId);
     return res.status(200).json(updated);
   } catch (err) {

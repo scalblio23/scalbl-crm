@@ -8,19 +8,19 @@ import {
   cancelCalendarBooking,
   getCalendarById,
 } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, canAccessCalendar } from "../server/auth.js";
 import { getValidAccessToken, deleteGoogleEvent } from "../server/googleCalendar.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-  if (forbidClientRole(user, res)) return;
   try {
     await ensureSchema();
 
     if (req.method === "GET") {
       const calendarId = req.query.calendarId;
       if (!calendarId) return res.status(400).json({ error: "Missing calendarId" });
+      if (!canAccessCalendar(user, await getCalendarById(calendarId))) return res.status(404).json({ error: "Calendar not found" });
       return res.status(200).json(await getCalendarBookings(calendarId));
     }
 
@@ -29,6 +29,9 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: "Missing id" });
       const booking = await getCalendarBookingById(id);
       if (!booking) return res.status(404).json({ error: "Booking not found" });
+      if (!canAccessCalendar(user, await getCalendarById(booking.calendarId))) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
 
       if (booking.googleEventId) {
         const calendar = await getCalendarById(booking.calendarId, { includeSecrets: true });

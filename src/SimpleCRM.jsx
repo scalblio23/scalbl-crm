@@ -2735,7 +2735,7 @@ export default function SimpleCRM() {
   // omitted it, an old cached shape) is treated as a client — a
   // missing field must narrow access, never widen it.
   const isClientRole = Boolean(authUser) && (authUser.role === "client" || !FULL_ACCESS_ROLES.includes(authUser.role));
-  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal"];
+  const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal", "calendars"];
   const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
   // Fetch the CSM tab's code and client list in the background once the
   // app is up (and again on hovering the tab), so opening it doesn't

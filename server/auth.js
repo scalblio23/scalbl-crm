@@ -17,8 +17,9 @@ import { findApiKeyByHash, touchApiKeyLastUsed, getUserById } from "./db.js";
 // super_admin  — all tabs, all lead data, can edit other users
 //                (except the owner) and can't delete the owner.
 // admin        — all tabs, all lead data, can't edit or delete anyone.
-// client       — only Conversation/Contacts/Reports, and only leads
-//                whose tag is in that user's allowedTags.
+// client       — only Conversation/Contacts/Reports/Portal/Calendars,
+//                only leads whose tag is in that user's allowedTags,
+//                and only calendars they own.
 export const ROLES = ["owner", "super_admin", "admin", "client"];
 const FULL_ACCESS_TABS = [
   "memo",
@@ -36,7 +37,7 @@ const FULL_ACCESS_TABS = [
 ];
 // Portal is the client-facing summary screen — a client role sees their
 // own scoped view, everyone else browses it via the client picker.
-const CLIENT_TABS = ["conversation", "contacts", "reports", "portal"];
+const CLIENT_TABS = ["conversation", "contacts", "reports", "portal", "calendars"];
 
 export function tabsForRole(role) {
   return role === "client" ? CLIENT_TABS : FULL_ACCESS_TABS;
@@ -44,6 +45,15 @@ export function tabsForRole(role) {
 
 export function isDataScoped(role) {
   return role === "client";
+}
+
+// Full-access roles manage every calendar; a client only the calendars
+// they own (the ones they created), so one client never sees another
+// client's calendar or bookings.
+export function canAccessCalendar(user, calendar) {
+  if (!calendar) return false;
+  if (!isDataScoped(user.role)) return true;
+  return calendar.ownerUserId != null && Number(calendar.ownerUserId) === Number(user.id);
 }
 
 // Everyone but a client role sees every lead; a client role is scoped
