@@ -793,6 +793,17 @@ export async function ensureSchema() {
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS closer_notes TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deal_outcome TEXT DEFAULT 'Pending'`);
     await migrateLegacyStageToStatus();
+    // Whether a booking has been matched to its lead and marked Booked
+    // (see markContactsBookedForBooking). Existing rows start false so
+    // the sync below catches up everyone who booked before this shipped.
+    await query(
+      `ALTER TABLE calendar_bookings ADD COLUMN IF NOT EXISTS contacts_synced BOOLEAN NOT NULL DEFAULT false`
+    );
+    // Never allowed to fail schema init — a booking it couldn't match
+    // now is retried on the next cold start.
+    await syncBookedContactsFromCalendarBookings().catch((err) =>
+      console.error("[db] booking → contact sync failed", err)
+    );
     await ensureTransferNumberColumn();
     await seedIfEmpty();
     await ensureStageColumn();
@@ -2579,6 +2590,112 @@ export async function createCalendarBooking(b) {
     ]
   );
   return calendarBookingFromRow(rows[0]);
+}
+
+// A lead who books themselves in through a /book/<slug> link (the
+// link an automation texted/emailed them, or the one on the tag's
+// "Booking links by tag" setting) used to stay "New Lead" / "No
+// Answer" on their contact, so setters kept ringing people who were
+// already in the client's calendar. This finds the booker's contact
+// — by phone (Australian-normalised, same as findContactByPhone) or
+// email — and marks it Booked, so the dialler (which skips
+// CLOSED_LEAD_STATUSES) stops queuing it.
+//
+// One person can be a lead under several clients' tags. When some
+// tag's booking link points at this calendar, only matches under
+// those tags are marked; if none of the matches carry such a tag
+// (the link isn't configured, or the lead sits under a differently
+// named tag), every match is marked — a missed call is cheaper than
+// ringing someone who's already booked.
+//
+// onlyOpen limits it to New Lead / No Answer, for the backfill: a
+// lead a setter has since moved to Not Interested stays where they
+// put it. A live booking always wins, since it's the newest signal.
+const BOOKING_PHONE_DIGITS_SQL = `regexp_replace(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), '^(61|0)', '')`;
+
+function bookingLinkPointsAtSlug(link, slug) {
+  const escaped = String(slug).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`/book/${escaped}(?:[/?#]|$)`, "i").test(String(link || ""));
+}
+
+export async function markContactsBookedForBooking(booking, calendar, { onlyOpen = false } = {}) {
+  const phoneDigits = normalizeAuPhoneDigits(booking.contactPhone);
+  const email = String(booking.contactEmail || "").trim().toLowerCase();
+  const usablePhone = phoneDigits.length >= 8 ? phoneDigits : null;
+  const usableEmail = email.includes("@") ? email : null;
+  if (!usablePhone && !usableEmail) return [];
+
+  const matches = await query(
+    `SELECT id, tag, status FROM contacts
+     WHERE ($1::text IS NOT NULL AND ${BOOKING_PHONE_DIGITS_SQL} = $1)
+        OR ($2::text IS NOT NULL AND lower(trim(COALESCE(email, ''))) = $2)`,
+    [usablePhone, usableEmail]
+  );
+  if (!matches.length) return [];
+
+  const links = await getTagBookingLinks();
+  const linkedTags = new Set(
+    Object.entries(links)
+      .filter(([, link]) => bookingLinkPointsAtSlug(link, calendar.slug))
+      .map(([tag]) => tag)
+  );
+  const inLinkedTags = matches.filter((m) => m.tag && linkedTags.has(m.tag));
+  let targets = inLinkedTags.length ? inLinkedTags : matches;
+  if (onlyOpen) targets = targets.filter((m) => m.status === "New Lead" || m.status === "No Answer");
+  targets = targets.filter((m) => m.status !== "Booked");
+  if (!targets.length) return [];
+
+  const when = new Intl.DateTimeFormat("en-AU", {
+    timeZone: calendar.timezone || "UTC",
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(booking.startTime));
+  const note = `Booked via ${calendar.name} for ${when}`;
+  const rows = await query(
+    `UPDATE contacts SET
+       status = 'Booked',
+       last_contact = 'Today',
+       notes = CASE WHEN COALESCE(notes, '') = '' THEN $2 ELSE notes || E'\\n' || $2 END
+     WHERE id = ANY($1::int[])
+     RETURNING *`,
+    [targets.map((t) => t.id), note]
+  );
+  return rows.map(contactFromRow);
+}
+
+export async function setCalendarBookingContactsSynced(id) {
+  await query("UPDATE calendar_bookings SET contacts_synced = true WHERE id = $1", [id]);
+}
+
+// Catches up every confirmed booking that hasn't been matched to its
+// contact yet — the bookings made before markContactsBookedForBooking
+// existed, plus any live one whose sync failed. Each booking is only
+// ever processed once (contacts_synced), so a setter's later change
+// to the contact is never undone by this.
+async function syncBookedContactsFromCalendarBookings() {
+  const rows = await query(
+    `SELECT b.*, c.slug AS calendar_slug, c.name AS calendar_name, c.timezone AS calendar_timezone
+     FROM calendar_bookings b JOIN calendars c ON c.id = b.calendar_id
+     WHERE b.contacts_synced = false AND b.status = 'confirmed'
+     ORDER BY b.created_at ASC`
+  );
+  if (!rows.length) return;
+  let marked = 0;
+  for (const r of rows) {
+    const updated = await markContactsBookedForBooking(
+      calendarBookingFromRow(r),
+      { slug: r.calendar_slug, name: r.calendar_name, timezone: r.calendar_timezone },
+      { onlyOpen: true }
+    );
+    marked += updated.length;
+    await setCalendarBookingContactsSynced(r.id);
+  }
+  console.log(`[db] matched ${rows.length} calendar booking(s) to contacts, marked ${marked} lead(s) Booked`);
 }
 
 export async function setCalendarBookingGoogleEventId(id, googleEventId) {
