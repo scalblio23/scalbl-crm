@@ -493,6 +493,34 @@ function renderDynamicFieldInput(col, value, onChange) {
   );
 }
 
+// Booking start time in a given IANA timezone, with the zone's short
+// name appended (e.g. "Oct 15, 2026, 2:30 PM AEDT"). Falls back to
+// the viewer's local zone if the stored timezone is invalid.
+function formatBookingTime(iso, timeZone) {
+  const opts = { dateStyle: "medium", timeStyle: "short" };
+  const d = new Date(iso);
+  let text;
+  try {
+    text = d.toLocaleString("en-US", { ...opts, timeZone });
+  } catch {
+    timeZone = undefined;
+    text = d.toLocaleString("en-US", opts);
+  }
+  // en-AU knows AEDT/AWST/NZDT, en-US knows EST/PDT; prefer whichever
+  // gives a real abbreviation over a bare "GMT+11".
+  const names = ["en-AU", "en-US"].map((locale) => {
+    try {
+      return new Intl.DateTimeFormat(locale, { timeZone, timeZoneName: "short" })
+        .formatToParts(d)
+        .find((p) => p.type === "timeZoneName")?.value || "";
+    } catch {
+      return "";
+    }
+  });
+  const tzName = names.find((n) => n && !n.startsWith("GMT")) || names[0];
+  return tzName ? `${text} ${tzName}` : text;
+}
+
 function formatCallDuration(ms) {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
   const m = Math.floor(totalSeconds / 60);
@@ -9954,13 +9982,16 @@ export default function SimpleCRM() {
                                     </p>
                                   </div>
                                   <div className="flex items-center gap-3">
-                                    <span className="text-xs text-gray-500">
-                                      {new Date(b.startTime).toLocaleString("en-US", {
-                                        dateStyle: "medium",
-                                        timeStyle: "short",
-                                        timeZone: openCalendar.timezone,
-                                      })}
-                                    </span>
+                                    <div className="text-right">
+                                      <span className="text-xs text-gray-500">
+                                        {formatBookingTime(b.startTime, openCalendar.timezone)}
+                                      </span>
+                                      {b.bookerTimezone && b.bookerTimezone !== openCalendar.timezone && (
+                                        <p className="text-[11px] text-gray-400">
+                                          Booker: {formatBookingTime(b.startTime, b.bookerTimezone)}
+                                        </p>
+                                      )}
+                                    </div>
                                     {b.status !== "cancelled" && (
                                       <button
                                         onClick={() => cancelCalendarBooking(b.id)}

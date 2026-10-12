@@ -11,6 +11,8 @@ import {
   createCalendarBooking,
   setCalendarBookingGoogleEventId,
   getUserById,
+  markContactsBookedForBooking,
+  setCalendarBookingContactsSynced,
 } from "../server/db.js";
 import { getValidAccessToken, getFreeBusy, createGoogleEvent } from "../server/googleCalendar.js";
 import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAvailability.js";
@@ -106,6 +108,17 @@ export default async function handler(req, res) {
         return res.status(409).json({ error: "That time was just booked — please pick another slot." });
       }
       throw err;
+    }
+
+    // Mark the booker's lead Booked so setters stop calling someone
+    // who's already in the calendar. Never fails the booking — if it
+    // throws, contacts_synced stays false and the next cold start's
+    // sync (server/db.js) retries it.
+    try {
+      await markContactsBookedForBooking(booking, calendar);
+      await setCalendarBookingContactsSynced(booking.id);
+    } catch (err) {
+      console.error("[api/calendar-book] failed to mark contact Booked", err);
     }
 
     if (calendar.googleConnected) {
