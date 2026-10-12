@@ -493,6 +493,34 @@ function renderDynamicFieldInput(col, value, onChange) {
   );
 }
 
+// Booking start time in a given IANA timezone, with the zone's short
+// name appended (e.g. "Oct 15, 2026, 2:30 PM AEDT"). Falls back to
+// the viewer's local zone if the stored timezone is invalid.
+function formatBookingTime(iso, timeZone) {
+  const opts = { dateStyle: "medium", timeStyle: "short" };
+  const d = new Date(iso);
+  let text;
+  try {
+    text = d.toLocaleString("en-US", { ...opts, timeZone });
+  } catch {
+    timeZone = undefined;
+    text = d.toLocaleString("en-US", opts);
+  }
+  // en-AU knows AEDT/AWST/NZDT, en-US knows EST/PDT; prefer whichever
+  // gives a real abbreviation over a bare "GMT+11".
+  const names = ["en-AU", "en-US"].map((locale) => {
+    try {
+      return new Intl.DateTimeFormat(locale, { timeZone, timeZoneName: "short" })
+        .formatToParts(d)
+        .find((p) => p.type === "timeZoneName")?.value || "";
+    } catch {
+      return "";
+    }
+  });
+  const tzName = names.find((n) => n && !n.startsWith("GMT")) || names[0];
+  return tzName ? `${text} ${tzName}` : text;
+}
+
 function formatCallDuration(ms) {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
   const m = Math.floor(totalSeconds / 60);
@@ -518,18 +546,6 @@ function formatCallDuration(ms) {
 //
 // Days are bucketed on Adelaide time (ACST/ACDT) regardless of where
 // the person viewing the tab is, so the numbers match the reps' day.
-// A booking's start time in a given zone, with the zone named on it
-// (e.g. "Oct 14, 2026, 10:00 AM ACDT") so it's clear whose clock it is.
-// Falls back to the browser's zone if a stored zone name is invalid.
-function formatBookingTime(iso, timeZone) {
-  const opts = { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" };
-  try {
-    return new Date(iso).toLocaleString("en-US", { ...opts, timeZone, timeZoneName: "short" });
-  } catch {
-    return new Date(iso).toLocaleString("en-US", opts);
-  }
-}
-
 const WORK_HOURS_TIMEZONE = "Australia/Adelaide";
 const WORK_HOURS_GAP_MINUTES = 20;
 const WORK_HOURS_MAX_MINUTES_PER_CALL = 6;
@@ -9967,12 +9983,12 @@ export default function SimpleCRM() {
                                   </div>
                                   <div className="flex items-center gap-3">
                                     <div className="text-right">
-                                      <p className="text-xs text-gray-500">
+                                      <span className="text-xs text-gray-500">
                                         {formatBookingTime(b.startTime, openCalendar.timezone)}
-                                      </p>
+                                      </span>
                                       {b.bookerTimezone && b.bookerTimezone !== openCalendar.timezone && (
-                                        <p className="text-xs text-gray-400">
-                                          Their time: {formatBookingTime(b.startTime, b.bookerTimezone)}
+                                        <p className="text-[11px] text-gray-400">
+                                          Booker: {formatBookingTime(b.startTime, b.bookerTimezone)}
                                         </p>
                                       )}
                                     </div>
