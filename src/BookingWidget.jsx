@@ -16,6 +16,15 @@ function dayLabel(date, timeZone) {
   );
 }
 
+// "Thu" and "1" separately, for the stacked day tiles on phones.
+function weekdayAndDay(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", day: "numeric" }).formatToParts(date);
+  return {
+    weekday: parts.find((p) => p.type === "weekday")?.value || "",
+    day: parts.find((p) => p.type === "day")?.value || "",
+  };
+}
+
 function timeLabel(iso, timeZone) {
   return new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 }
@@ -199,7 +208,7 @@ export default function BookingWidget({ slug }) {
                 <ChevronRight size={18} />
               </button>
             </div>
-            <div className="grid grid-cols-7 gap-1.5 mb-6">
+            <div className="grid grid-cols-7 gap-1 sm:gap-1.5 mb-6">
               {visibleDays.map((d) => {
                 const key = dateKeyInZone(d, timezone);
                 const active = key === selectedDayKey;
@@ -207,21 +216,27 @@ export default function BookingWidget({ slug }) {
                 // the window has actually loaded — don't flash every day
                 // as unavailable while the fetch is still in flight.
                 const unavailable = !loadingSlots && !active && (slotsByDay[key] || []).length === 0;
+                const { weekday, day } = weekdayAndDay(d, timezone);
+                // Phones get a stacked "Thu / 1" tile with a light blue
+                // glow on bookable days; sm and up keep the bordered
+                // "Thu, Oct 1" buttons.
                 return (
                   <button
                     key={key}
                     type="button"
                     onClick={() => setSelectedDayKey(key)}
                     disabled={unavailable}
-                    className={`flex flex-col items-center py-2.5 rounded-lg text-xs font-medium border ${
+                    className={`flex flex-col items-center justify-center py-2 sm:py-2.5 rounded-xl sm:rounded-lg text-xs font-medium border ${
                       active
                         ? "bg-gray-900 text-white border-gray-900"
                         : unavailable
-                        ? "bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed"
-                        : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                        ? "bg-transparent text-gray-300 border-transparent sm:bg-gray-50 sm:border-gray-100 cursor-not-allowed"
+                        : "bg-sky-50 text-slate-600 border-transparent shadow-[0_0_10px_rgba(56,189,248,0.25)] sm:bg-white sm:text-gray-600 sm:border-gray-200 sm:shadow-none hover:border-gray-400"
                     }`}
                   >
-                    {dayLabel(d, timezone)}
+                    <span className="sm:hidden text-[13px] font-medium leading-tight">{weekday}</span>
+                    <span className="sm:hidden text-xl font-normal leading-tight mt-1">{day}</span>
+                    <span className="hidden sm:inline">{dayLabel(d, timezone)}</span>
                   </button>
                 );
               })}
