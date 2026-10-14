@@ -121,6 +121,8 @@ import recordingStatusHandler from "../api/recording-status.js";
 import recordingAudioHandler from "../api/recording-audio.js";
 import csmHandler from "../api/csm.js";
 import memoHandler from "../api/memo.js";
+import proposalsHandler from "../api/proposals.js";
+import proposalPublicHandler from "../api/proposal-public.js";
 import smsThreadsHandler from "../api/sms-threads.js";
 import whatsappHandler from "../api/whatsapp.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
@@ -199,6 +201,9 @@ const PUBLIC_PATHS = new Set([
   "/api/calendar-slots",
   "/api/calendar-book",
   "/api/calendar-cancel",
+  // A proposal's signing link — the token in it is the credential (see
+  // api/proposal-public.js).
+  "/api/proposal-public",
   // Cron-invoked, not user-invoked — authenticated by its own
   // CRON_SECRET bearer-token check instead of a session (see
   // api/automations-process-runs.js).
@@ -245,6 +250,7 @@ app.use(
     "/api/calendar-google-calendars",
     "/api/calendar-bookings",
     "/api/automations",
+    "/api/proposals",
   ],
   (req, res, next) => {
     if (forbidClientRole(req.user, res)) return;
@@ -1481,6 +1487,8 @@ app.all("/api/recording-audio", recordingAudioHandler);
 // CSM tab — does its own auth and client-role check (see api/csm.js).
 app.all("/api/csm", csmHandler);
 app.all("/api/memo", memoHandler);
+app.all("/api/proposals", proposalsHandler);
+app.all("/api/proposal-public", proposalPublicHandler);
 app.all("/api/sms-threads", smsThreadsHandler);
 app.all("/api/whatsapp", whatsappHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
