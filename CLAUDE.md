@@ -9,3 +9,5 @@
   changes, so deploying one on its own wipes out everything else that
   was live.
 - Before pushing, run `npm run build` and make sure it passes.
+- Changing the Production branch is done in Vercel → Settings →
+  Environments → Production → Branch Tracking.
