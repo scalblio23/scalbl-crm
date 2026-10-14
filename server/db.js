@@ -794,6 +794,10 @@ export async function ensureSchema() {
     // closer_notes / deal_outcome are the closer's side of a lead —
     // shown on the kanban card — separate from the setter's pipeline
     // `status`, which is deliberately limited to four values.
+    // users.phone ("Send SMS to user") also lives in the chain above,
+    // which a fully set-up production database skips — so saving a user
+    // failed with "column phone does not exist".
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS closer_notes TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deal_outcome TEXT DEFAULT 'Pending'`);
     await migrateLegacyStageToStatus();

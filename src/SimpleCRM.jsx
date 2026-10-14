@@ -2855,6 +2855,8 @@ export default function SimpleCRM() {
       setTeamUsers((us) => us.map((u) => (u.id === id ? updated : u)));
     } catch (err) {
       setDbError(err.message || "Could not update that user.");
+      // Show what's actually saved rather than a change that didn't stick.
+      loadTeamUsers({ quiet: true });
     }
   };
 
@@ -10517,8 +10519,8 @@ export default function SimpleCRM() {
                   </div>
                 )}
 
-                <div className="mt-5 border border-gray-200 rounded-xl overflow-hidden">
-                  <table className="w-full text-sm">
+                <div className="mt-5 border border-gray-200 rounded-xl overflow-x-auto">
+                  <table className="w-full text-sm whitespace-nowrap">
                     <thead>
                       <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
                         <th className="px-4 py-2.5 font-medium">Name</th>
