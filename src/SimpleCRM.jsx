@@ -1489,16 +1489,33 @@ export default function SimpleCRM() {
   const [addingAutomation, setAddingAutomation] = useState(false);
   const [savingAutomation, setSavingAutomation] = useState(false);
 
+  const [automationsError, setAutomationsError] = useState("");
+  // A failed load used to be swallowed and still count as "loaded", so
+  // one busy-database or cold-start blip left the tab showing "No
+  // automations yet" until a full page refresh. Now it retries a couple
+  // of times, and if it still fails it says so (with Try again) and
+  // stays unloaded, so opening the tab again tries again too.
   const loadAutomations = async () => {
     setAutomationsLoading(true);
-    try {
-      setAutomations(await api.get("/api/automations"));
-    } catch {
-      // list just stays whatever it was — no global banner for this
-    } finally {
-      setAutomationsLoading(false);
-      setAutomationsLoaded(true);
+    setAutomationsError("");
+    const delays = [0, 1000, 3000];
+    let lastErr = null;
+    for (const delay of delays) {
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      try {
+        const list = await api.get("/api/automations");
+        if (!Array.isArray(list)) throw new Error("Unexpected response loading automations");
+        setAutomations(list);
+        setAutomationsLoaded(true);
+        setAutomationsLoading(false);
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (err.status === 401 || err.status === 403) break; // retrying won't help
+      }
     }
+    setAutomationsError(lastErr?.message || "Could not load automations");
+    setAutomationsLoading(false);
   };
 
   useEffect(() => {
@@ -10060,6 +10077,16 @@ export default function SimpleCRM() {
                   {automationsLoading ? (
                     <div className="flex justify-center py-16">
                       <Loader2 className="animate-spin text-gray-400" size={20} />
+                    </div>
+                  ) : automationsError && automations.length === 0 ? (
+                    <div className="text-center py-16 text-sm text-gray-500">
+                      <p className="mb-3">Couldn't load your automations: {automationsError}</p>
+                      <button
+                        onClick={loadAutomations}
+                        className="inline-flex items-center gap-1.5 text-sm px-4 py-2 rounded-lg border border-gray-200 hover:border-gray-400 font-medium"
+                      >
+                        <RefreshCw size={14} /> Try again
+                      </button>
                     </div>
                   ) : automations.length === 0 ? (
                     <div className="text-center py-16 text-sm text-gray-400">
