@@ -10401,6 +10401,9 @@ export default function SimpleCRM() {
                           {automationRuns.map((run) => (
                             <div key={run.id} className="flex items-center justify-between px-4 py-3">
                               <div>
+                                <span className="text-sm font-medium text-gray-900 mr-2">
+                                  {run.context?.contact?.name || run.context?.contact?.email || run.context?.contact?.phone || "Unknown contact"}
+                                </span>
                                 <span
                                   className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
                                     run.status === "done"
