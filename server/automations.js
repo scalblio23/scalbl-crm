@@ -25,9 +25,11 @@ import {
   claimDueAutomationRuns,
   updateAutomationRunProgress,
   getUserById,
+  getPool,
 } from "./db.js";
 import { sendCalendarEmail, missingEmailEnv } from "./email.js";
 import { sendCrazytelSms } from "./crazytelSms.js";
+import { SmsStore } from "./smsStore.js";
 import { parseDids, didsForTags, auToInternational } from "./smsPolicy.js";
 
 // Picks the Crazytel sender for an automation SMS. Same scoping rule
@@ -49,7 +51,10 @@ function pickAutomationDid(context) {
 // use the same sender choice, AU number handling and error reporting.
 // Throws on anything but a confirmed send; advanceAutomationRun()
 // logs that, records it as the run's lastError, and moves on.
-async function sendAutomationSms(to, text, context, stepKey) {
+// `record`: also file the text into the contact's Crazytel SMS thread
+// (Conversations → Crazytel SMS), where their reply lands too. Off for
+// "Send SMS to user" — a heads-up to a team member isn't a conversation.
+async function sendAutomationSms(to, text, context, stepKey, { record = false } = {}) {
   if (!process.env.CRAZYTEL_API_KEY) throw new Error("Crazytel SMS is not configured (CRAZYTEL_API_KEY)");
   const did = pickAutomationDid(context);
   if (!did) throw new Error("No Crazytel sender number available (CRAZYTEL_SMS_DIDS)");
@@ -60,6 +65,14 @@ async function sendAutomationSms(to, text, context, stepKey) {
     // Stable per run + step, so Crazytel dedupes if this step is ever re-sent.
     idempotencyKey: stepKey,
   });
+  if (record) {
+    // Never lets a logging problem turn a sent text into a failed step.
+    try {
+      await new SmsStore(getPool()).recordOutbound(did, to, text, result);
+    } catch (err) {
+      console.error("[automations] sent SMS could not be added to its Crazytel thread", err);
+    }
+  }
   if (result.status !== "queued") throw new Error(`Crazytel SMS ${result.status}: ${result.error}`);
 }
 
@@ -130,7 +143,7 @@ async function runStep(step, automation, context, stepKey) {
     });
   } else if (step.type === "sms") {
     if (!context.contact?.phone) return;
-    await sendAutomationSms(context.contact.phone, fillTemplate(step.body, data), context, stepKey);
+    await sendAutomationSms(context.contact.phone, fillTemplate(step.body, data), context, stepKey, { record: true });
   } else if (step.type === "sms_user") {
     // Texts a team member (e.g. "new booking from {{name}}") rather
     // than the contact. A manually typed number wins — it's the exact

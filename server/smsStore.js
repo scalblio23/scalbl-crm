@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { normalizeNumber, smsError } from './smsPolicy.js';
+import { normalizeNumber, auToInternational, smsError } from './smsPolicy.js';
 
 export function messageView(row) {
   return {id:row.id,text:row.text,outgoing:row.outgoing,status:row.status,createdAt:row.created_at};
@@ -31,7 +31,7 @@ export class SmsStore {
   }
   async match(db,did,remote) {
     const matches=(await this.candidates(db,did)).filter(c=>{
-      try { return normalizeNumber(c.phone)===remote; } catch { return false; }
+      try { return normalizeNumber(auToInternational(c.phone))===remote; } catch { return false; }
     });
     return matches.length===1 ? matches[0] : null;
   }
@@ -45,7 +45,7 @@ export class SmsStore {
     return this.transaction(async db=>{
       const contact=(await this.candidates(db,did)).find(c=>String(c.id)===String(leadId));
       if(!contact) throw smsError(404,'SMS contact not found');
-      const remote=normalizeNumber(contact.phone);
+      const remote=normalizeNumber(auToInternational(contact.phone));
       await this.lock(db,did,remote);
       // Even explicit starts do not incorrectly attach a shared phone to one contact.
       const unique=await this.match(db,did,remote);
@@ -115,6 +115,22 @@ export class SmsStore {
       if(!row) throw smsError(409,'Only unknown SMS outcomes can be reconciled');
       await db.query('INSERT INTO sms_reconciliations(id,message_id,previous_status,resolved_status,provider_id,actor,evidence) VALUES($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),id,row.status,status,providerId,actor,evidence]);
       return (await db.query('UPDATE sms_messages SET status=$2,provider_id=$3,error_code=NULL,updated_at=now() WHERE id=$1 RETURNING *',[id,status,providerId])).rows[0];
+    });
+  }
+  // Files a send that happened outside this inbox (an automation step)
+  // into the same thread a reply from that number lands in, so the
+  // whole back-and-forth reads as one conversation.
+  async recordOutbound(did,to,text,{status,providerId,error}) {
+    return this.transaction(async db=>{
+      const remote=normalizeNumber(auToInternational(to));
+      await this.lock(db,did,remote);
+      const contact=await this.match(db,did,remote);
+      const thread=await this.upsertThread(db,did,remote,contact);
+      const id=randomUUID();
+      await db.query(`INSERT INTO sms_messages(id,thread_id,text,outgoing,status,provider_id,error_code)
+        VALUES($1,$2,$3,true,$4,$5,$6)`,[id,thread.id,text,status,providerId,error]);
+      await db.query('UPDATE sms_threads SET preview=$2,updated_at=now() WHERE id=$1',[thread.id,text]);
+      return {id,threadId:thread.id};
     });
   }
   async receive(event) {

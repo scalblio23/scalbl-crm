@@ -122,6 +122,7 @@ import recordingAudioHandler from "../api/recording-audio.js";
 import csmHandler from "../api/csm.js";
 import memoHandler from "../api/memo.js";
 import smsThreadsHandler from "../api/sms-threads.js";
+import smsCrazytelInboundHandler from "../api/sms-crazytel-inbound.js";
 import whatsappHandler from "../api/whatsapp.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
@@ -173,6 +174,9 @@ const PUBLIC_PATHS = new Set([
   "/api/voice",
   "/api/status",
   "/api/sms-inbound",
+  // Crazytel's Forward Inbound SMS webhook — checks its own ?key= (see
+  // api/sms-crazytel-inbound.js).
+  "/api/sms-crazytel-inbound",
   "/api/auth-login",
   "/api/auth-set-password",
   "/api/auth-logout",
@@ -1488,6 +1492,7 @@ app.all("/api/recording-audio", recordingAudioHandler);
 app.all("/api/csm", csmHandler);
 app.all("/api/memo", memoHandler);
 app.all("/api/sms-threads", smsThreadsHandler);
+app.all("/api/sms-crazytel-inbound", smsCrazytelInboundHandler);
 app.all("/api/whatsapp", whatsappHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
