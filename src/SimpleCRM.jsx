@@ -4369,8 +4369,17 @@ export default function SimpleCRM() {
     // screen — see onCallEnded's `!winner` branch). Nulling it here
     // used to silently drop that call's outcome — no call log, no
     // conversation log — any time "Stop session" was clicked mid-call.
-    // A live transfer in flight goes with it — the third party's leg
-    // gets dropped, and a Powerdialler leg mid-rejoin (see
+    // A live transfer whose third party is already on the line is
+    // handed over instead (same as endCall) — the lead and third party
+    // stay connected, and the call's own end handling logs it once the
+    // handover's done.
+    const t = transferRef.current;
+    if (calling && t && t.targetStatus === "connected" && !t.completed) {
+      completeTransfer();
+      return;
+    }
+    // Any other live transfer in flight goes with it — the third
+    // party's leg gets dropped, and a Powerdialler leg mid-rejoin (see
     // rejoinTransferConference) sees the transfer's gone and bails.
     finishTransferOnCallEnd();
     if (calling) {
@@ -5029,6 +5038,16 @@ export default function SimpleCRM() {
     // logging, and wrap-up, so it only ever happens once no matter how
     // the call ends. Also doubles as "Cancel" on a multi-line dial in
     // progress — same hang-up, just before anyone's answered yet.
+    //
+    // Once a live transfer's third party is on the line, hanging up
+    // means "I'm done here", not "end the call for everyone" — so it
+    // hands the lead over (exactly like "Complete transfer & drop
+    // off") and the lead and third party stay connected.
+    const t = transferRef.current;
+    if (t && t.targetStatus === "connected" && !t.completed) {
+      completeTransfer();
+      return;
+    }
     hangUp();
   };
 
