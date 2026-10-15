@@ -161,6 +161,7 @@ export function createVoiceGateway({
     call.on("dtmf", (digit) => send(rep, { type: "dtmf", callId: call.id, digit }));
     call.once("ended", (info) => {
       if (call.handedOver) return; // the rep already left it (live transfer)
+      if (call.releasedFromRep) return; // the rep hung up and was already told (see hangupAll)
       if (rep.call === call) rep.call = null;
       endTransfer(rep, "hangup");
       send(rep, { type: "call-ended", callId: call.id, ...info, message: endedMessage(info) });
@@ -405,12 +406,33 @@ export function createVoiceGateway({
     finishIfDone();
   }
 
+  // The rep hung up. An answered call ends on the spot, but one still
+  // ringing only finishes once the trunk confirms the CANCEL — and that
+  // can't even be sent until the far end's first provisional response,
+  // so it can take several seconds (up to the 8 s backstop in call.js).
+  // Waiting on that left the rep's "End call" looking dead on those
+  // calls, so the rep is released straight away and the SIP side
+  // finishes cancelling in the background (its own late "ended" is
+  // then ignored by the browser — the call id no longer matches).
   function hangupAll(rep) {
     endTransfer(rep);
-    rep.call?.hangup();
+    const call = rep.call;
+    if (call) {
+      call.hangup();
+      if (rep.call === call && !call.isEnded) {
+        call.releasedFromRep = true;
+        rep.call = null;
+        const info = { reason: "cancelled", status: 0, sipReason: "", cause: 0, durationMs: 0 };
+        send(rep, { type: "call-ended", callId: call.id, ...info, message: endedMessage(info) });
+      }
+    }
     if (rep.multi) {
       const multi = rep.multi;
       for (const leg of multi.legs) leg.call?.hangup();
+      if (rep.multi === multi) {
+        rep.multi = null;
+        send(rep, { type: "multi-ended", ref: multi.ref, cancelled: true });
+      }
     }
   }
 

@@ -381,6 +381,25 @@ test("gateway: browser dials over WebSocket, hears audio, sends audio and DTMF",
   ws.send(JSON.stringify({ type: "dial-multi", ref: "m1", legs: [{ ref: 1, to: "0412000001" }, { ref: 2, to: "0412000002" }] }));
   assert.match((await nextMsg("dial-error")).message, /at least 2 free SIP channels/);
 
+  // Hanging up a call the trunk hasn't responded to yet frees the rep at
+  // once, rather than only after the CANCEL goes through.
+  const silentInvite = trunk.next("invite");
+  ws.send(JSON.stringify({ type: "dial", ref: "r2", to: "0412 345 679" }));
+  const started2 = await nextMsg("call-started");
+  const invite2 = await silentInvite;
+  ws.send(JSON.stringify({ type: "hangup" }));
+  const ended2 = await nextMsg("call-ended", 500);
+  assert.equal(ended2.callId, started2.callId);
+  assert.equal(ended2.reason, "cancelled");
+  // …and the SIP side still finishes cancelling in the background,
+  // without telling the browser about it a second time.
+  trunk.reply(invite2, 100, "Trying");
+  const cancel2 = await trunk.next("cancel", (m) => m.callId === invite2.callId);
+  trunk.reply(cancel2, 200, "OK");
+  trunk.reply(invite2, 487, "Request Terminated", { toTag: newTag() });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(inbox.filter((m) => m.type === "call-ended").length, 0);
+
   ws.close();
   media.close();
   gw.wss.close();
