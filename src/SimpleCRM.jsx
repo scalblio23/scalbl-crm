@@ -968,6 +968,21 @@ const MERGE_FIELDS = [
   { key: "timezone", label: "Timezone" },
 ];
 
+// "15 Oct 2026, 8:10 am ACDT" — automation Recent activity shows the
+// timezone so a send time can't be misread across offices.
+function formatTimeWithZone(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
 
@@ -10425,32 +10440,68 @@ export default function SimpleCRM() {
                         </p>
                       ) : (
                         <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
-                          {automationRuns.map((run) => (
-                            <div key={run.id} className="flex items-center justify-between px-4 py-3">
-                              <div>
-                                <span className="text-sm font-medium text-gray-900 mr-2">
-                                  {run.context?.contact?.name || run.context?.contact?.email || run.context?.contact?.phone || "Unknown contact"}
-                                </span>
-                                <span
-                                  className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
-                                    run.status === "done"
-                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                      : run.status === "failed"
-                                      ? "bg-red-50 text-red-700 border-red-200"
-                                      : "bg-gray-100 text-gray-500 border-gray-200"
-                                  }`}
-                                >
-                                  {run.status === "pending" ? "Waiting" : run.status === "processing" ? "Running" : run.status}
-                                </span>
-                                {run.lastError && <p className="text-xs text-red-500 mt-1">{run.lastError}</p>}
+                          {automationRuns.map((run) => {
+                            const steps = run.steps || [];
+                            return (
+                              <div key={run.id} className="px-4 py-3">
+                                <div className="flex items-center justify-between gap-4">
+                                  <div>
+                                    <span className="text-sm font-medium text-gray-900 mr-2">
+                                      {run.context?.contact?.name || run.context?.contact?.email || run.context?.contact?.phone || "Unknown contact"}
+                                    </span>
+                                    <span
+                                      className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
+                                        run.status === "done"
+                                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                          : run.status === "failed"
+                                          ? "bg-red-50 text-red-700 border-red-200"
+                                          : "bg-gray-100 text-gray-500 border-gray-200"
+                                      }`}
+                                    >
+                                      {run.status === "pending" ? "Waiting" : run.status === "processing" ? "Running" : run.status}
+                                    </span>
+                                    {/* Runs from before the message log existed only have this one line. */}
+                                    {run.lastError && !steps.length && <p className="text-xs text-red-500 mt-1">{run.lastError}</p>}
+                                  </div>
+                                  <span className="text-xs text-gray-400 text-right">
+                                    {run.status === "pending"
+                                      ? `Next step due ${formatTimeWithZone(run.runAt)}`
+                                      : formatTimeWithZone(run.runAt)}
+                                  </span>
+                                </div>
+                                {steps.length > 0 && (
+                                  <div className="mt-2 space-y-2">
+                                    {steps.map((s, i) => (
+                                      <div key={i} className="border-l-2 border-gray-200 pl-3">
+                                        <div className="flex flex-wrap items-center gap-x-2 text-xs">
+                                          <span
+                                            className={`font-semibold ${
+                                              s.status === "sent" ? "text-emerald-700" : s.status === "failed" ? "text-red-600" : "text-amber-600"
+                                            }`}
+                                          >
+                                            {s.status === "sent" ? "✓ Sent" : s.status === "failed" ? "✕ Failed" : "Skipped"}
+                                          </span>
+                                          <span className="text-gray-600">
+                                            {s.type === "email" ? "Email" : "SMS"}
+                                            {s.type === "sms_user" ? ` to team member${s.to ? ` ${s.to}` : ""}` : s.to ? ` to ${s.to}` : ""}
+                                          </span>
+                                          {s.at && <span className="text-gray-400">· {formatTimeWithZone(s.at)}</span>}
+                                        </div>
+                                        {s.text && (
+                                          <p className="text-xs text-gray-700 bg-gray-50 rounded-md px-2.5 py-1.5 mt-1 whitespace-pre-wrap break-words">
+                                            {s.text}
+                                          </p>
+                                        )}
+                                        {s.error && (
+                                          <p className={`text-xs mt-1 ${s.status === "failed" ? "text-red-500" : "text-amber-600"}`}>{s.error}</p>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                              <span className="text-xs text-gray-400">
-                                {run.status === "pending"
-                                  ? `Next step due ${new Date(run.runAt).toLocaleString()}`
-                                  : new Date(run.runAt).toLocaleString()}
-                              </span>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>

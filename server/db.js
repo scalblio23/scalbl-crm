@@ -210,6 +210,10 @@ export async function ensureSchema() {
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'calendars' AND column_name = 'video_conference_link'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'automation_runs' AND column_name = 'step_log'
         ) AS exists
     `);
     if (!exists) {
@@ -605,6 +609,10 @@ export async function ensureSchema() {
     // more "wait" cycles reflects the original trigger time, not the
     // current step). See reapStuckAutomationRuns below.
     await query(`ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
+    // One entry per message a run sends (or fails/skips) — who it went
+    // to, the exact text, the outcome and when — for the builder's Recent
+    // activity. Appended by appendAutomationRunStep below.
+    await query(`ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS step_log JSONB NOT NULL DEFAULT '[]'`);
     // ---------- Tag folders ----------
     // Purely organizational — a tag is still just free text on a
     // contact (see contacts.tag), never owned by a folder at the
@@ -2702,7 +2710,18 @@ function automationRunFromRow(r) {
     runAt: r.run_at,
     status: r.status,
     lastError: r.last_error,
+    steps: Array.isArray(r.step_log) ? r.step_log : [],
+    createdAt: r.created_at,
   };
+}
+
+// Adds one entry to a run's step_log: { step, type, to, text, status
+// ('sent' | 'failed' | 'skipped'), error, at }.
+export async function appendAutomationRunStep(id, entry) {
+  await query("UPDATE automation_runs SET step_log = step_log || $2::jsonb WHERE id = $1", [
+    id,
+    JSON.stringify([entry]),
+  ]);
 }
 
 export async function createAutomationRun({ automationId, context, runAt }) {

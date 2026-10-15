@@ -24,6 +24,7 @@ import {
   claimAutomationRunById,
   claimDueAutomationRuns,
   updateAutomationRunProgress,
+  appendAutomationRunStep,
   getUserById,
   getPool,
 } from "./db.js";
@@ -73,7 +74,13 @@ async function sendAutomationSms(to, text, context, stepKey, { record = false } 
       console.error("[automations] sent SMS could not be added to its Crazytel thread", err);
     }
   }
-  if (result.status !== "queued") throw new Error(`Crazytel SMS ${result.status}: ${result.error}`);
+  if (result.status === "failed") {
+    // e.g. provider_http_422 — Crazytel refused it outright (bad number, no credit, auth).
+    throw new Error(`Crazytel rejected the SMS (${result.error.replace("provider_http_", "HTTP ")})`);
+  }
+  if (result.status !== "queued") {
+    throw new Error(`Crazytel didn't confirm the SMS was sent (${result.error}) — check the Crazytel portal before resending`);
+  }
 }
 
 function fillTemplate(text, data) {
@@ -119,7 +126,9 @@ function computeWaitRunAt(step, context) {
 // feature's own confirmation sends. SMS config problems and Crazytel
 // rejections throw instead, so advanceAutomationRun() logs them and
 // records lastError, then carries on with the next step.
-async function runStep(step, automation, context, stepKey) {
+// `log` is filled in as the step goes (to, text, skipped) so the run's
+// step log can say exactly what was sent, even when the send throws.
+async function runStep(step, automation, context, stepKey, log = {}) {
   const data = {
     name: context.contact?.name || "",
     email: context.contact?.email || "",
@@ -135,20 +144,26 @@ async function runStep(step, automation, context, stepKey) {
     timezone: context.timezone || "",
   };
   if (step.type === "email") {
-    if (!context.contact?.email || missingEmailEnv().length) return;
+    log.to = context.contact?.email || "";
+    log.text = fillTemplate(step.subject, data) || automation.name;
+    if (!context.contact?.email) { log.skipped = "Contact has no email address"; return; }
+    if (missingEmailEnv().length) { log.skipped = "Email sending is not set up"; return; }
     await sendCalendarEmail({
       to: context.contact.email,
-      subject: fillTemplate(step.subject, data) || automation.name,
+      subject: log.text,
       html: fillTemplate(step.body, data).replace(/\n/g, "<br/>"),
     });
   } else if (step.type === "sms") {
-    if (!context.contact?.phone) return;
-    await sendAutomationSms(context.contact.phone, fillTemplate(step.body, data), context, stepKey, { record: true });
+    log.to = context.contact?.phone || "";
+    log.text = fillTemplate(step.body, data);
+    if (!context.contact?.phone) { log.skipped = "Contact has no phone number"; return; }
+    await sendAutomationSms(context.contact.phone, log.text, context, stepKey, { record: true });
   } else if (step.type === "sms_user") {
     // Texts a team member (e.g. "new booking from {{name}}") rather
     // than the contact. A manually typed number wins — it's the exact
     // number asked for; otherwise the picked user's saved phone.
     const manual = String(step.phone || "").trim();
+    log.text = fillTemplate(step.body, data);
     let to = manual;
     let who = manual;
     if (!to && step.userId) {
@@ -164,10 +179,22 @@ async function runStep(step, automation, context, stepKey) {
           : "Send SMS to user: no user picked and no manual number is set"
       );
     }
-    await sendAutomationSms(to, fillTemplate(step.body, data), context, stepKey);
+    log.to = who && who !== to ? `${who} (${to})` : to;
+    await sendAutomationSms(to, log.text, context, stepKey);
   }
   // "call" isn't executed automatically yet — see its disabled option
   // in the Automations builder UI.
+}
+
+const LOGGED_STEP_TYPES = new Set(["email", "sms", "sms_user"]);
+
+// Best-effort: a failure to write the log never changes what the run does.
+async function recordStep(runId, entry) {
+  try {
+    await appendAutomationRunStep(runId, { ...entry, at: new Date().toISOString() });
+  } catch (err) {
+    console.error(`[automations] run ${runId}: could not record step`, err);
+  }
 }
 
 // Moves one claimed/newly-created run forward as far as it can go
@@ -206,17 +233,29 @@ export async function advanceAutomationRun(run) {
           const note = `Step ${index + 2}: skipped – reminder time already passed`;
           console.log(`[automations] "${automation.name}" run ${run.id}: ${note}`);
           await updateAutomationRunProgress(run.id, { lastError: note });
+          await recordStep(run.id, {
+            step: index + 2,
+            type: actions[index + 1]?.type || null,
+            status: "skipped",
+            error: "Reminder time had already passed",
+          });
           index += 2;
           continue;
         }
         await updateAutomationRunProgress(run.id, { nextStepIndex: index + 1, runAt, status: "pending" });
         return;
       }
+      const log = { step: index + 1, type: step.type };
       try {
-        await runStep(step, automation, run.context, `automation-run-${run.id}-step-${index}`);
+        await runStep(step, automation, run.context, `automation-run-${run.id}-step-${index}`, log);
+        if (LOGGED_STEP_TYPES.has(step.type)) {
+          await recordStep(run.id, { ...log, status: log.skipped ? "skipped" : "sent", error: log.skipped || null, skipped: undefined });
+        }
       } catch (err) {
         console.error(`[automations] "${automation.name}" step ${index} failed`, err);
-        await updateAutomationRunProgress(run.id, { lastError: String(err.message || err).slice(0, 500) });
+        const message = String(err.message || err).slice(0, 500);
+        await updateAutomationRunProgress(run.id, { lastError: message });
+        await recordStep(run.id, { ...log, status: "failed", error: message, skipped: undefined });
       }
       index += 1;
     }
