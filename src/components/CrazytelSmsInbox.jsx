@@ -63,6 +63,7 @@ export default function CrazytelSmsInbox({ active, contacts }) {
   const [reload, setReload] = useState(0);
   const [search, setSearch] = useState("");
   const [showNew, setShowNew] = useState(false);
+  const [contactSearch, setContactSearch] = useState("");
   const messagesEnd = useRef(null);
   const mutationBusy = useRef(false);
   const attempts = useRef(new Map());
@@ -133,6 +134,7 @@ export default function CrazytelSmsInbox({ active, contacts }) {
       setSelectedId(result.thread.id);
       setShowNew(false);
       setLeadId("");
+      setContactSearch("");
       setReload((value) => value + 1);
     } catch (err) { setError(smsError(err)); }
     finally { mutationBusy.current = false; setBusy(false); }
@@ -174,7 +176,18 @@ export default function CrazytelSmsInbox({ active, contacts }) {
   const visibleThreads = q
     ? threads.filter((t) => [t.name, t.remoteNumber, t.preview].some((v) => String(v || "").toLowerCase().includes(q)))
     : threads;
-  const phonedContacts = contacts.filter((c) => c.phone);
+  // "New" contact search: name, or any part of the number (spaces and +61/0 ignored).
+  const cq = contactSearch.trim().toLowerCase();
+  const cDigits = cq.replace(/\D/g, "").replace(/^(61|0)/, "");
+  const contactMatches = cq
+    ? contacts
+        .filter((c) => c.phone)
+        .filter((c) =>
+          String(c.name || "").toLowerCase().includes(cq) ||
+          (cDigits.length >= 3 && String(c.phone).replace(/\D/g, "").includes(cDigits))
+        )
+        .slice(0, 20)
+    : [];
   return (
     <section aria-label="Crazytel SMS inbox" className="flex flex-1 overflow-hidden">
       <div className="w-80 border-r border-gray-200 flex flex-col">
@@ -212,17 +225,39 @@ export default function CrazytelSmsInbox({ active, contacts }) {
                 {fromNumbers.map((number) => <option key={number} value={number}>From {number}</option>)}
               </select>
             )}
-            <select
-              autoFocus
-              aria-label="Text a contact"
-              value={leadId}
-              disabled={busy}
-              onChange={(event) => { setLeadId(event.target.value); if (event.target.value) start(event.target.value); }}
-              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
-            >
-              <option value="" disabled>Text a contact…</option>
-              {phonedContacts.map((c) => <option key={c.id} value={c.id}>{c.name || c.id} — {c.phone}</option>)}
-            </select>
+            <div className="relative">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                autoFocus
+                aria-label="Search contacts to text"
+                value={contactSearch}
+                disabled={busy}
+                onChange={(event) => setContactSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setShowNew(false);
+                  if (event.key === "Enter" && contactMatches.length === 1) start(contactMatches[0].id);
+                }}
+                placeholder="Search a contact by name or number…"
+                className="w-full border border-gray-200 rounded-lg pl-8 pr-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+              />
+            </div>
+            {contactSearch.trim() && (
+              <div className="max-h-64 overflow-y-auto bg-white border border-gray-200 rounded-lg divide-y divide-gray-50">
+                {contactMatches.length === 0 && <p className="px-3 py-2 text-xs text-gray-400">No contacts with a phone number match.</p>}
+                {contactMatches.map((c) => (
+                  <button
+                    type="button"
+                    key={c.id}
+                    disabled={busy}
+                    onClick={() => start(c.id)}
+                    className="block w-full text-left px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    <div className="text-sm font-medium truncate">{c.name || c.phone}</div>
+                    <div className="text-xs text-gray-400 truncate">{c.phone}</div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
         <div className="px-4 py-2.5 border-b border-gray-100">
