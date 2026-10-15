@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Circle, Loader2, Plus, RefreshCw, Search, X } from "lucide-react";
 import { api } from "../lib/api";
 
 // Boundary helpers: keep browser-supplied phone numbers out of reply requests.
@@ -36,6 +37,16 @@ export function formatSmsTime(value) {
   return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : "Time unavailable";
 }
 
+// "8:52 AM" for today, "15 Oct" otherwise — same feel as the legacy inbox list.
+function shortSmsTime(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  return date.toDateString() === today.toDateString()
+    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : date.toLocaleDateString([], { day: "numeric", month: "short" });
+}
+
 // React view
 export default function CrazytelSmsInbox({ active, contacts }) {
   const [threads, setThreads] = useState([]);
@@ -50,6 +61,9 @@ export default function CrazytelSmsInbox({ active, contacts }) {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
+  const [search, setSearch] = useState("");
+  const [showNew, setShowNew] = useState(false);
+  const messagesEnd = useRef(null);
   const mutationBusy = useRef(false);
   const attempts = useRef(new Map());
   const selected = threads.find((thread) => thread.id === selectedId);
@@ -106,18 +120,19 @@ export default function CrazytelSmsInbox({ active, contacts }) {
     } catch (err) { setError(smsError(err)); }
   };
 
-  const start = async (event) => {
-    event.preventDefault();
+  const start = async (pickedLeadId) => {
     if (mutationBusy.current) return;
     mutationBusy.current = true;
     setBusy(true);
     setError("");
     try {
-      const payload = createStartPayload(leadId, fromNumber, contacts, fromNumbers);
+      const payload = createStartPayload(pickedLeadId, fromNumber || fromNumbers[0], contacts, fromNumbers);
       const result = await api.post("/api/sms-threads", payload);
       if (!result?.thread?.id || result.error) throw new Error("Thread unavailable");
       setThreads((items) => [result.thread, ...items.filter((item) => item.id !== result.thread.id)]);
       setSelectedId(result.thread.id);
+      setShowNew(false);
+      setLeadId("");
       setReload((value) => value + 1);
     } catch (err) { setError(smsError(err)); }
     finally { mutationBusy.current = false; setBusy(false); }
@@ -148,76 +163,176 @@ export default function CrazytelSmsInbox({ active, contacts }) {
     } finally { mutationBusy.current = false; setBusy(false); }
   };
 
+  // Keep the newest message in view, like any chat.
+  const messageCount = selected?.messages?.length || 0;
+  useEffect(() => {
+    messagesEnd.current?.scrollIntoView({ block: "end" });
+  }, [selectedId, messageCount]);
+
   if (!active) return null;
-  const fieldClass = "border border-gray-300 rounded px-3 py-2 text-sm bg-white disabled:opacity-50";
+  const q = search.trim().toLowerCase();
+  const visibleThreads = q
+    ? threads.filter((t) => [t.name, t.remoteNumber, t.preview].some((v) => String(v || "").toLowerCase().includes(q)))
+    : threads;
+  const phonedContacts = contacts.filter((c) => c.phone);
   return (
-    <section aria-label="Crazytel SMS inbox" className="flex flex-1 min-h-0 flex-col">
-      <div className="p-4 border-b space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <div><h2 className="font-semibold">Crazytel SMS</h2>
-            <p className="text-xs text-gray-500">Separate SMS threads. Legacy inbox, calls, recordings and Twilio sending are unchanged.</p>
-            <p className="text-xs text-amber-700">Texts sent by automations and replies forwarded by Crazytel appear here. Queued does not mean delivered.</p></div>
-          <button type="button" className={fieldClass} onClick={() => setReload((value) => value + 1)} disabled={loading}>Refresh</button>
+    <section aria-label="Crazytel SMS inbox" className="flex flex-1 overflow-hidden">
+      <div className="w-80 border-r border-gray-200 flex flex-col">
+        <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
+          <span className="font-semibold">Conversations</span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setReload((value) => value + 1)}
+              disabled={loading}
+              aria-label="Refresh"
+              className="text-gray-500 hover:text-gray-900 disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowNew((v) => !v)}
+              disabled={!fromNumbers.length}
+              className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 disabled:opacity-40"
+            >
+              <Plus size={13} /> New
+            </button>
+          </div>
         </div>
-        <form onSubmit={start} className="flex flex-wrap gap-2 items-center">
-          <label className="text-xs">Contact
-            <select aria-label="Crazytel contact" value={leadId} onChange={(event) => setLeadId(event.target.value)} className={`${fieldClass} ml-2`}>
-              <option value="">Select contact…</option>
-              {contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name || contact.id}</option>)}
+        {showNew && (
+          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 space-y-2">
+            {fromNumbers.length > 1 && (
+              <select
+                aria-label="Send from"
+                value={fromNumber || fromNumbers[0]}
+                onChange={(event) => setFromNumber(event.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+              >
+                {fromNumbers.map((number) => <option key={number} value={number}>From {number}</option>)}
+              </select>
+            )}
+            <select
+              autoFocus
+              aria-label="Text a contact"
+              value={leadId}
+              disabled={busy}
+              onChange={(event) => { setLeadId(event.target.value); if (event.target.value) start(event.target.value); }}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+            >
+              <option value="" disabled>Text a contact…</option>
+              {phonedContacts.map((c) => <option key={c.id} value={c.id}>{c.name || c.id} — {c.phone}</option>)}
             </select>
-          </label>
-          <label className="text-xs">From (owned DID)
-            <select aria-label="Crazytel sending DID" value={fromNumber} onChange={(event) => setFromNumber(event.target.value)} className={`${fieldClass} ml-2`}>
-              <option value="">Select owned number…</option>
-              {fromNumbers.map((number) => <option key={number} value={number}>{number}</option>)}
-            </select>
-          </label>
-          <button className={fieldClass} disabled={busy || !!loadError || !contacts.some((contact) => String(contact.id) === leadId) || !fromNumbers.includes(fromNumber)}>Start SMS thread</button>
-          <span className="text-xs text-gray-500">Destination comes from the saved contact. Save numbers in international format, e.g. +614…</span>
-        </form>
-        {!loading && !loadError && !fromNumbers.length && <p className="text-sm text-amber-700">No owned Crazytel sending numbers are configured. New SMS threads are unavailable.</p>}
-        {loading && <p role="status" className="text-xs text-gray-500">Refreshing SMS threads…</p>}
-        {loadError && <p role="alert" className="text-sm text-red-700">{loadError} Previously loaded messages may be out of date.</p>}
-        {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-      </div>
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        <div aria-label="Crazytel SMS threads" className="w-72 max-w-[40%] shrink-0 border-r overflow-y-auto">
-          {!loading && !loadError && !threads.length && <p className="p-4 text-sm text-gray-500">No Crazytel SMS threads yet.</p>}
-          {threads.map((thread) => (
+          </div>
+        )}
+        <div className="px-4 py-2.5 border-b border-gray-100">
+          <div className="relative">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Escape") setSearch(""); }}
+              placeholder="Search conversations…"
+              className="w-full border border-gray-200 rounded-lg pl-8 pr-8 py-2 text-sm outline-none focus:border-gray-400"
+            />
+            {search && (
+              <button type="button" onClick={() => setSearch("")} aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+        {loadError && <p role="alert" className="px-4 py-2 text-xs text-red-600 border-b border-gray-100">{loadError}</p>}
+        {!loadError && !loading && !fromNumbers.length && (
+          <p className="px-4 py-2 text-xs text-amber-700 border-b border-gray-100">No Crazytel sending numbers are set up, so new conversations can't be started.</p>
+        )}
+        <div aria-label="Crazytel SMS threads" className="flex-1 overflow-y-auto">
+          {!loading && !loadError && !threads.length && (
+            <div className="px-4 py-10 text-center text-sm text-gray-400">
+              No conversations yet — texts from automations and replies will appear here, or start one with "New".
+            </div>
+          )}
+          {threads.length > 0 && !visibleThreads.length && (
+            <div className="px-4 py-10 text-center text-sm text-gray-400">No conversations match "{search.trim()}".</div>
+          )}
+          {visibleThreads.map((thread) => (
             <button type="button" key={thread.id} onClick={() => markRead(thread)} aria-pressed={selectedId === thread.id}
-              className={`block w-full p-4 border-b text-left text-sm ${selectedId === thread.id ? "bg-blue-50" : "hover:bg-gray-50"}`}>
-              <div className="font-medium break-words">{thread.name || "Unknown sender"} {thread.unread ? <span className="text-blue-700">• Unread</span> : null}</div>
-              <div className="text-xs text-gray-500 break-all">Local: {thread.localNumber}<br />Remote: {thread.remoteNumber}</div>
-              <p className="truncate mt-1">{thread.preview}</p>
-              <p className="text-xs text-gray-500">{formatSmsTime(thread.updatedAt)}</p>
+              className={`block w-full text-left px-4 py-3 border-b border-gray-50 hover:bg-gray-50 ${selectedId === thread.id ? "bg-gray-50" : ""}`}>
+              <div className="flex justify-between items-center gap-2">
+                <span className={`text-sm truncate ${thread.unread ? "font-semibold" : "font-medium"}`}>{thread.name || thread.remoteNumber}</span>
+                <span className="text-xs text-gray-400 shrink-0">{shortSmsTime(thread.updatedAt)}</span>
+              </div>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                {thread.unread && <Circle size={7} className="fill-blue-500 text-blue-500 shrink-0" />}
+                <span className="text-xs text-gray-500 truncate">{thread.preview}</span>
+              </div>
             </button>
           ))}
         </div>
+      </div>
+      <div className="flex-1 min-w-0 flex flex-col">
         {selected ? (
-          <div className="flex-1 min-w-0 flex flex-col">
-            <div className="p-4 border-b text-sm">
-              <h3 className="font-semibold">{selected.name || "Unknown sender"}</h3>
-              <p className="break-all">Local DID: {selected.localNumber} · Remote: {selected.remoteNumber}</p>
-              <p className="text-xs text-gray-500">Sends use this thread’s selected local DID.</p>
+          <>
+            <div className="px-6 py-4 border-b border-gray-100">
+              <div className="font-semibold">{selected.name || selected.remoteNumber}</div>
+              {selected.name && selected.name !== selected.remoteNumber && (
+                <div className="text-xs text-gray-400">{selected.remoteNumber}</div>
+              )}
             </div>
-            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3" aria-label="Crazytel messages">
-              {(selected.messages || []).map((message) => (
-                <div key={message.id} className={`max-w-lg rounded-lg p-3 text-sm ${message.outgoing ? "ml-auto bg-blue-50" : "bg-gray-100"}`}>
-                  <p className="whitespace-pre-wrap break-words">{message.text}</p>
-                  <p className="text-xs text-gray-500 mt-1">{message.outgoing ? "Outgoing" : "Incoming"} · {message.status || "Status unavailable"} · {formatSmsTime(message.createdAt)}</p>
-                </div>
-              ))}
+            <div className="flex-1 p-6 space-y-3 overflow-y-auto bg-gray-50/50" aria-label="Crazytel messages">
+              {(selected.messages || []).map((message) => {
+                const problem = message.status === "failed" ? "Not sent" : message.status === "unknown" ? "Not confirmed" : message.status === "sending" ? "Sending…" : "";
+                return (
+                  <div key={message.id} className={`flex flex-col ${message.outgoing ? "items-end" : "items-start"}`}>
+                    <div className={`max-w-xs rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap break-words ${
+                      message.outgoing ? "bg-gray-900 text-white rounded-tr-sm" : "bg-gray-100 rounded-tl-sm"
+                    }`}>
+                      {message.text}
+                    </div>
+                    <span className="text-[11px] text-gray-400 mt-1 px-1" title={formatSmsTime(message.createdAt)}>
+                      {shortSmsTime(message.createdAt)}
+                      {problem && <span className="text-red-500"> · {problem}</span>}
+                    </span>
+                  </div>
+                );
+              })}
+              <div ref={messagesEnd} />
             </div>
-            <form onSubmit={send} className="p-4 border-t space-y-2">
-              {attempt && !busy && <p role="status" className="text-sm text-amber-700">Unconfirmed send retained. Text is locked so a manual retry uses the same request ID; do not compose a duplicate.</p>}
-              <label className="block text-sm" htmlFor="crazytel-message">Message</label>
-              <textarea id="crazytel-message" rows={3} maxLength={1600} value={draft} disabled={busy || !!attempt}
-                onChange={(event) => setDrafts((items) => ({ ...items, [selectedId]: event.target.value }))}
-                className={`${fieldClass} w-full`} />
-              <button className={fieldClass} disabled={busy || !!loadError || !draft.trim()}>{busy ? "Working…" : attempt ? "Retry same send" : "Send via Crazytel"}</button>
+            <form onSubmit={send} className="p-4 border-t border-gray-100 flex flex-col gap-1.5">
+              {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+              {attempt && !busy && (
+                <p role="status" className="text-xs text-amber-700">
+                  That send wasn't confirmed. The text is kept as-is — check the thread before pressing Retry, to avoid a duplicate.
+                </p>
+              )}
+              <div className="flex gap-2">
+                <input
+                  id="crazytel-message"
+                  aria-label="Message"
+                  maxLength={1600}
+                  value={draft}
+                  disabled={busy || !!attempt}
+                  onChange={(event) => setDrafts((items) => ({ ...items, [selectedId]: event.target.value }))}
+                  placeholder="Type a message…"
+                  className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 disabled:bg-gray-50 disabled:text-gray-400"
+                />
+                <button
+                  disabled={busy || !!loadError || !draft.trim()}
+                  className="flex items-center justify-center bg-gray-900 text-white text-sm px-5 rounded-lg font-medium min-w-[72px] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {busy ? <Loader2 size={15} className="animate-spin" /> : attempt ? "Retry" : "Send"}
+                </button>
+              </div>
+              <div className="text-xs text-gray-400">Sent as an SMS via Crazytel from {selected.localNumber}</div>
             </form>
+          </>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center gap-2 text-sm text-gray-400">
+            {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+            {threads.length ? "Select a conversation" : "No conversations yet"}
           </div>
-        ) : <p className="p-6 text-sm text-gray-500">Select a Crazytel SMS thread or start one with a contact.</p>}
+        )}
       </div>
     </section>
   );
