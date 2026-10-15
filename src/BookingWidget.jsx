@@ -135,6 +135,10 @@ export default function BookingWidget({ slug }) {
         ...form,
       });
       setConfirmation(result);
+      // Let a page embedding this widget (e.g. a landing page) know a booking
+      // went through, so it can fire its own tracking such as a Meta Pixel
+      // Schedule event. No contact details are sent.
+      if (window.parent !== window) window.parent.postMessage({ type: "scalbl:booked", slug }, "*");
     } catch (err) {
       setBookError(err.message || "Could not complete the booking.");
     } finally {
