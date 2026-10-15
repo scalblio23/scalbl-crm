@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { getSmsRuntime } from "../server/smsRuntime.js";
 import { normalizeNumber, auToInternational } from "../server/smsPolicy.js";
 
@@ -9,8 +9,9 @@ import { normalizeNumber, auToInternational } from "../server/smsPolicy.js";
 // webhook to this URL). The reply goes into the same thread as the
 // texts we sent that contact (Conversations → Crazytel SMS).
 //
-// Crazytel's forwarding payload isn't publicly documented, so the field
-// names below cover the common spellings; anything we can't read is
+// Pick "JSON web request" as the SMS route type; it POSTs
+// {"from":"614...","to":"614...","text":"..."}. Other common spellings
+// are accepted too; anything we can't read is
 // logged in full ("[sms-crazytel-inbound] unrecognized payload") so the
 // mapping can be fixed from one real example.
 
@@ -81,9 +82,11 @@ export default async function handler(req, res) {
 
   const providerId = first(msg, ["uuid", "id", "message_id", "messageId", "sms_id", "MessageSid"]);
   const receiptHash = createHash("sha256").update(JSON.stringify([from, to, text])).digest("hex");
-  const eventId = providerId
-    ? `crazytel:${providerId}`
-    : `crazytel-hash:${createHash("sha256").update(JSON.stringify(msg)).digest("hex")}`;
+  // Crazytel's JSON web request carries no message id. Without one, two
+  // identical replies ("Yes" ... "Yes") are separate messages, so each
+  // delivery gets its own id — a failed save rolls back entirely, so a
+  // Crazytel retry after an error doesn't double up.
+  const eventId = providerId ? `crazytel:${providerId}` : `crazytel-noid:${randomUUID()}`;
   const ts = first(msg, ["timestamp", "received_at", "receivedAt", "date", "created_at"]);
   const parsedTs = ts ? new Date(/^\d+$/.test(ts) ? Number(ts) * (ts.length <= 10 ? 1000 : 1) : ts) : null;
   const receivedAt = parsedTs && !Number.isNaN(parsedTs.getTime()) ? parsedTs : new Date();
