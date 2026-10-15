@@ -306,7 +306,7 @@ export default function AIVoicePanel() {
         )}
       </div>
 
-      <div className="p-8 max-w-2xl mx-auto space-y-5">
+      <div className="p-4 md:p-8 max-w-2xl mx-auto space-y-5">
         {settings === null && !settingsError && (
           <div className="flex items-center gap-2 text-sm text-gray-400">
             <Loader2 size={14} className="animate-spin" />

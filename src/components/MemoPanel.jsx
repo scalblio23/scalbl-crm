@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Paperclip, Search, Send, Upload, Users, X } from "lucide-react";
+import { ArrowLeft, Loader2, Paperclip, Search, Send, Upload, Users, X } from "lucide-react";
 import { api } from "../lib/api";
 import {
   Attachments,
@@ -56,6 +56,8 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
   const [chats, setChats] = useState({}); // { [convKey]: messages }
   const [loadingChat, setLoadingChat] = useState(false);
   const [search, setSearch] = useState("");
+  // Phone width shows one pane at a time: the chat list, or the open chat.
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [preparingFiles, setPreparingFiles] = useState(0);
@@ -282,7 +284,11 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
   return (
     <div className="flex-1 flex min-h-0">
       {/* Chats */}
-      <aside className="w-72 shrink-0 border-r border-gray-100 flex flex-col min-h-0 bg-gray-50/50">
+      <aside
+        className={`w-full md:w-72 shrink-0 border-r border-gray-100 flex-col min-h-0 bg-gray-50/50 ${
+          mobileChatOpen ? "hidden md:flex" : "flex"
+        }`}
+      >
         <div className="px-4 pt-5 pb-3">
           <h1 className="text-xl font-bold">Inbox</h1>
           <div className="text-xs text-gray-400 mt-0.5">Team chats — admins and setters only</div>
@@ -310,7 +316,10 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
             return (
               <button
                 key={c.key}
-                onClick={() => setSelectedKey(c.key)}
+                onClick={() => {
+                  setSelectedKey(c.key);
+                  setMobileChatOpen(true);
+                }}
                 className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-left mb-0.5 ${
                   on ? "bg-white shadow-sm border border-gray-200" : "hover:bg-white border border-transparent"
                 }`}
@@ -348,7 +357,7 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
 
       {/* Chat */}
       <section
-        className="flex-1 flex flex-col min-w-0 min-h-0 relative"
+        className={`flex-1 flex-col min-w-0 min-h-0 relative ${mobileChatOpen ? "flex" : "hidden md:flex"}`}
         onDragOver={(e) => {
           if (!e.dataTransfer?.types?.includes("Files")) return;
           e.preventDefault();
@@ -384,7 +393,14 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
           </div>
         ) : (
           <>
-            <header className="px-6 py-4 border-b border-gray-100 flex items-center gap-3">
+            <header className="px-4 md:px-6 py-4 border-b border-gray-100 flex items-center gap-3">
+              <button
+                onClick={() => setMobileChatOpen(false)}
+                aria-label="Back to chats"
+                className="md:hidden -ml-1 p-1 rounded text-gray-500 hover:bg-gray-100"
+              >
+                <ArrowLeft size={18} />
+              </button>
               <span
                 className={`w-9 h-9 shrink-0 rounded-full text-xs font-semibold flex items-center justify-center ${
                   selected.kind === "team" ? "bg-gray-900 text-white" : "bg-gray-200 text-gray-600"
@@ -400,7 +416,7 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
               </div>
             </header>
 
-            <div className="flex-1 overflow-y-auto px-6 py-5">
+            <div className="flex-1 overflow-y-auto px-4 md:px-6 py-5">
               {loadingChat ? (
                 <div className="flex items-center gap-2 text-sm text-gray-400">
                   <Loader2 size={14} className="animate-spin" /> Loading…
@@ -460,7 +476,7 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
               <div ref={endRef} />
             </div>
 
-            <div className="border-t border-gray-100 px-6 py-4">
+            <div className="border-t border-gray-100 px-4 md:px-6 py-4">
               {(attachments.length > 0 || preparingFiles > 0) && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {attachments.map((a) => (
@@ -524,7 +540,7 @@ export default function MemoPanel({ currentUserId = null, active = true, onUnrea
                   }}
                   rows={2}
                   placeholder={`Message ${selected.kind === "team" ? "the team" : selected.name}… (Enter to send, Shift+Enter for a new line)`}
-                  className="flex-1 resize-none border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-gray-400"
+                  className="flex-1 min-w-0 resize-none border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-gray-400"
                 />
                 <button
                   onClick={send}

@@ -238,9 +238,9 @@ export default function BookingWidget({ slug }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 px-4 py-10">
+    <div className="min-h-screen bg-gray-50 px-3 sm:px-4 py-6 sm:py-10">
       <div className="max-w-3xl mx-auto bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-        <div className="px-6 py-5 border-b border-gray-100 flex items-start justify-between gap-4">
+        <div className="px-4 sm:px-6 py-5 border-b border-gray-100 flex flex-col sm:flex-row items-start justify-between gap-4">
           <div>
             <h1 className="text-lg font-bold flex items-center gap-2">
               <CalendarDays size={18} className="text-gray-400" /> {calendarInfo.name}
@@ -248,14 +248,14 @@ export default function BookingWidget({ slug }) {
             {calendarInfo.description && <p className="text-sm text-gray-500 mt-1">{calendarInfo.description}</p>}
             <p className="text-xs text-gray-400 mt-1">{calendarInfo.eventLengthMinutes} minute call</p>
           </div>
-          <div className="w-56 shrink-0">
+          <div className="w-full sm:w-56 shrink-0">
             <label className="text-xs font-medium block mb-1.5 text-gray-500">Choose Your Timezone</label>
             <Dropdown value={timezone} onChange={setTimezone} options={tzOptions} searchable />
           </div>
         </div>
 
         {!selectedSlot ? (
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <button
                 onClick={() => setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; })}
