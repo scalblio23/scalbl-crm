@@ -77,20 +77,6 @@ export const PROPOSAL_CSS = `
 .sp-tags{display:flex;gap:8px;margin:6px 0 18px;flex-wrap:wrap}
 .sp-tags span{background:#eceaea;font-size:12.5px;padding:3px 8px;border-radius:4px;color:#333}
 .sp-r-actions{display:flex;gap:22px;font-size:14px;color:#555;align-items:center;margin-bottom:20px}
-.sp-video{position:relative;margin:4px 10px 6px;aspect-ratio:16/9;background:linear-gradient(90deg,#3d3d3d,#2a2a2a 30%,#1d1d1d 70%,#333);overflow:hidden;font-family:Roboto,Arial,sans-serif;display:block}
-.sp-video .portrait{position:absolute;left:34%;width:32%;top:0;bottom:0;background:linear-gradient(180deg,#59524d,#3b3530 55%,#2b2622)}
-.sp-video.alt .portrait{background:linear-gradient(180deg,#2b4a63 0,#1d2e3d 40%,#151515 75%)}
-.sp-video .vt{position:absolute;left:14px;top:12px;display:flex;gap:10px;align-items:center;color:#fff}
-.sp-video .vt i{width:30px;height:30px;border-radius:50%;background:radial-gradient(circle at 50% 40%,#bbb 0 25%,#666 26%);display:block}
-.sp-video .vt b{font-size:17px;display:block;font-weight:500}
-.sp-video .vt small{font-size:10px;opacity:.85}
-.sp-video .play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:58px;height:40px;background:#f00;border-radius:12px;display:grid;place-items:center}
-.sp-video .play::after{content:"";border-left:15px solid #fff;border-top:9px solid transparent;border-bottom:9px solid transparent;margin-left:3px}
-.sp-video .bl{position:absolute;left:14px;bottom:12px;display:flex;gap:6px;background:rgba(0,0,0,.55);border-radius:18px;padding:6px 10px}
-.sp-video .bl span{width:20px;height:20px;border:2px solid #ddd;border-radius:50%;display:block;opacity:.85}
-.sp-video .br{position:absolute;right:14px;bottom:12px;background:rgba(0,0,0,.6);color:#fff;border-radius:18px;padding:7px 12px;font-size:14px;display:flex;gap:6px;align-items:center}
-.sp-video .br em{font-style:normal;font-weight:700;letter-spacing:-.4px;display:inline-flex;align-items:center;gap:3px}
-.sp-video .br em::before{content:"";width:18px;height:13px;background:#f00;border-radius:3px;display:inline-block}
 .sp-tos{padding:12px 10px 0;font-size:14.5px;line-height:1.5}
 .sp-tos h3{font-size:14.5px;margin:20px 0 2px;font-weight:700}
 .sp-paper .sp-tos p{margin:0 0 10px;font-size:14.5px}
@@ -122,29 +108,6 @@ function Stars() {
       {[0, 1, 2, 3, 4].map((i) => (
         <span key={i}>{STAR}</span>
       ))}
-    </div>
-  );
-}
-
-function Video({ title, alt, label }) {
-  return (
-    <div className={`sp-video${alt ? " alt" : ""}`} aria-label={label}>
-      <div className="portrait" />
-      <div className="vt">
-        <i />
-        <div>
-          <b>{title}</b>
-          <small>Henry Fortunatow</small>
-        </div>
-      </div>
-      <div className="play" />
-      <div className="bl">
-        <span />
-        <span />
-      </div>
-      <div className="br">
-        Watch on <em>YouTube</em>
-      </div>
     </div>
   );
 }
@@ -268,7 +231,6 @@ export default function ProposalDocument({ name, amount, period, signBlock, docR
           <span>⚑</span>
         </div>
       </div>
-      <Video title="Brian Kearney - Testimonial" label="Brian Kearney testimonial video" />
 
       <div className="sp-who">Jordan Burkett - My Reno Quotes NZ</div>
       <div className="sp-review">
@@ -305,7 +267,6 @@ export default function ProposalDocument({ name, amount, period, signBlock, docR
           <span>⚑</span>
         </div>
       </div>
-      <Video title="Jordan Burkett Testimonial" alt label="Jordan Burkett testimonial video" />
 
       <div className="sp-band" style={{ marginTop: 20 }}>
         Terms of Service
