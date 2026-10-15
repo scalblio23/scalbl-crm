@@ -5696,6 +5696,11 @@ export default function SimpleCRM() {
                 : "First time here? Set your password"}
             </button>
           </form>
+          <div className="mt-4 text-center">
+            <a href="/privacypolicy" className="text-[11px] text-gray-400 hover:text-gray-600">
+              Privacy Policy
+            </a>
+          </div>
         </div>
       </div>
     );
@@ -5864,6 +5869,9 @@ export default function SimpleCRM() {
             <LogOut size={14} />
           </button>
         </div>
+        <a href="/privacypolicy" className="px-5 pb-3 text-[11px] text-gray-300 hover:text-gray-500">
+          Privacy Policy
+        </a>
       </aside>
 
       {/* Secondary sidebar — narrower + a touch darker than the main
