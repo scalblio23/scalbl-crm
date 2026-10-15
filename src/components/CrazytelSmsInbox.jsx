@@ -156,7 +156,7 @@ export default function CrazytelSmsInbox({ active, contacts }) {
         <div className="flex items-center justify-between gap-3">
           <div><h2 className="font-semibold">Crazytel SMS</h2>
             <p className="text-xs text-gray-500">Separate SMS threads. Legacy inbox, calls, recordings and Twilio sending are unchanged.</p>
-            <p className="text-xs text-amber-700">Inbound replies are not connected to this CRM yet. Outbound sends only; queued does not mean delivered.</p></div>
+            <p className="text-xs text-amber-700">Texts sent by automations and replies forwarded by Crazytel appear here. Queued does not mean delivered.</p></div>
           <button type="button" className={fieldClass} onClick={() => setReload((value) => value + 1)} disabled={loading}>Refresh</button>
         </div>
         <form onSubmit={start} className="flex flex-wrap gap-2 items-center">
