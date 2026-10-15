@@ -48,6 +48,7 @@ import {
   Send,
   Layers,
   HeartHandshake,
+  FileSignature,
   Inbox,
   Bell,
   Play,
@@ -103,6 +104,7 @@ const MemoPanel = lazy(loadMemoPanel);
 const loadAIVoicePanel = () => import("./components/AIVoicePanel");
 const CsmPanel = lazy(loadCsmPanel);
 const AIVoicePanel = lazy(loadAIVoicePanel);
+const ProposalsPanel = lazy(() => import("./components/ProposalsPanel"));
 const TabLoading = () => <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Loading…</div>;
 import RecordingPlayer from "./components/RecordingPlayer";
 import {
@@ -928,6 +930,7 @@ const navItems = [
   { key: "working-hours", label: "Working Hours", icon: Clock },
   { key: "clients", label: "Clients", icon: Briefcase },
   { key: "csm", label: "CSM", icon: HeartHandshake },
+  { key: "proposals", label: "Proposals", icon: FileSignature },
   { key: "calendars", label: "Calendars", icon: Calendar },
   { key: "automations", label: "Automations", icon: Zap },
   { key: "ai-voice", label: "AI Voice", icon: Bot },
@@ -11189,6 +11192,13 @@ export default function SimpleCRM() {
         {page === "ai-voice" && (
           <Suspense fallback={<TabLoading />}>
             <AIVoicePanel />
+          </Suspense>
+        )}
+        {/* Team only — a client role never gets the nav item, and the
+            API refuses them too (api/proposals.js). */}
+        {page === "proposals" && !isClientRole && (
+          <Suspense fallback={<TabLoading />}>
+            <ProposalsPanel />
           </Suspense>
         )}
         {(page === "memo" || memoMounted) && !isClientRole && (

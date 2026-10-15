@@ -199,6 +199,7 @@ export async function ensureSchema() {
         AND to_regclass('public.memo_messages') IS NOT NULL
         AND to_regclass('public.memo_files') IS NOT NULL
         AND to_regclass('public.memo_seen') IS NOT NULL
+        AND to_regclass('public.proposals') IS NOT NULL
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'memo_messages' AND column_name = 'via'
@@ -782,6 +783,27 @@ export async function ensureSchema() {
       )
     `);
     await query(`CREATE INDEX IF NOT EXISTS csm_mentions_unread_idx ON csm_mentions (user_id) WHERE read_at IS NULL`);
+    // Proposals tab: one row per proposal sent to a lead. `token` is the
+    // secret in its public signing link (/proposal/<token>); status goes
+    // pending → signed (the lead signs) → finished (an admin closes it).
+    await query(`
+      CREATE TABLE IF NOT EXISTS proposals (
+        id SERIAL PRIMARY KEY,
+        token TEXT NOT NULL UNIQUE,
+        client_name TEXT NOT NULL DEFAULT '',
+        company TEXT NOT NULL DEFAULT '',
+        amount TEXT NOT NULL DEFAULT '',
+        period INTEGER NOT NULL DEFAULT 3,
+        status TEXT NOT NULL DEFAULT 'pending',
+        signature_image TEXT,
+        signed_date TEXT,
+        signed_at TIMESTAMPTZ,
+        signer_ip TEXT,
+        created_by INTEGER,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
     // The starting client list — only into an empty table, so a client
     // removed later doesn't come back.
     await query(
@@ -3507,4 +3529,78 @@ export async function getMemoOwner() {
     [OWNER_EMAIL]
   );
   return rows[0] ? { id: rows[0].id, name: rows[0].name || rows[0].email } : null;
+}
+
+// ---------- Proposals ----------
+// See api/proposals.js (the admin side) and api/proposal-public.js
+// (the lead's signing link).
+export const PROPOSAL_STATUSES = ["pending", "signed", "finished"];
+
+function proposalFromRow(r, { withSignature = false } = {}) {
+  const p = {
+    id: r.id,
+    token: r.token,
+    name: r.client_name,
+    company: r.company,
+    amount: r.amount,
+    period: r.period,
+    status: r.status,
+    signedDate: r.signed_date || "",
+    signedAt: r.signed_at,
+    createdAt: r.created_at,
+    createdByName: r.created_by_name || null,
+  };
+  if (withSignature) p.signatureImage = r.signature_image || null;
+  return p;
+}
+
+export async function getProposals() {
+  const rows = await query(
+    `SELECT p.id, p.token, p.client_name, p.company, p.amount, p.period, p.status, p.signed_date,
+            p.signed_at, p.created_at, u.name AS created_by_name
+       FROM proposals p LEFT JOIN users u ON u.id = p.created_by
+      ORDER BY p.created_at DESC`
+  );
+  return rows.map((r) => proposalFromRow(r));
+}
+
+export async function createProposal({ name, company, amount, period, createdBy }) {
+  const rows = await query(
+    `INSERT INTO proposals (token, client_name, company, amount, period, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [crypto.randomBytes(18).toString("base64url"), name, company, amount, period, createdBy || null]
+  );
+  return proposalFromRow(rows[0]);
+}
+
+export async function setProposalStatus(id, status) {
+  const rows = await query(
+    "UPDATE proposals SET status = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    [id, status]
+  );
+  return rows[0] ? proposalFromRow(rows[0]) : null;
+}
+
+export async function deleteProposal(id) {
+  await query("DELETE FROM proposals WHERE id = $1", [id]);
+}
+
+export async function getProposalByToken(token) {
+  const rows = await query("SELECT * FROM proposals WHERE token = $1", [token]);
+  return rows[0] ? proposalFromRow(rows[0], { withSignature: true }) : null;
+}
+
+// Only a still-pending proposal can be signed, and only once — the
+// WHERE clause makes two signings racing each other a no-op for the
+// second. Returns null when it wasn't pending (already signed, or gone).
+export async function signProposal(token, { image, date, ip }) {
+  const rows = await query(
+    `UPDATE proposals
+        SET status = 'signed', signature_image = $2, signed_date = $3, signed_at = now(),
+            signer_ip = $4, updated_at = now()
+      WHERE token = $1 AND status = 'pending'
+      RETURNING *`,
+    [token, image, date, ip || null]
+  );
+  return rows[0] ? proposalFromRow(rows[0], { withSignature: true }) : null;
 }
