@@ -60,17 +60,57 @@ export class SmsStore {
     if(thread.lead_id && !(await this.candidates(db,did)).some(c=>c.id===thread.lead_id)) throw smsError(404,'SMS thread not found');
     return {thread,did};
   }
+  // The thread's name is looked up from Contacts on every load rather than
+  // trusted from when the thread was created, so saving a contact for a
+  // number renames its thread straight away (and deleting one shows the
+  // number again). Same scope rules as authorizedThread: a contact is only
+  // visible through a DID whose tags it carries (or the admin scope), and a
+  // thread linked to a contact outside that scope stays hidden.
   async list(dids) {
     if(!dids.length) return [];
     const threads=(await this.pool.query(`SELECT * FROM sms_threads WHERE (scope_key,local_number) IN
       (SELECT * FROM unnest($1::text[],$2::text[])) ORDER BY updated_at DESC,id`,[dids.map(d=>d.scopeKey),dids.map(d=>d.number)])).rows;
-    const output=[];
+    if(!threads.length) return [];
+    const byDid=new Map();
     for(const row of threads) {
-      try { await this.authorizedThread(this.pool,row.id,dids); } catch(e) { if(e.status===404) continue; throw e; }
-      const messages=(await this.pool.query('SELECT * FROM sms_messages WHERE thread_id=$1 ORDER BY created_at,id',[row.id])).rows;
-      output.push({...threadView(row),messages:messages.map(messageView)});
+      const did=dids.find(d=>d.number===row.local_number && d.scopeKey===row.scope_key);
+      if(!did) continue;
+      if(!byDid.has(did)) byDid.set(did,[]);
+      byDid.get(did).push(row);
     }
-    return output;
+    const visible=[];
+    for(const [did,rows] of byDid) {
+      // Narrowed in SQL by the last 9 digits (format-agnostic), then matched exactly below.
+      const tails=[...new Set(rows.map(r=>r.remote_number.slice(-9)))];
+      const leadIds=rows.map(r=>r.lead_id).filter(Boolean);
+      const contacts=(await this.pool.query(`SELECT id,name,phone FROM contacts
+        WHERE ($1::boolean OR tag=ANY($2::text[]))
+          AND (right(regexp_replace(coalesce(phone,''),'[^0-9]','','g'),9)=ANY($3::text[]) OR id=ANY($4::int[]))
+        ORDER BY id`,[Boolean(did.adminScope),did.allowedTags,tails,leadIds])).rows;
+      const inScope=new Set(contacts.map(c=>c.id));
+      const byNumber=new Map();
+      for(const c of contacts) {
+        let number;
+        try { number=normalizeNumber(auToInternational(c.phone)); } catch { continue; }
+        if(!byNumber.has(number)) byNumber.set(number,[]);
+        byNumber.get(number).push(c);
+      }
+      for(const row of rows) {
+        if(row.lead_id && !inScope.has(row.lead_id)) continue;
+        const matches=byNumber.get(row.remote_number)||[];
+        // Several contacts share the number: keep the one already linked, else the oldest.
+        const contact=matches.find(c=>c.id===row.lead_id)||matches[0]||null;
+        visible.push({...row,lead_id:contact?contact.id:null,name:contact?.name?.trim()||row.remote_number});
+      }
+    }
+    const ids=visible.map(r=>r.id);
+    const messages=(await this.pool.query('SELECT * FROM sms_messages WHERE thread_id=ANY($1::uuid[]) ORDER BY created_at,id',[ids])).rows;
+    const byThread=new Map(ids.map(id=>[id,[]]));
+    for(const m of messages) byThread.get(m.thread_id)?.push(messageView(m));
+    // Keep the newest-first order from the thread query.
+    const order=new Map(threads.map((t,i)=>[t.id,i]));
+    visible.sort((x,y)=>order.get(x.id)-order.get(y.id));
+    return visible.map(row=>({...threadView(row),messages:byThread.get(row.id)}));
   }
   async read(id,dids) {
     return this.transaction(async db=>{
