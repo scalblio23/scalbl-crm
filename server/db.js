@@ -214,6 +214,10 @@ export async function ensureSchema() {
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'automation_runs' AND column_name = 'step_log'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'calendars' AND column_name = 'meta_pixel_id'
         ) AS exists
     `);
     if (!exists) {
@@ -526,6 +530,10 @@ export async function ensureSchema() {
     // after the booker's name in the Google event title and sets it as
     // the event's location — there's no per-booking way to override it.
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS video_conference_link TEXT`);
+    // Meta (Facebook) Pixel ID for this calendar's public booking page.
+    // When set, src/BookingWidget.jsx loads the pixel and fires a
+    // standard "Schedule" event once a booking is confirmed.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS meta_pixel_id TEXT`);
     // One row per booked slot on a calendar. booker_timezone is the
     // timezone the visitor had selected in the widget at booking time
     // (purely for display in the confirmation email/SMS — start_time/
@@ -2389,6 +2397,7 @@ function calendarFromRow(r, { includeSecrets = false } = {}) {
     maxBookingsPerDay: r.max_bookings_per_day,
     availability: r.availability || {},
     videoConferenceLink: r.video_conference_link || "",
+    metaPixelId: r.meta_pixel_id || "",
     googleConnected: r.google_connected,
     googleEmail: r.google_email,
     googleCalendarId: r.google_calendar_id || "primary",
@@ -2474,7 +2483,8 @@ export async function updateCalendar(id, patch) {
        availability = COALESCE($11::jsonb, availability),
        active = COALESCE($12, active),
        google_calendar_id = COALESCE($13, google_calendar_id),
-       video_conference_link = COALESCE($14, video_conference_link)
+       video_conference_link = COALESCE($14, video_conference_link),
+       meta_pixel_id = COALESCE($15, meta_pixel_id)
      WHERE id = $1
      RETURNING *`,
     [
@@ -2492,6 +2502,7 @@ export async function updateCalendar(id, patch) {
       patch.active ?? null,
       patch.googleCalendarId ?? null,
       patch.videoConferenceLink ?? null,
+      patch.metaPixelId ?? null,
     ]
   );
   return rows[0] ? calendarFromRow(rows[0]) : null;

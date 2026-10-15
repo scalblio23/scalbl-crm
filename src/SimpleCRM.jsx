@@ -938,13 +938,33 @@ const navItems = [
 // → Booking rules → Share & embed, per the sidebar tab → Add Calendar →
 // Calendar settings → options flow.
 const CALENDAR_SETTINGS_SECTIONS = [
+  { key: "general", label: "General", icon: Settings },
   { key: "integrate", label: "Integrate", icon: Globe },
   { key: "timezone", label: "Timezone", icon: Clock },
   { key: "availability", label: "Availability", icon: Calendar },
   { key: "rules", label: "Booking rules", icon: ListChecks },
   { key: "video", label: "Video conference", icon: Video },
+  { key: "tracking", label: "Tracking", icon: BarChart3 },
   { key: "share", label: "Share & embed", icon: Link2 },
 ];
+
+// Share & embed's embed code: the iframe plus a small listener so the
+// booking's Meta Pixel "Schedule" event fires on the host page itself
+// (see the scalbl:* postMessage handshake in src/BookingWidget.jsx).
+// The pixel ID comes from the booked message, not this snippet, so
+// changing it in Tracking doesn't require re-embedding.
+function bookingEmbedCode(slug) {
+  const origin = window.location.origin;
+  return `<iframe src="${origin}/book/${slug}" width="100%" height="700" frameborder="0"></iframe>
+<script>
+(function(){var O="${origin}";window.addEventListener("message",function(e){if(e.origin!==O||!e.data)return;var d=e.data;
+if(d.type==="scalbl:ready"){e.source.postMessage({type:"scalbl:parent-tracking"},O);return}
+if(d.type!=="scalbl:booked"||!d.metaPixelId)return;
+!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version="2.0";n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,"script","https://connect.facebook.net/en_US/fbevents.js");
+var ids=window.fbq.instance&&window.fbq.instance.pixelsByID;if(!ids||!ids[d.metaPixelId])fbq("init",d.metaPixelId);
+fbq("trackSingle",d.metaPixelId,"Schedule",{content_name:d.calendarName},{eventID:d.eventId});});})();
+</script>`;
+}
 
 // Automations — a trigger + an ordered chain of actions, same linear
 // shape as GoHighLevel's workflow builder (see server/automations.js
@@ -1392,6 +1412,8 @@ export default function SimpleCRM() {
   const [availabilityDraft, setAvailabilityDraft] = useState(null);
   const [rulesDraft, setRulesDraft] = useState(null);
   const [videoDraft, setVideoDraft] = useState(null);
+  const [calendarNameDraft, setCalendarNameDraft] = useState("");
+  const [metaPixelDraft, setMetaPixelDraft] = useState("");
   useEffect(() => {
     if (!openCalendar) return;
     setAvailabilityDraft(openCalendar.availability);
@@ -1403,6 +1425,8 @@ export default function SimpleCRM() {
       maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
+    setCalendarNameDraft(openCalendar.name);
+    setMetaPixelDraft(openCalendar.metaPixelId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCalendar?.id]);
 
@@ -9739,6 +9763,35 @@ export default function SimpleCRM() {
                   </div>
 
                   <div className="flex-1 p-8">
+                    {calendarSettingsTab === "general" && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">General</h2>
+                          <button
+                            onClick={() => patchCalendar(openCalendar.id, { name: calendarNameDraft.trim() })}
+                            disabled={
+                              savingCalendar || !calendarNameDraft.trim() || calendarNameDraft.trim() === openCalendar.name
+                            }
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Calendar name</label>
+                          <input
+                            value={calendarNameDraft}
+                            onChange={(e) => setCalendarNameDraft(e.target.value)}
+                            placeholder="e.g. Sales Call"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Shown on the booking page and in event titles. The booking link stays the same.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
                     {calendarSettingsTab === "integrate" && (
                       <div className="max-w-lg space-y-4">
                         <h2 className="text-base font-bold">Integrate with Google</h2>
@@ -9984,6 +10037,50 @@ export default function SimpleCRM() {
                       </div>
                     )}
 
+                    {calendarSettingsTab === "tracking" && (
+                      <div className="max-w-sm space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-base font-bold">Tracking</h2>
+                          <button
+                            onClick={() => {
+                              // Accept a pasted pixel snippet too — pull the ID out of fbq('init', '…').
+                              const raw = metaPixelDraft.trim();
+                              const fromSnippet = raw.match(/fbq\(\s*['"]init['"]\s*,\s*['"](\d+)['"]/);
+                              const metaPixelId = fromSnippet ? fromSnippet[1] : raw.replace(/\s+/g, "");
+                              setMetaPixelDraft(metaPixelId);
+                              patchCalendar(openCalendar.id, { metaPixelId });
+                            }}
+                            disabled={savingCalendar}
+                            className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <p className="text-sm text-gray-500">
+                          Add your Meta Pixel ID and the booking page loads the pixel automatically, firing a{" "}
+                          <span className="font-medium text-gray-700">Schedule</span> event every time someone books a
+                          call on this calendar.
+                        </p>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Meta Pixel ID</label>
+                          <input
+                            value={metaPixelDraft}
+                            onChange={(e) => setMetaPixelDraft(e.target.value)}
+                            placeholder="e.g. 1234567890123456"
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Find it in Meta Events Manager → Data sources. Leave blank and save to turn tracking off.
+                          </p>
+                        </div>
+                        {openCalendar.metaPixelId && (
+                          <p className="text-xs text-emerald-600 flex items-center gap-1">
+                            <CheckCircle2 size={12} /> Tracking “Schedule” events on pixel {openCalendar.metaPixelId}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
                     {calendarSettingsTab === "share" && (
                       <div className="max-w-xl space-y-6">
                         <div>
@@ -10011,21 +10108,20 @@ export default function SimpleCRM() {
                         <div>
                           <h2 className="text-base font-bold mb-2">Embed</h2>
                           <p className="text-sm text-gray-500 mb-3">
-                            Paste this into any website to embed the booking widget directly.
+                            Paste this into any website to embed the booking widget directly. The script fires the
+                            Meta Pixel “Schedule” event (Tracking) on your page when someone books.
                           </p>
                           <div className="flex items-start gap-2">
                             <textarea
                               readOnly
-                              rows={3}
-                              value={`<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`}
+                              rows={6}
+                              value={bookingEmbedCode(openCalendar.slug)}
                               onFocus={(e) => e.target.select()}
                               className="flex-1 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none bg-gray-50 font-mono"
                             />
                             <button
                               onClick={() =>
-                                navigator.clipboard.writeText(
-                                  `<iframe src="${window.location.origin}/book/${openCalendar.slug}" width="100%" height="700" frameborder="0"></iframe>`
-                                )
+                                navigator.clipboard.writeText(bookingEmbedCode(openCalendar.slug))
                               }
                               className="flex items-center gap-1.5 border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
                             >
