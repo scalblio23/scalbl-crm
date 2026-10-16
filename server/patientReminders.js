@@ -43,13 +43,41 @@ export function workflowFor(calendar) {
   return (calendar && WORKFLOWS[calendar.confirmationWorkflow]) || null;
 }
 
+// Base for the patient's links. PUBLIC_URL wins; otherwise Vercel's
+// production domain (VERCEL_PROJECT_PRODUCTION_URL, set automatically
+// on every deployment) rather than the per-deployment VERCEL_URL that
+// publicBaseUrl() falls back to — per-deployment URLs can sit behind
+// Vercel's login (Deployment Protection), which would break every
+// reschedule/cancel link a patient taps.
+export function patientLinkBase(env = process.env) {
+  if (env.PUBLIC_URL) return env.PUBLIC_URL.replace(/\/+$/, "");
+  if (env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${env.VERCEL_PROJECT_PRODUCTION_URL.replace(/\/+$/, "")}`;
+  return publicBaseUrl(env);
+}
+
+// Twilio only accepts E.164 ("+614…") — it never infers a country —
+// but patients type numbers the Australian way ("0412 345 678"). Those
+// are converted; anything already international is left alone, and
+// anything unrecognisable is passed through for Twilio to reject (which
+// is then logged as a failed reminder, never silently dropped).
+export function toSendableNumber(raw) {
+  const s = String(raw || "").trim();
+  if (s.startsWith("+")) return `+${s.slice(1).replace(/\D/g, "")}`;
+  const d = s.replace(/\D/g, "");
+  if (/^00\d{8,15}$/.test(d)) return `+${d.slice(2)}`;
+  if (/^0[2-478]\d{8}$/.test(d)) return `+61${d.slice(1)}`;
+  if (/^61[2-478]\d{8}$/.test(d)) return `+${d}`;
+  if (/^4\d{8}$/.test(d)) return `+61${d}`;
+  return s;
+}
+
 // Swappable for tests — production always uses the real providers.
 const defaultDeps = {
   sendSms,
   sendEmail: sendCalendarEmail,
   missingEmailEnv,
   missingTwilioEnv,
-  baseUrl: () => publicBaseUrl(),
+  baseUrl: () => patientLinkBase(),
   env: () => process.env,
   google: { getValidAccessToken, getFreeBusy, createGoogleEventWithMeet, patchGoogleEventTimes, deleteGoogleEvent },
 };
@@ -378,7 +406,11 @@ async function sendOne(row, booking, msg, base) {
     return { providerId: null, providerStatus: "accepted" };
   }
   if (deps.missingTwilioEnv().length) throw Object.assign(new Error("Twilio not configured"), { permanent: true });
-  const result = await deps.sendSms({ to: booking.contactPhone, body: msg.text, statusCallback: smsStatusCallbackUrl(base) });
+  const result = await deps.sendSms({
+    to: toSendableNumber(booking.contactPhone),
+    body: msg.text,
+    statusCallback: smsStatusCallbackUrl(base),
+  });
   return { providerId: result?.sid || null, providerStatus: result?.status || "queued" };
 }
 
@@ -490,7 +522,12 @@ async function deliverNow(ids) {
 
 // Called every minute by api/automations-process-runs.js (and the local
 // dev poller in server/index.js).
-export async function processDueBookingReminders(limit = 25) {
+// Claims a few rows at a time and stops starting new batches after
+// `budgetMs`, so one cron invocation never runs into the function's
+// time limit with rows claimed but unsent (those would otherwise be
+// failed as outcome_uncertain). Anything left is picked up next minute.
+export async function processDueBookingReminders(limit = 25, { batchSize = 5, budgetMs = 9000 } = {}) {
+  const startedAt = Date.now();
   // A row stuck in 'processing' means a send was in flight when the
   // function died — its outcome is unknown, so it's failed rather than
   // re-sent (a duplicate is worse than a logged gap).
@@ -499,20 +536,39 @@ export async function processDueBookingReminders(limit = 25) {
      WHERE status = 'processing' AND updated_at < now() - interval '10 minutes'`
   );
   await healMissingSchedules().catch((err) => console.error("[patientReminders] self-heal failed", err));
-  const rows = await q(
-    `UPDATE booking_reminders SET status = 'processing', attempts = attempts + 1, updated_at = now()
-     WHERE id IN (
-       SELECT id FROM booking_reminders
-       WHERE status = 'pending' AND send_at <= now()
-       ORDER BY send_at ASC LIMIT $1
-       FOR UPDATE SKIP LOCKED
-     ) RETURNING *`,
-    [limit]
-  );
-  for (const row of rows) {
-    await deliverClaimed(row).catch((err) => console.error(`[patientReminders] reminder ${row.id} failed`, err));
+  let processed = 0;
+  while (processed < limit && Date.now() - startedAt < budgetMs) {
+    const rows = await q(
+      `UPDATE booking_reminders SET status = 'processing', attempts = attempts + 1, updated_at = now()
+       WHERE id IN (
+         SELECT id FROM booking_reminders
+         WHERE status = 'pending' AND send_at <= now()
+         ORDER BY send_at ASC LIMIT $1
+         FOR UPDATE SKIP LOCKED
+       ) RETURNING *`,
+      [Math.min(batchSize, limit - processed)]
+    );
+    if (!rows.length) break;
+    for (const row of rows) {
+      await deliverClaimed(row).catch((err) => console.error(`[patientReminders] reminder ${row.id} failed`, err));
+    }
+    processed += rows.length;
   }
-  return rows.length;
+  return processed;
+}
+
+// What the "Patient reminders" settings tab shows before it can be
+// switched on. Only booleans and non-secret hints — never a value.
+export function workflowReadiness(calendar, env = process.env) {
+  const base = patientLinkBase(env);
+  return [
+    { key: "sms_send", required: true, ok: !missingTwilioEnv(env).length, label: "Twilio can send SMS", fix: "Twilio account/API key and caller ID env vars (same as calling)." },
+    { key: "sms_replies", required: true, ok: Boolean(env.TWILIO_AUTH_TOKEN), label: "Y/N replies can be verified", fix: "Set TWILIO_AUTH_TOKEN in Vercel (Twilio Console → Account → Auth Token)." },
+    { key: "email", required: true, ok: !missingEmailEnv(env).length, label: "SendGrid can send email", fix: "Set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL in Vercel." },
+    { key: "links", required: true, ok: Boolean(base) && /^https:\/\//.test(base), label: base ? `Patient links use ${base}` : "Patient links have a public address", fix: "Set PUBLIC_URL to the CRM's production address (https://…) in Vercel." },
+    { key: "meet", required: false, ok: Boolean(calendar.googleConnected || calendar.videoConferenceLink), label: calendar.googleConnected ? "Google Meet links are generated per booking" : calendar.videoConferenceLink ? "Uses this calendar's Video conference link" : "Meeting link", fix: "Connect Google (Integrate tab) to generate Meet links, or set a Video conference link." },
+    { key: "inbound", required: false, ok: null, label: "Twilio sends replies to the CRM", fix: `Set every sending number's (or the Messaging Service's) incoming message webhook to POST ${base || "https://<your-domain>"}/api/sms-inbound — can't be checked from here.` },
+  ];
 }
 
 // Catches a booking whose scheduling step failed after the booking

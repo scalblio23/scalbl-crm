@@ -124,7 +124,7 @@ async function book(calendar, hoursAhead, { phone = newPhone(), email = `patient
 // Messages sent to one booking's recipient — the cron is global, so
 // other bookings (including ones left from earlier runs) may send too.
 const to = (b) => ({
-  sms: sent.sms.filter((m) => m.to === b.phone),
+  sms: sent.sms.filter((m) => m.to === pr.toSendableNumber(b.phone)),
   email: sent.email.filter((m) => m.to === b.email),
 });
 const reminders = (bookingId) =>
@@ -220,7 +220,7 @@ test("1/2: booking sends confirmation email + SMS with time, Meet link, invite, 
   assert.match(email.ics, new RegExp(`UID:booking-${b.id}@scalbl-crm`));
   assert.match(email.ics, /METHOD:PUBLISH/);
   assert.match(email.ics, /LOCATION:https:\/\/meet\.google\.com\/abc-defg-hij/);
-  assert.equal(to(b).sms[0].to, b.phone);
+  assert.equal(to(b).sms[0].to, `+61${b.phone.slice(1)}`); // sent in E.164
   // no token in any query string
   assert.ok(!/\?token=/.test(sms + email.html));
 
@@ -697,4 +697,51 @@ test("self-heal schedules a workflow booking whose scheduling step failed, but n
   await sql("UPDATE calendars SET confirmation_workflow_enabled_at = now() - interval '1 hour' WHERE id = $1", [cal.id]);
   await pr.processDueBookingReminders(100);
   assert.ok((await reminders(b.id)).some((x) => x.kind === "reminder_12h"));
+});
+
+// ---------- production-readiness helpers ----------
+
+test("toSendableNumber: Australian formats become E.164; international left alone", { skip }, () => {
+  const cases = {
+    "0412 345 678": "+61412345678",
+    "0412345678": "+61412345678",
+    "(02) 9876 5432": "+61298765432",
+    "61412345678": "+61412345678",
+    "412345678": "+61412345678",
+    "+61 412 345 678": "+61412345678",
+    "+1 (415) 555-0100": "+14155550100",
+    "0044 20 7946 0958": "+442079460958",
+  };
+  for (const [input, expected] of Object.entries(cases)) assert.equal(pr.toSendableNumber(input), expected, input);
+  assert.equal(pr.toSendableNumber("12345"), "12345"); // unrecognisable → Twilio rejects, logged as failed
+});
+
+test("patientLinkBase: PUBLIC_URL, then Vercel's production domain, before a per-deployment URL", { skip }, () => {
+  assert.equal(pr.patientLinkBase({ PUBLIC_URL: "https://crm.example.com/", VERCEL_PROJECT_PRODUCTION_URL: "x.vercel.app" }), "https://crm.example.com");
+  assert.equal(pr.patientLinkBase({ VERCEL_PROJECT_PRODUCTION_URL: "scalbl-crmproper.vercel.app", VERCEL_URL: "scalbl-crm-abc123.vercel.app" }), "https://scalbl-crmproper.vercel.app");
+  assert.equal(pr.patientLinkBase({ VERCEL_URL: "scalbl-crm-abc123.vercel.app" }), "https://scalbl-crm-abc123.vercel.app");
+});
+
+test("workflowReadiness: required items reflect the environment, never expose values", { skip }, () => {
+  const empty = pr.workflowReadiness({ googleConnected: false, videoConferenceLink: "" }, {});
+  assert.deepEqual(empty.filter((c) => c.required && !c.ok).map((c) => c.key).sort(), ["email", "links", "sms_replies", "sms_send"]);
+  const env = {
+    TWILIO_ACCOUNT_SID: "AC1", TWILIO_API_KEY_SID: "SK1", TWILIO_API_KEY_SECRET: "secret-value", TWILIO_TWIML_APP_SID: "AP1", TWILIO_CALLER_ID: "+61400000000",
+    TWILIO_AUTH_TOKEN: "auth-secret", SENDGRID_API_KEY: "sg-secret", SENDGRID_FROM_EMAIL: "a@b.c", VERCEL_PROJECT_PRODUCTION_URL: "crm.example.com",
+  };
+  const ready = pr.workflowReadiness({ googleConnected: true }, env);
+  assert.ok(ready.filter((c) => c.required).every((c) => c.ok));
+  const text = JSON.stringify(ready);
+  for (const secret of ["secret-value", "auth-secret", "sg-secret"]) assert.ok(!text.includes(secret));
+});
+
+test("cron sends due reminders in small batches within its time budget, stranding nothing", { skip }, async () => {
+  const cal = await makeCalendar();
+  const ids = [];
+  for (let i = 0; i < 4; i++) ids.push((await book(cal, 60 + i * 3)).id);
+  await sql("UPDATE booking_reminders SET send_at = now() - interval '1 second' WHERE booking_id = ANY($1) AND kind = 'reminder_30m'", [ids]);
+  await pr.processDueBookingReminders(100, { budgetMs: -1 }); // out of time → claims nothing
+  assert.equal((await sql("SELECT count(*)::int n FROM booking_reminders WHERE booking_id = ANY($1) AND status = 'processing'", [ids]))[0].n, 0);
+  await pr.processDueBookingReminders(100, { batchSize: 3 });
+  assert.equal((await sql("SELECT count(*)::int n FROM booking_reminders WHERE booking_id = ANY($1) AND kind = 'reminder_30m' AND status <> 'sent'", [ids]))[0].n, 0);
 });

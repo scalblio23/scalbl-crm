@@ -1,9 +1,9 @@
 // CRUD for the Calendars feature's calendars themselves — the
 // Sidebar → Calendars → Add Calendar → Calendar settings flow. Full-
 // access roles only, same as Clients/Dial lists.
-import { ensureSchema, getCalendars, createCalendar, updateCalendar, deleteCalendar } from "../server/db.js";
+import { ensureSchema, getCalendars, getCalendarById, createCalendar, updateCalendar, deleteCalendar } from "../server/db.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
-import { WORKFLOWS } from "../server/patientReminders.js";
+import { WORKFLOWS, workflowReadiness } from "../server/patientReminders.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -11,6 +11,13 @@ export default async function handler(req, res) {
   if (forbidClientRole(user, res)) return;
   try {
     await ensureSchema();
+
+    // Setup checklist for the "Patient reminders" settings tab.
+    if (req.method === "GET" && req.query.workflowReadiness) {
+      const calendar = await getCalendarById(req.query.workflowReadiness);
+      if (!calendar) return res.status(404).json({ error: "Calendar not found" });
+      return res.status(200).json({ checks: workflowReadiness(calendar) });
+    }
 
     if (req.method === "GET") {
       return res.status(200).json(await getCalendars());
