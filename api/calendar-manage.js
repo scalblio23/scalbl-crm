@@ -1,10 +1,13 @@
-// POST /api/calendar-manage — public, unauthenticated; the patient's
-// manage page (/book/<slug>#manage=<token>, see src/BookingWidget.jsx)
-// for calendars with the patient confirmation workflow switched on
-// (server/patientReminders.js). Body: { token, action, ... }.
+// POST /api/calendar-manage — public, unauthenticated; the booker's
+// manage page (/book/<slug>#manage=<token>, see src/BookingWidget.jsx).
+// Body: { token, action, ... }. Every calendar gets:
 //   action "view"       → the appointment, no contact details
+//   action "cancel"     → cancel it (Google event removed; on workflow
+//                         calendars, also stops reminders and sends a
+//                         rebook link)
+// Calendars with the patient confirmation workflow switched on
+// (server/patientReminders.js) also get:
 //   action "confirm"    → mark attendance confirmed (same as replying Y)
-//   action "cancel"     → cancel it (stops reminders, sends rebook link)
 //   action "reschedule" → { startUTC, endUTC, timezone } move it
 //   action "ics"        → the calendar invite, for "Add to calendar"
 // The token is the booking's own cancel token — it only ever reaches
@@ -32,10 +35,22 @@ export default async function handler(req, res) {
     await ensureSchema();
     const { token, action } = req.body || {};
     const found = await getBookingByToken(token);
-    if (!found || !workflowFor(found.calendar)) return res.status(404).json({ error: "Booking not found" });
+    if (!found) return res.status(404).json({ error: "Booking not found" });
     const { booking, calendar } = found;
 
     if (action === "view") return res.status(200).json(publicBookingView(booking, calendar));
+
+    if (action === "cancel") {
+      if (new Date(booking.startTime) <= new Date() && booking.status === "confirmed") {
+        return res.status(409).json({ error: "This appointment has already started." });
+      }
+      await cancelWorkflowBooking(booking.id, { reason: "cancelled_by_patient", source: "manage_link" });
+      const fresh = await getBookingByToken(token);
+      return res.status(200).json(publicBookingView(fresh.booking, fresh.calendar));
+    }
+
+    // Everything below is part of the confirmation workflow only.
+    if (!workflowFor(calendar)) return res.status(400).json({ error: "Unknown action" });
 
     if (action === "ics") {
       if (booking.status !== "confirmed") return res.status(409).json({ error: "This appointment is cancelled." });
@@ -45,15 +60,6 @@ export default async function handler(req, res) {
     if (action === "confirm") {
       const result = await confirmWorkflowAttendance(booking.id, { source: "manage_link" });
       if (result === "not_active") return res.status(409).json({ error: "This appointment can no longer be confirmed." });
-      const fresh = await getBookingByToken(token);
-      return res.status(200).json(publicBookingView(fresh.booking, fresh.calendar));
-    }
-
-    if (action === "cancel") {
-      if (new Date(booking.startTime) <= new Date() && booking.status === "confirmed") {
-        return res.status(409).json({ error: "This appointment has already started." });
-      }
-      await cancelWorkflowBooking(booking.id, { reason: "cancelled_by_patient", source: "manage_link" });
       const fresh = await getBookingByToken(token);
       return res.status(200).json(publicBookingView(fresh.booking, fresh.calendar));
     }

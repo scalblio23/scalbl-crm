@@ -685,6 +685,8 @@ export function publicBookingView(booking, calendar) {
     attendanceStatus: booking.attendanceStatus,
     meetLink: booking.status === "confirmed" ? meetLinkFor(booking, calendar) : null,
     canChange: booking.status === "confirmed" && new Date(booking.startTime) > new Date(),
+    // false → cancel-only view (no confirm / reschedule / add to calendar)
+    workflow: Boolean(workflow),
   };
 }
 

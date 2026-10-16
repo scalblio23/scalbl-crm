@@ -572,8 +572,12 @@ the text rather than failing the booking.
   `api/calendar-google-callback.js`, `api/calendar-google-disconnect.js`,
   `api/calendar-bookings.js` — the authenticated, CRM-side endpoints.
 - `api/calendar-public.js`, `api/calendar-slots.js`, `api/calendar-book.js`,
-  `api/calendar-cancel.js` — the public endpoints the booking widget uses;
-  no login required.
+  `api/calendar-cancel.js`, `api/calendar-manage.js` — the public endpoints
+  the booking widget uses; no login required. Cancel links never cancel on
+  a GET (email scanners and link previews fetch them on their own): they
+  open the manage page at `/book/<slug>#manage=<token>&action=cancel`,
+  where cancelling is an explicit button. Calendars without the patient
+  workflow get a cancel-only manage view.
 - `src/BookingWidget.jsx` — the standalone public page at `/book/<slug>`
   (see the routing check in `src/main.jsx` and the SPA rewrite in
   `vercel.json`).
