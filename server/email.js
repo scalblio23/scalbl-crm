@@ -43,7 +43,9 @@ export async function sendCalendarEmail({ to, subject, html, ics }, env = proces
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`SendGrid error (${res.status}): ${body || res.statusText}`);
+    const err = new Error(`SendGrid error (${res.status}): ${body || res.statusText}`);
+    err.status = res.status;
+    throw err;
   }
 }
 
@@ -57,14 +59,31 @@ function icsEscape(text) {
 
 // Minimal RFC 5545 event — enough for every major mail client's
 // "add to calendar" button, without pulling in an ICS library.
-export function buildIcs({ uid, summary, description, location, startISO, endISO, organizerEmail, attendeeEmail }) {
+// sequence/method/status are optional and default to the original
+// output: an updated invite (reschedule) reuses the same uid with a
+// higher sequence so mail clients move the existing event, and a
+// METHOD:CANCEL / STATUS:CANCELLED one removes it.
+export function buildIcs({
+  uid,
+  summary,
+  description,
+  location,
+  startISO,
+  endISO,
+  organizerEmail,
+  attendeeEmail,
+  sequence,
+  method = "PUBLISH",
+  status = "CONFIRMED",
+}) {
   const lines = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
     "PRODID:-//Scalbl CRM//Calendars//EN",
-    "METHOD:PUBLISH",
+    `METHOD:${method}`,
     "BEGIN:VEVENT",
     `UID:${uid}`,
+    sequence !== undefined ? `SEQUENCE:${sequence}` : null,
     `DTSTAMP:${icsDate(new Date().toISOString())}`,
     `DTSTART:${icsDate(startISO)}`,
     `DTEND:${icsDate(endISO)}`,
@@ -73,7 +92,7 @@ export function buildIcs({ uid, summary, description, location, startISO, endISO
     location ? `LOCATION:${icsEscape(location)}` : null,
     organizerEmail ? `ORGANIZER:mailto:${organizerEmail}` : null,
     attendeeEmail ? `ATTENDEE:mailto:${attendeeEmail}` : null,
-    "STATUS:CONFIRMED",
+    `STATUS:${status}`,
     "END:VEVENT",
     "END:VCALENDAR",
   ].filter(Boolean);

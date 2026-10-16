@@ -114,6 +114,8 @@ import calendarPublicHandler from "../api/calendar-public.js";
 import calendarSlotsHandler from "../api/calendar-slots.js";
 import calendarBookHandler from "../api/calendar-book.js";
 import calendarCancelHandler from "../api/calendar-cancel.js";
+import calendarManageHandler from "../api/calendar-manage.js";
+import bookingSmsStatusHandler from "../api/booking-sms-status.js";
 import automationsHandler from "../api/automations.js";
 import tagFoldersHandler from "../api/tag-folders.js";
 import tagBookingLinksHandler from "../api/tag-booking-links.js";
@@ -125,6 +127,7 @@ import smsThreadsHandler from "../api/sms-threads.js";
 import whatsappHandler from "../api/whatsapp.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
+import { processDueBookingReminders, handleBookingReply, verifyTwilioSignature, candidateWebhookUrls } from "./patientReminders.js";
 import {
   getSessionUser,
   requireAuth,
@@ -199,6 +202,10 @@ const PUBLIC_PATHS = new Set([
   "/api/calendar-slots",
   "/api/calendar-book",
   "/api/calendar-cancel",
+  // Patient manage page (token in body) and Twilio's signed delivery
+  // callback — see api/calendar-manage.js / api/booking-sms-status.js.
+  "/api/calendar-manage",
+  "/api/booking-sms-status",
   // Cron-invoked, not user-invoked — authenticated by its own
   // CRON_SECRET bearer-token check instead of a session (see
   // api/automations-process-runs.js).
@@ -1099,6 +1106,17 @@ app.post("/api/sms-inbound", async (req, res) => {
         type: "text",
         outgoing: false,
       });
+      // Same Y/N handling as api/sms-inbound.js.
+      await handleBookingReply({
+        messageSid: req.body?.MessageSid,
+        from,
+        body,
+        verified: verifyTwilioSignature({
+          signature: req.headers["x-twilio-signature"],
+          urls: candidateWebhookUrls(req, "/api/sms-inbound"),
+          params: req.body || {},
+        }),
+      }).catch((err) => console.error("[db] booking reply handling failed", err?.message || err));
     }
   } catch (err) {
     console.error("[db] /api/sms-inbound", err);
@@ -1473,6 +1491,8 @@ app.all("/api/calendar-public", calendarPublicHandler);
 app.all("/api/calendar-slots", calendarSlotsHandler);
 app.all("/api/calendar-book", calendarBookHandler);
 app.all("/api/calendar-cancel", calendarCancelHandler);
+app.all("/api/calendar-manage", calendarManageHandler);
+app.all("/api/booking-sms-status", bookingSmsStatusHandler);
 app.all("/api/automations", automationsHandler);
 app.all("/api/tag-folders", tagFoldersHandler);
 app.all("/api/tag-booking-links", tagBookingLinksHandler);
@@ -1511,6 +1531,8 @@ if (isDbConfigured()) {
   setInterval(() => {
     reapStuckAutomationRuns()
       .then(() => processDueAutomationRuns())
-      .catch((err) => console.error("[automations] local poller failed", err));
+      .catch((err) => console.error("[automations] local poller failed", err))
+      .then(() => processDueBookingReminders())
+      .catch((err) => console.error("[patientReminders] local poller failed", err));
   }, 15000);
 }
