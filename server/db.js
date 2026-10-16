@@ -601,6 +601,13 @@ export async function ensureSchema() {
     // more "wait" cycles reflects the original trigger time, not the
     // current step). See reapStuckAutomationRuns below.
     await query(`ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now()`);
+    // cancelCalendarBooking stops a booking's still-pending
+    // "Booking Created" runs by context->>'bookingId' — this keeps that
+    // lookup off a full scan of every run ever recorded.
+    await query(
+      `CREATE INDEX IF NOT EXISTS automation_runs_pending_booking_idx
+       ON automation_runs ((context->>'bookingId')) WHERE status = 'pending'`
+    );
     // ---------- Tag folders ----------
     // Purely organizational — a tag is still just free text on a
     // contact (see contacts.tag), never owned by a folder at the
@@ -2848,7 +2855,22 @@ export async function cancelCalendarBooking(id, { reason = null } = {}) {
      WHERE id = $1 RETURNING *`,
     [id, reason]
   );
+  if (rows[0]) await cancelAutomationRunsForBooking(rows[0].id);
   return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+// Stops the "Booking Created" automation runs this booking started
+// (api/calendar-book.js puts bookingId in their context) so a
+// cancelled appointment doesn't keep getting "wait before appointment"
+// reminders. Only 'pending' rows — one mid-advance ('processing') is
+// caught by advanceAutomationRun's own booking-status check instead.
+// Runs from before bookingId was recorded have none and are untouched.
+export async function cancelAutomationRunsForBooking(bookingId) {
+  await query(
+    `UPDATE automation_runs SET status = 'done', last_error = 'booking_cancelled', updated_at = now()
+     WHERE status = 'pending' AND context->>'bookingId' = $1`,
+    [String(bookingId)]
+  );
 }
 
 // ---------- Automations ----------

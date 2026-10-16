@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import twilio from "twilio";
 
 const DB_URL = process.env.TEST_POSTGRES_URL;
+process.env.SESSION_SECRET ||= "test-session-secret";
 const skip = !DB_URL && "TEST_POSTGRES_URL not set";
 
 let db, pr, handlers, pool;
@@ -53,6 +54,7 @@ before(async () => {
     inbound: (await import("../../api/sms-inbound.js")).default,
     status: (await import("../../api/booking-sms-status.js")).default,
     calendars: (await import("../../api/calendars.js")).default,
+    bookings: (await import("../../api/calendar-bookings.js")).default,
   };
   await db.ensureSchema();
   pool = db.getPool();
@@ -653,6 +655,96 @@ test("workflow calendar suppresses 'Booking Created' automations (no duplicate c
   assert.equal(to(b).sms.length, 1);
   await db.updateAutomation(auto.id, { active: false });
 });
+
+// ---------- "Booking Created" automations stop when the booking is cancelled ----------
+
+// A non-workflow calendar with a "remind 2h before" automation: the
+// run waits (pending) after booking, with this booking's id on it.
+async function bookWithReminderAutomation(label) {
+  const cal = await makeCalendar({ workflow: false, name: `Automation Reminder ${label}` });
+  const auto = await db.createAutomation({ name: `reminder automation ${label}` });
+  await db.updateAutomation(auto.id, {
+    triggerType: "booking_created",
+    triggerConfig: { calendarId: cal.id },
+    actions: [{ type: "wait", mode: "before_appointment", amount: 2, unit: "hours" }, { type: "sms", body: "see you soon {{name}}" }],
+  });
+  const b = await book(cal, 50);
+  const [run] = await sql("SELECT * FROM automation_runs WHERE automation_id = $1", [auto.id]);
+  assert.equal(run.status, "pending");
+  assert.equal(run.next_step_index, 1);
+  assert.equal(run.context.bookingId, b.id);
+  return { cal, auto, b, runId: run.id };
+}
+const runRow = async (id) => (await sql("SELECT * FROM automation_runs WHERE id = $1", [id]))[0];
+
+test("patient cancel link stops that booking's pending automation runs; pre-existing runs without a bookingId are left alone", { skip }, async () => {
+  const { cal, auto, b, runId } = await bookWithReminderAutomation("cancel-link");
+  const legacy = await db.createAutomationRun({
+    automationId: auto.id,
+    context: { calendarId: cal.id, contact: { name: "Old Run" } },
+    runAt: new Date(Date.now() + 365 * 86400000),
+  });
+  const get = await call(handlers.cancel, { method: "GET", query: { token: b.token } });
+  assert.equal(get.statusCode, 200);
+  assert.equal((await bookingRow(b.id)).status, "cancelled");
+  const run = await runRow(runId);
+  assert.equal(run.status, "done");
+  assert.equal(run.last_error, "booking_cancelled");
+  assert.equal(run.next_step_index, 1); // the reminder step never ran
+  assert.equal((await runRow(legacy.id)).status, "pending");
+  await sql("DELETE FROM automation_runs WHERE id = $1", [legacy.id]);
+  await db.updateAutomation(auto.id, { active: false });
+});
+
+test("setter's Cancel in the CRM stops that booking's pending automation runs, and only that booking's", { skip }, async () => {
+  const { cal, auto, b, runId } = await bookWithReminderAutomation("staff");
+  const other = await book(cal, 70);
+  const [otherRun] = await sql("SELECT id FROM automation_runs WHERE automation_id = $1 AND context->>'bookingId' = $2", [auto.id, String(other.id)]);
+  const [user] = await sql("INSERT INTO users (name, email, role) VALUES ('Setter', $1, 'admin') RETURNING id, name, email", [`setter.${RUN}@example.test`]);
+  const auth = await import("../auth.js");
+  const cookie = auth.createSessionCookie(user).split(";")[0];
+  const del = await call(handlers.bookings, { method: "DELETE", query: { id: String(b.id) }, headers: { cookie } });
+  assert.equal(del.statusCode, 200, JSON.stringify(del.body));
+  assert.equal((await bookingRow(b.id)).status, "cancelled");
+  assert.equal((await runRow(runId)).status, "done");
+  assert.equal((await runRow(runId)).last_error, "booking_cancelled");
+  assert.equal((await runRow(otherRun.id)).status, "pending");
+  await sql("DELETE FROM automation_runs WHERE id = $1", [otherRun.id]);
+  await db.updateAutomation(auto.id, { active: false });
+});
+
+test("a due automation run whose booking was cancelled some other way skips its remaining steps", { skip }, async () => {
+  const { auto, b, runId } = await bookWithReminderAutomation("belt-and-braces");
+  // cancelled without going through cancelCalendarBooking, so the run is still pending
+  await sql("UPDATE calendar_bookings SET status = 'cancelled' WHERE id = $1", [b.id]);
+  await sql("UPDATE automation_runs SET run_at = now() - interval '1 second' WHERE id = $1", [runId]);
+  await processDueAutomationRunsUntil(runId);
+  const run = await runRow(runId);
+  assert.equal(run.status, "done");
+  assert.equal(run.last_error, "booking_cancelled");
+  assert.equal(run.next_step_index, 1);
+  await db.updateAutomation(auto.id, { active: false });
+});
+
+test("a due automation run for a still-confirmed booking carries on as before", { skip }, async () => {
+  const { auto, runId } = await bookWithReminderAutomation("confirmed");
+  await sql("UPDATE automation_runs SET run_at = now() - interval '1 second' WHERE id = $1", [runId]);
+  await processDueAutomationRunsUntil(runId);
+  const run = await runRow(runId);
+  assert.equal(run.status, "done");
+  assert.equal(run.last_error, null);
+  assert.equal(run.next_step_index, 2);
+  await db.updateAutomation(auto.id, { active: false });
+});
+
+// The poller is global — rows left from earlier runs may be due too —
+// so keep processing until this one has been picked up.
+async function processDueAutomationRunsUntil(runId) {
+  const { processDueAutomationRuns } = await import("../automations.js");
+  for (let i = 0; i < 20 && (await runRow(runId)).status === "pending"; i += 1) {
+    await processDueAutomationRuns(100);
+  }
+}
 
 test("18/20: booking still marks the matching lead Booked; staff cancel stops reminders without messaging", { skip }, async () => {
   const cal = await makeCalendar();

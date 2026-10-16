@@ -277,6 +277,7 @@ export default async function handler(req, res) {
     // suppressed the built-in ones above).
     confirmationSends.push(
       runAutomationsForTrigger("booking_created", {
+        bookingId: booking.id,
         calendarId: calendar.id,
         calendarName: calendar.name,
         contact: { name, email, phone },
