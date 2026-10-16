@@ -120,9 +120,12 @@ function restClient(env = process.env) {
 // number from the pool per send instead. Same goal either way:
 // spread volume so no single number gets carrier-flagged (the same
 // concern a spam-filtered "Delivered" message is a symptom of).
-export async function sendSms({ to, body }, env = process.env) {
+// statusCallback is optional — when passed, Twilio reports delivery
+// (queued → sent → delivered / undelivered / failed) to that URL.
+export async function sendSms({ to, body, statusCallback }, env = process.env) {
   const client = restClient(env);
   const params = { to, body };
+  if (statusCallback) params.statusCallback = statusCallback;
   if (env.TWILIO_MESSAGING_SERVICE_SID) {
     params.messagingServiceSid = env.TWILIO_MESSAGING_SERVICE_SID;
   } else {

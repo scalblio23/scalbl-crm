@@ -581,3 +581,27 @@ the text rather than failing the booking.
   throughout the Calendars UI in place of native `<select>`, so the open
   options list is styled like the rest of the app instead of the browser's
   own popup.
+
+## Patient confirmation & reminders (Keevo Health)
+
+Opt-in per calendar: **Calendars → (calendar) → Settings → Patient reminders**. Every other calendar is unaffected. Lives in `server/patientReminders.js`; tests in `server/test/patientReminders.test.js` (`TEST_POSTGRES_URL=postgres://… npm run test:reminders`, against a throwaway database).
+
+For each booking on a calendar with it switched on:
+
+| When | Email | SMS |
+| --- | --- | --- |
+| On booking (or reschedule) | Confirmation: local date/time, Google Meet link, `.ics` invite, reschedule + cancel links, the Y/N rule | Same |
+| 12 hours before | "Your Keevo Health discovery call is at … Reply Y to confirm or N if you can't attend." (+ confirm/cancel links) | Same — reply Y/N |
+| 30 minutes before | Time + Meet link | Same |
+| 10 minutes before | Final "join now" + Meet link | Same |
+
+- **Y** → `attendance_status = 'confirmed'` (shown as *patient confirmed* in the bookings list) + "Thanks for confirming…" SMS.
+- **N** → that booking is cancelled (`cancel_reason = patient_unable_to_attend`), every pending reminder stops, the Google event is removed, and a cancellation with a rebooking link is sent. The contact/lead is never touched.
+- **No reply** → nothing changes; later reminders still send.
+- A reply only acts when the Twilio signature verifies and the sender's number matches exactly **one** future, still-booked appointment that was sent a request for its current time. Two candidates → nothing changes and the patient is asked to use their links.
+- **Reschedule / cancel links** open `/book/<slug>#manage=<token>` (token in the URL fragment, never sent to a server in the URL). Rescheduling moves the same booking row (`schedule_version + 1`): old reminders are cancelled and a fresh confirmation + reminder cycle is scheduled. Inside 12 hours the Y/N request goes a minute after the confirmation (skipped under 1 hour); 30m/10m reminders whose moment has passed are skipped.
+- While on, it replaces the calendar's built-in confirmation **and** its "Booking Created" automations (they'd otherwise be duplicate messages). The owner notification email is unchanged. A setter cancelling from the CRM stops reminders without messaging the patient.
+- Reminders are `booking_reminders` rows (unique per booking/version/kind/channel), sent by the existing every-minute cron (`/api/automations-process-runs`). Before each send the booking is locked and re-checked. Failures are logged to `booking_events`; provider 429/5xx are retried, unknown outcomes are not (no duplicates). SMS delivery status comes from Twilio's status callback.
+
+**Setup:** `TWILIO_AUTH_TOKEN` and `PUBLIC_URL` (see `.env.example`); every Twilio number in the caller-ID pool (or the Messaging Service) needs its inbound Messaging webhook set to `POST {PUBLIC_URL}/api/sms-inbound`, since a patient replies to whichever number texted them; SendGrid as for calendars; Google connected on the calendar for generated Meet links (otherwise the calendar's Video conference link is used); Vercel Pro for the every-minute cron.
+

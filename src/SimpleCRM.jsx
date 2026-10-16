@@ -942,8 +942,16 @@ const CALENDAR_SETTINGS_SECTIONS = [
   { key: "availability", label: "Availability", icon: Calendar },
   { key: "rules", label: "Booking rules", icon: ListChecks },
   { key: "video", label: "Video conference", icon: Video },
+  { key: "reminders", label: "Patient reminders", icon: Bell },
   { key: "share", label: "Share & embed", icon: Link2 },
 ];
+
+// Why a booking was cancelled, for the bookings list (calendar_bookings.cancel_reason).
+const BOOKING_CANCEL_REASON_LABELS = {
+  patient_unable_to_attend: "patient replied N",
+  cancelled_by_patient: "by patient",
+  cancelled_by_staff: "by staff",
+};
 
 // Automations — a trigger + an ordered chain of actions, same linear
 // shape as GoHighLevel's workflow builder (see server/automations.js
@@ -9913,6 +9921,43 @@ export default function SimpleCRM() {
                       </div>
                     )}
 
+                    {calendarSettingsTab === "reminders" && (
+                      <div className="max-w-md space-y-4">
+                        <h2 className="text-base font-bold">Patient confirmation & reminders</h2>
+                        <p className="text-sm text-gray-500">
+                          For Keevo Health discovery calls. Every booking gets a confirmation (email + SMS) with a
+                          Google Meet link, calendar invite and reschedule/cancel links; a Y/N confirmation request 12
+                          hours before; and join reminders 30 and 10 minutes before. Replying N cancels that booking
+                          and stops its reminders; no reply leaves it booked.
+                        </p>
+                        <p className="text-sm text-gray-500">
+                          While this is on, it replaces this calendar's built-in confirmation and any “Booking
+                          Created” automations for it, so patients never get two sets of messages. It only applies to
+                          bookings made after it's switched on.
+                        </p>
+                        <label className="flex items-center gap-2 text-sm font-medium">
+                          <input
+                            type="checkbox"
+                            checked={openCalendar.confirmationWorkflow === "keevo_health"}
+                            disabled={savingCalendar}
+                            onChange={(e) => {
+                              const on = e.target.checked;
+                              if (
+                                !window.confirm(
+                                  on
+                                    ? "Switch on Keevo Health confirmation & reminders for this calendar?"
+                                    : "Switch off confirmation & reminders? Pending reminders for this calendar will stop."
+                                )
+                              )
+                                return;
+                              patchCalendar(openCalendar.id, { confirmationWorkflow: on ? "keevo_health" : null });
+                            }}
+                          />
+                          Keevo Health confirmation & reminders
+                        </label>
+                      </div>
+                    )}
+
                     {calendarSettingsTab === "share" && (
                       <div className="max-w-xl space-y-6">
                         <div>
@@ -9974,7 +10019,24 @@ export default function SimpleCRM() {
                                     <p className="text-sm font-medium">
                                       {b.contactName}{" "}
                                       {b.status === "cancelled" && (
-                                        <span className="text-xs text-red-500 font-normal">(cancelled)</span>
+                                        <span className="text-xs text-red-500 font-normal">
+                                          (cancelled
+                                          {BOOKING_CANCEL_REASON_LABELS[b.cancelReason]
+                                            ? ` — ${BOOKING_CANCEL_REASON_LABELS[b.cancelReason]}`
+                                            : ""}
+                                          )
+                                        </span>
+                                      )}
+                                      {b.status !== "cancelled" && b.attendanceStatus === "confirmed" && (
+                                        <span className="text-xs text-emerald-600 font-normal">(patient confirmed)</span>
+                                      )}
+                                      {b.status !== "cancelled" &&
+                                        b.attendanceStatus !== "confirmed" &&
+                                        b.confirmationRequestedAt && (
+                                          <span className="text-xs text-amber-600 font-normal">(awaiting Y/N reply)</span>
+                                        )}
+                                      {b.rescheduleCount > 0 && (
+                                        <span className="text-xs text-blue-600 font-normal"> (rescheduled)</span>
                                       )}
                                     </p>
                                     <p className="text-xs text-gray-500 flex items-center gap-1">

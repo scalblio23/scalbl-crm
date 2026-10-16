@@ -216,6 +216,65 @@ export async function createGoogleEvent({
   return body.id;
 }
 
+// Same event as createGoogleEvent, plus a Google Meet conference
+// generated for it (conferenceData.createRequest, which needs
+// conferenceDataVersion=1). Separate function rather than a flag on
+// createGoogleEvent so that one's return value — and every existing
+// calendar's events — stay exactly as they were. Only used by the
+// patient confirmation workflow (server/patientReminders.js).
+// Returns { id, meetLink } — meetLink is null when Google didn't
+// produce one (Workspace policy, API hiccup), and callers fall back
+// to the calendar's own video link.
+export async function createGoogleEventWithMeet({
+  accessToken,
+  calendarId = "primary",
+  summary,
+  description,
+  location,
+  startISO,
+  endISO,
+  timezone,
+  attendeeEmail,
+  requestId,
+}) {
+  const body = await googleFetch(
+    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=none&conferenceDataVersion=1`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        summary,
+        description,
+        location: location || undefined,
+        start: { dateTime: startISO, timeZone: timezone },
+        end: { dateTime: endISO, timeZone: timezone },
+        attendees: attendeeEmail ? [{ email: attendeeEmail }] : [],
+        conferenceData: {
+          createRequest: { requestId, conferenceSolutionKey: { type: "hangoutsMeet" } },
+        },
+      }),
+    }
+  );
+  const videoEntry = (body.conferenceData?.entryPoints || []).find((e) => e.entryPointType === "video");
+  return { id: body.id, meetLink: body.hangoutLink || videoEntry?.uri || null };
+}
+
+// Moves an existing event (a reschedule). The Meet conference stays
+// attached to the event, so its link carries over unchanged.
+export async function patchGoogleEventTimes({ accessToken, calendarId = "primary", eventId, startISO, endISO, timezone }) {
+  await googleFetch(
+    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start: { dateTime: startISO, timeZone: timezone },
+        end: { dateTime: endISO, timeZone: timezone },
+      }),
+    }
+  );
+}
+
 export async function deleteGoogleEvent({ accessToken, calendarId = "primary", eventId }) {
   if (!eventId) return;
   const res = await fetch(

@@ -3,6 +3,7 @@
 // access roles only, same as Clients/Dial lists.
 import { ensureSchema, getCalendars, createCalendar, updateCalendar, deleteCalendar } from "../server/db.js";
 import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { WORKFLOWS } from "../server/patientReminders.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -25,7 +26,15 @@ export default async function handler(req, res) {
     if (req.method === "PATCH") {
       const id = req.query.id;
       if (!id) return res.status(400).json({ error: "Missing id" });
-      const calendar = await updateCalendar(id, req.body || {});
+      const patch = req.body || {};
+      if (
+        Object.prototype.hasOwnProperty.call(patch, "confirmationWorkflow") &&
+        patch.confirmationWorkflow !== null &&
+        !Object.prototype.hasOwnProperty.call(WORKFLOWS, patch.confirmationWorkflow)
+      ) {
+        return res.status(400).json({ error: "Unknown confirmation workflow" });
+      }
+      const calendar = await updateCalendar(id, patch);
       if (!calendar) return res.status(404).json({ error: "Calendar not found" });
       return res.status(200).json(calendar);
     }

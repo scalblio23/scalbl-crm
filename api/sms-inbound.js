@@ -1,5 +1,6 @@
 import { waitUntil } from "@vercel/functions";
 import { ensureSchema, findContactByPhone, logMessage } from "../server/db.js";
+import { handleBookingReply, verifyTwilioSignature, candidateWebhookUrls } from "../server/patientReminders.js";
 
 // POST /api/sms-inbound — Twilio's "A message comes in" webhook. Set
 // this as the Messaging webhook on your Twilio number (Phone Numbers
@@ -41,6 +42,21 @@ export default async function handler(req, res) {
             type: "text",
             outgoing: false,
           });
+          // A Y/N reply to a patient confirmation request (see
+          // server/patientReminders.js). Only acts on a reply whose
+          // Twilio signature verifies and that matches exactly one
+          // booking awaiting confirmation; anything else is a no-op, so
+          // every other inbound text behaves exactly as before.
+          await handleBookingReply({
+            messageSid: req.body?.MessageSid,
+            from,
+            body,
+            verified: verifyTwilioSignature({
+              signature: req.headers["x-twilio-signature"],
+              urls: candidateWebhookUrls(req, "/api/sms-inbound"),
+              params: req.body || {},
+            }),
+          }).catch((err) => console.error("[api/sms-inbound] booking reply handling failed", err?.message || err));
         }
       } catch (err) {
         // The response already went out — just log it. Twilio isn't
