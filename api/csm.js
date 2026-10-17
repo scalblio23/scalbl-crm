@@ -41,7 +41,7 @@ import {
   markCsmRead,
   CSM_MOODS,
 } from "../server/db.js";
-import { requireAuth, forbidClientRole, canManageWhatsApp } from "../server/auth.js";
+import { requireAuth, forbidWithoutTab, canManageWhatsApp } from "../server/auth.js";
 import { callWhatsAppGateway } from "../server/voiceConfig.js";
 import { adAccountIdFrom, fetchDailyLeads, metaConfigured } from "../server/metaAds.js";
 
@@ -72,7 +72,7 @@ export default async function handler(req, res) {
   schema.catch(() => {}); // reported below, once we know who's asking
   const user = await requireAuth(req, res);
   if (!user) return;
-  if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "csm", res)) return;
   // The API key (scripts/agents) isn't a person: it has no unread
   // counts or mentions of its own, and may say who it's writing as
   // ("author" in a POST body) instead of showing up as "API key".

@@ -40,6 +40,8 @@ import {
   getContacts,
   getContactById,
   getContactsByIds,
+  contactForClient,
+  sanitizeClientContactPatch,
   createContact,
   updateContact,
   deleteContacts,
@@ -133,6 +135,7 @@ import csmHandler from "../api/csm.js";
 import memoHandler from "../api/memo.js";
 import proposalsHandler from "../api/proposals.js";
 import proposalPublicHandler from "../api/proposal-public.js";
+import usersHandler from "../api/users.js";
 import smsThreadsHandler from "../api/sms-threads.js";
 import smsCrazytelInboundHandler from "../api/sms-crazytel-inbound.js";
 import whatsappHandler from "../api/whatsapp.js";
@@ -154,6 +157,11 @@ import {
   forbidClientRole,
   isValidUserPhone,
   hasFullAccess,
+  sessionUserFromRow,
+  forbidWithoutTab,
+  hasTab,
+  hidesInternalNotes,
+  isDataScoped,
   ROLES,
 } from "./auth.js";
 import {
@@ -251,8 +259,6 @@ app.use(async (req, res, next) => {
 // render their own leads' criteria.
 app.use(
   [
-    "/api/clients",
-    "/api/client-columns",
     "/api/clients-import",
     "/api/contacts-import",
     "/api/contacts-bulk-import",
@@ -271,8 +277,8 @@ app.use(
     "/api/portal-invites",
     // The calendar routes aren't here: a client_team user can reach
     // them for their own assigned calendars, so each handler does its
-    // own forbidNonCalendarRole + canAccessCalendar check.
-    "/api/automations",
+    // own forbidNonCalendarRole + canAccessCalendar check. Automations
+    // follows the user's ticked tabs instead (api/automations.js).
     "/api/proposals",
     "/api/archived-tags",
   ],
@@ -281,6 +287,32 @@ app.use(
     next();
   }
 );
+// Per-user tab access (Settings → Access) — mirrors forbidWithoutTab in
+// the matching api/*.js files.
+for (const [path, tab] of [
+  ["/api/clients", "clients"],
+  ["/api/client-columns", "clients"],
+  ["/api/calendars", "calendars"],
+  ["/api/calendar-google-connect", "calendars"],
+  ["/api/calendar-google-disconnect", "calendars"],
+  ["/api/calendar-google-calendars", "calendars"],
+  ["/api/calendar-bookings", "calendars"],
+  ["/api/clients-import", "clients"],
+  ["/api/multiline-start", "multiline"],
+  ["/api/sms-bulk-send", "bulk-sms"],
+  ["/api/automations", "automations"],
+]) {
+  app.use(path, (req, res, next) => {
+    if (forbidWithoutTab(req.user, tab, res)) return;
+    next();
+  });
+}
+app.use("/api/dial-lists", (req, res, next) => {
+  if (!hasTab(req.user, "powerdialler") && !hasTab(req.user, "multiline")) {
+    return res.status(403).json({ error: "You don't have access to this tab." });
+  }
+  next();
+});
 app.use("/api/contact-columns", (req, res, next) => {
   if (req.method === "GET") return next();
   if (forbidClientRole(req.user, res)) return;
@@ -343,13 +375,7 @@ app.post(
     }
     const ok = await verifyPassword(password, row.password_hash);
     if (!ok) return res.status(401).json({ error: "Incorrect email or password." });
-    const user = {
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      role: row.role || "admin",
-      allowedTags: row.allowed_tags || [],
-    };
+    const user = sessionUserFromRow(row);
     res.setHeader("Set-Cookie", createSessionCookie(user));
     res.json({ user });
   })
@@ -371,13 +397,7 @@ app.post(
     if (!row) {
       return res.status(409).json({ error: "This account already has a password — log in instead." });
     }
-    const user = {
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      role: row.role || "admin",
-      allowedTags: row.allowed_tags || [],
-    };
+    const user = sessionUserFromRow(row);
     res.setHeader("Set-Cookie", createSessionCookie(user));
     res.json({ user });
   })
@@ -446,64 +466,7 @@ app.delete(
 // GET is open to any internal user (so an admin can see who has
 // access; clients are blocked above); POST/PATCH/DELETE are gated by canManageUsers/canDeleteUser
 // — see api/users.js for the full reasoning, mirrored here.
-app.get("/api/users", dbRoute(async (req, res) => res.json(await getUsers())));
-app.post(
-  "/api/users",
-  dbRoute(async (req, res) => {
-    if (!canManageUsers(req.user.role)) {
-      return res.status(403).json({ error: "Only an owner or super admin can invite users." });
-    }
-    const { name, email, role, allowedTags } = req.body || {};
-    if (!name || !email) return res.status(400).json({ error: "Missing name or email" });
-    if (role && (role === "owner" || !ROLES.includes(role))) {
-      return res.status(400).json({ error: "Invalid role" });
-    }
-    const created = await inviteUser({ name, email, role, allowedTags });
-    if (!created) return res.status(409).json({ error: "That email is already invited." });
-    res.status(201).json(created);
-  })
-);
-app.patch(
-  "/api/users",
-  dbRoute(async (req, res) => {
-    if (!canManageUsers(req.user.role)) {
-      return res.status(403).json({ error: "Only an owner or super admin can edit users." });
-    }
-    const { id, name, role, allowedTags, phone } = req.body || {};
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    if (role && (role === "owner" || !ROLES.includes(role))) {
-      return res.status(400).json({ error: "Invalid role" });
-    }
-    if (phone !== undefined && !isValidUserPhone(phone)) {
-      return res.status(400).json({ error: "Invalid phone number" });
-    }
-    const target = await getUserById(id);
-    if (!target) return res.status(404).json({ error: "User not found" });
-    // Mirrors api/users.js: the owner's phone (only) can be set.
-    const phoneOnly = phone !== undefined && name === undefined && role === undefined && allowedTags === undefined;
-    if (target.role === "owner" && !phoneOnly) {
-      return res.status(403).json({ error: "The owner's account can't be edited." });
-    }
-    res.json(await updateUser(id, { name, role, allowedTags, phone }));
-  })
-);
-app.delete(
-  "/api/users",
-  dbRoute(async (req, res) => {
-    const id = Number(req.query.id);
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    if (id === Number(req.user.id)) {
-      return res.status(400).json({ error: "You can't delete your own account." });
-    }
-    const target = await getUserById(id);
-    if (!target) return res.status(404).json({ error: "User not found" });
-    if (!canDeleteUser(req.user.role, target.role)) {
-      return res.status(403).json({ error: "Not allowed to delete this user." });
-    }
-    await deleteUserById(id);
-    res.status(204).end();
-  })
-);
+app.all("/api/users", usersHandler);
 
 // ---------- Portal invites (client self-signup links) ----------
 // Mirrors api/portal-invites.js + api/portal-invite-claim.js. Reads
@@ -572,16 +535,18 @@ app.get(
   dbRoute(async (req, res) => {
     const allowedTags = scopeTagsForUser(req.user);
     const scoped = allowedTags !== null;
+    const hideInternal = hidesInternalNotes(req.user);
+    const showClients = !isDataScoped(req.user.role) || hasTab(req.user, "clients");
     const [clients, clientColumnsData, contacts, contactColumnsData, conversations, dialLists, callLog, archivedTags] =
       await Promise.all([
-        scoped ? [] : getClients(),
-        scoped ? [] : getClientColumns(),
-        getContacts(allowedTags),
+        showClients ? getClients() : [],
+        showClients ? getClientColumns() : [],
+        getContacts(allowedTags, hideInternal),
         getContactColumns(),
         getConversations(allowedTags),
         scoped ? [] : getDialLists(),
-        getCallLog(allowedTags),
-        scoped ? [] : getArchivedTags(),
+        getCallLog(allowedTags, hideInternal),
+        isDataScoped(req.user.role) ? [] : getArchivedTags(),
       ]);
     res.setHeader("Cache-Control", "no-store");
     res.json({
@@ -1345,7 +1310,7 @@ app.post(
 
 app.get(
   "/api/contacts",
-  dbRoute(async (req, res) => res.json(await getContacts(scopeTagsForUser(req.user))))
+  dbRoute(async (req, res) => res.json(await getContacts(scopeTagsForUser(req.user), hidesInternalNotes(req.user))))
 );
 app.post(
   "/api/contacts",
@@ -1355,15 +1320,19 @@ app.post(
     if (allowedTags && (!body.tag || !allowedTags.includes(body.tag))) {
       return res.status(403).json({ error: "You can only add leads under your own tag." });
     }
-    res.status(201).json(await createContact(body));
+    const hideInternal = hidesInternalNotes(req.user);
+    const created = await createContact(hideInternal ? sanitizeClientContactPatch(body) : body);
+    res.status(201).json(hideInternal ? contactForClient(created) : created);
   })
 );
 app.patch(
   "/api/contacts",
   dbRoute(async (req, res) => {
-    const { id, ...patch } = req.body || {};
+    const { id, ...rawPatch } = req.body || {};
     if (!id) return res.status(400).json({ error: "Missing id" });
     const allowedTags = scopeTagsForUser(req.user);
+    const hideInternal = hidesInternalNotes(req.user);
+    const patch = hideInternal ? sanitizeClientContactPatch(rawPatch) : rawPatch;
     if (allowedTags) {
       const existing = await getContactById(id);
       if (!existing || !allowedTags.includes(existing.tag)) {
@@ -1373,7 +1342,7 @@ app.patch(
     }
     const contact = await updateContact(id, patch);
     if (!contact) return res.status(404).json({ error: "Contact not found" });
-    res.json(contact);
+    res.json(hideInternal ? contactForClient(contact) : contact);
   })
 );
 app.delete(
@@ -1508,17 +1477,24 @@ app.delete(
   })
 );
 
-app.get("/api/called-leads", dbRoute(async (req, res) => res.json(await getCalledLeadIds())));
+app.get(
+  "/api/called-leads",
+  dbRoute(async (req, res) => {
+    if (forbidClientRole(req.user, res)) return;
+    res.json(await getCalledLeadIds());
+  })
+);
 app.post(
   "/api/called-leads",
   dbRoute(async (req, res) => {
+    if (forbidClientRole(req.user, res)) return;
     const { leadId } = req.body || {};
     if (!leadId) return res.status(400).json({ error: "Missing leadId" });
     await markLeadCalled(leadId);
     res.status(204).end();
   })
 );
-app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog(scopeTagsForUser(req.user)))));
+app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog(scopeTagsForUser(req.user), hidesInternalNotes(req.user)))));
 app.post(
   "/api/call-log",
   dbRoute(async (req, res) =>

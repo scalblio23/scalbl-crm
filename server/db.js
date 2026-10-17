@@ -219,6 +219,14 @@ export async function ensureSchema() {
         AND EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name = 'calendars' AND column_name = 'meta_pixel_id'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'users' AND column_name = 'allowed_tabs'
+        )
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'users' AND column_name = 'see_all_contacts'
         ) AS exists
     `);
     if (!exists) {
@@ -364,6 +372,11 @@ export async function ensureSchema() {
     // member (e.g. "you've got a new booking"). Free text as typed in
     // Settings → Users; normalised (04… → +614…) only at send time.
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT`);
+    // Per-user access, set in Settings → Access. allowed_tabs NULL = the
+    // role's default tabs; see_all_contacts NULL = the role's default
+    // (staff see everything, clients only their allowed_tags).
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_tabs JSONB`);
+    await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS see_all_contacts BOOLEAN`);
     // Client self-signup links (see createPortalInvite/claimPortalInvite
     // below) — there's no email infrastructure to send a per-person
     // portal invite, so an admin generates one of these scoped to a set
@@ -982,9 +995,11 @@ async function ensureStageColumn() {
 // every OWNER_EMAILS row is corrected to 'owner' by the self-heal
 // above regardless of what's written here.
 // OWNER_EMAIL is the primary owner — who the API key speaks as in the
-// Inbox. Cody is a second owner with exactly the same permissions.
+// Inbox. Cody and the business account (admin@scalbl.io, so it can
+// always reach Settings → Team and set people to the Client role) are
+// owners with exactly the same permissions.
 const OWNER_EMAIL = "henryfortunatow@gmail.com";
-const OWNER_EMAILS = [OWNER_EMAIL, "codyadrury90@gmail.com"];
+const OWNER_EMAILS = [OWNER_EMAIL, "codyadrury90@gmail.com", "admin@scalbl.io"];
 const INVITED_USERS = [
   { name: "Henry", email: "henryfortunatow@gmail.com" },
   { name: "Jem", email: "jem.scalbl@gmail.com" },
@@ -1360,14 +1375,41 @@ function contactFromRow(r) {
   };
 }
 
+// Internal team comments on a lead — the setter's notes, the closer's
+// notes and the imported NOTE column. A client-role user never gets
+// these, in responses or by writing over them.
+export const INTERNAL_CONTACT_FIELD_KEYS = ["note"];
+
+export function contactForClient(c) {
+  if (!c) return c;
+  const fields = { ...(c.fields || {}) };
+  for (const key of INTERNAL_CONTACT_FIELD_KEYS) delete fields[key];
+  return { ...c, notes: "", closerNotes: "", fields };
+}
+
+export function sanitizeClientContactPatch(patch) {
+  const out = { ...patch };
+  delete out.notes;
+  delete out.closerNotes;
+  delete out.dealOutcome;
+  if (out.fields && typeof out.fields === "object") {
+    out.fields = { ...out.fields };
+    for (const key of INTERNAL_CONTACT_FIELD_KEYS) delete out.fields[key];
+  }
+  return out;
+}
+
 // allowedTags scopes the result to a client-role user's own leads —
 // pass null/undefined for full access (owner/super_admin/admin, and
-// API keys).
-export async function getContacts(allowedTags) {
+// API keys). Scoped (client) results also have team comments removed.
+// hideInternal strips team comments (client logins) — it defaults to
+// "whenever scoped" so a caller that forgets it fails closed.
+export async function getContacts(allowedTags, hideInternal = Boolean(allowedTags)) {
   const rows = allowedTags
     ? await query("SELECT * FROM contacts WHERE tag = ANY($1::text[]) ORDER BY created_at DESC", [allowedTags])
     : await query("SELECT * FROM contacts ORDER BY created_at DESC");
-  return rows.map(contactFromRow);
+  const contacts = rows.map(contactFromRow);
+  return hideInternal ? contacts.map(contactForClient) : contacts;
 }
 
 // Used by the API layer to check a client-role caller's tag access
@@ -2005,11 +2047,13 @@ function callLogFromRow(r) {
   };
 }
 
-export async function getCallLog(allowedTags) {
+export async function getCallLog(allowedTags, hideInternal = Boolean(allowedTags)) {
   const rows = allowedTags
     ? await query("SELECT * FROM call_log WHERE tag = ANY($1::text[]) ORDER BY called_at DESC", [allowedTags])
     : await query("SELECT * FROM call_log ORDER BY called_at DESC");
-  return rows.map(callLogFromRow);
+  const entries = rows.map(callLogFromRow);
+  // A client never sees the team's wrap-up notes or which rep called.
+  return hideInternal ? entries.map((e) => ({ ...e, notes: "", userId: null, userName: "" })) : entries;
 }
 
 export async function addCallLogEntry(entry) {
@@ -2059,6 +2103,8 @@ function userFromRow(r) {
     role: r.role || "admin",
     allowedTags: r.allowed_tags || [],
     phone: r.phone || "",
+    allowedTabs: Array.isArray(r.allowed_tabs) ? r.allowed_tabs : null,
+    seeAllContacts: typeof r.see_all_contacts === "boolean" ? r.see_all_contacts : null,
     hasPassword: Boolean(r.password_hash),
     createdAt: r.created_at,
   };
@@ -2076,27 +2122,32 @@ export async function getUsers() {
 }
 
 // Invites a new user (no password yet — they claim the account the
-// same way INVITED_USERS does). role defaults to 'admin'; 'owner' is
+// same way INVITED_USERS does). role defaults to 'client' (least
+// access — staff have to be picked explicitly); 'owner' is
 // rejected here — see server/auth.js, which enforces that only the
 // one hardcoded owner email can ever hold that role.
 export async function inviteUser({ name, email, role, allowedTags }) {
   const rows = await query(
     `INSERT INTO users (name, email, role, allowed_tags) VALUES ($1,$2,$3,$4)
      ON CONFLICT (email) DO NOTHING RETURNING *`,
-    [name, String(email).toLowerCase().trim(), role || "admin", JSON.stringify(allowedTags || [])]
+    [name, String(email).toLowerCase().trim(), role || "client", JSON.stringify(allowedTags || [])]
   );
   return rows[0] ? userFromRow(rows[0]) : null;
 }
 
 // `phone` is only touched when passed (undefined = leave as is); an
 // empty string clears it, which COALESCE alone couldn't express.
-export async function updateUser(id, { name, role, allowedTags, phone }) {
+// allowedTabs / seeAllContacts: undefined leaves them alone, null
+// resets them to the role's default.
+export async function updateUser(id, { name, role, allowedTags, phone, allowedTabs, seeAllContacts }) {
   const rows = await query(
     `UPDATE users SET
        name = COALESCE($2, name),
        role = COALESCE($3, role),
        allowed_tags = COALESCE($4::jsonb, allowed_tags),
-       phone = CASE WHEN $5::boolean THEN NULLIF($6, '') ELSE phone END
+       phone = CASE WHEN $5::boolean THEN NULLIF($6, '') ELSE phone END,
+       allowed_tabs = CASE WHEN $7 THEN $8::jsonb ELSE allowed_tabs END,
+       see_all_contacts = CASE WHEN $9 THEN $10::boolean ELSE see_all_contacts END
      WHERE id = $1 RETURNING *`,
     [
       id,
@@ -2105,6 +2156,10 @@ export async function updateUser(id, { name, role, allowedTags, phone }) {
       allowedTags ? JSON.stringify(allowedTags) : null,
       phone !== undefined,
       phone !== undefined ? String(phone).trim() : null,
+      allowedTabs !== undefined,
+      allowedTabs ? JSON.stringify(allowedTabs) : null,
+      seeAllContacts !== undefined,
+      typeof seeAllContacts === "boolean" ? seeAllContacts : null,
     ]
   );
   return rows[0] ? userFromRow(rows[0]) : null;
@@ -3864,7 +3919,7 @@ export async function getMemoFile(id) {
 export async function getMemoOwner() {
   const rows = await query(
     "SELECT id, name, email FROM users WHERE role = 'owner' ORDER BY (email = $1) DESC, id LIMIT 1",
-    [OWNER_EMAIL]
+    [OWNER_EMAILS[0]]
   );
   return rows[0] ? { id: rows[0].id, name: rows[0].name || rows[0].email } : null;
 }

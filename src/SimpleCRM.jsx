@@ -919,6 +919,13 @@ function auPhoneKey(raw) {
 // Roles that get every tab and every lead. Anything else (including a
 // missing/unknown role) is treated as a tag-scoped client.
 const FULL_ACCESS_ROLES = ["owner", "super_admin", "admin"];
+// Tabs a client login can never be given (mirrors server/auth.js's
+// CLIENT_FORBIDDEN_TABS): the diallers/Bulk SMS reach any lead, AI Voice
+// holds API keys, Settings manages the team.
+const CLIENT_LOCKED_TABS = ["powerdialler", "multiline", "bulk-sms", "proposals", "ai-voice", "settings"];
+// Tabs a client can be given, but which show everything in them rather
+// than only the client's tags — Settings asks before ticking these.
+const CLIENT_UNSCOPED_TABS = ["memo", "csm", "clients", "calendars", "automations"];
 
 const navItems = [
   { key: "memo", label: "Inbox / Memo", icon: Inbox },
@@ -2926,7 +2933,15 @@ export default function SimpleCRM() {
   // (Calendar settings → Team access) rather than created by them.
   const isClientTeamRole = authUser?.role === "client_team";
   const CLIENT_NAV_KEYS = ["conversation", "contacts", "reports", "portal", "calendars"];
-  const visibleNavItems = isClientRole ? navItems.filter((item) => CLIENT_NAV_KEYS.includes(item.key)) : navItems;
+  // The server sends the exact tabs this person can open (Settings →
+  // Access). Fall back to the role default for an older cached shape.
+  const allowedNavKeys = Array.isArray(authUser?.tabs)
+    ? authUser.tabs.filter((k) => !isClientRole || !CLIENT_LOCKED_TABS.includes(k))
+    : isClientRole
+      ? CLIENT_NAV_KEYS
+      : navItems.map((item) => item.key);
+  const hasTabAccess = (key) => allowedNavKeys.includes(key);
+  const visibleNavItems = navItems.filter((item) => allowedNavKeys.includes(item.key));
   // Fetch the CSM tab's code and client list in the background once the
   // app is up (and again on hovering the tab), so opening it doesn't
   // wait on either. AI Voice's code too.
@@ -2944,7 +2959,7 @@ export default function SimpleCRM() {
   }, [page]);
   // Inbox unread count for the sidebar badge, every 20s from anywhere.
   useEffect(() => {
-    if (!authUser || isClientRole) return undefined;
+    if (!authUser || !hasTabAccess("memo")) return undefined;
     let cancelled = false;
     const check = () => {
       if (document.visibilityState === "hidden") return;
@@ -2975,7 +2990,7 @@ export default function SimpleCRM() {
   }, [authUser, isClientRole]);
 
   useEffect(() => {
-    if (!authUser || isClientRole) return undefined;
+    if (!authUser || !hasTabAccess("csm")) return undefined;
     let cancelled = false;
     const check = () =>
       api
@@ -2990,12 +3005,14 @@ export default function SimpleCRM() {
     };
   }, [authUser, isClientRole]);
   useEffect(() => {
-    if (isClientRole && !CLIENT_NAV_KEYS.includes(page)) setPage("conversation");
+    if (authUser && !allowedNavKeys.includes(page) && allowedNavKeys.length) setPage(allowedNavKeys[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser, page]);
   const [teamUsers, setTeamUsers] = useState([]);
   const [teamUsersLoading, setTeamUsersLoading] = useState(false);
-  const emptyInviteForm = { name: "", email: "", role: "admin", allowedTags: [] };
+  // Defaults to Client — the least-access role. Staff roles have to be
+  // picked on purpose so nobody outside the team ends up with full access.
+  const emptyInviteForm = { name: "", email: "", role: "client", allowedTags: [] };
   const [inviteForm, setInviteForm] = useState(emptyInviteForm);
   const [invitingUser, setInvitingUser] = useState(false);
 
@@ -3038,23 +3055,74 @@ export default function SimpleCRM() {
     }
   };
 
+  // Access changes save as soon as they're made (no Save button): the row
+  // updates straight away, shows "Saving…" then "✓ Saved", and if the
+  // server refuses, it goes back to what's really stored and says why.
+  const [userSaveState, setUserSaveState] = useState({}); // { [userId]: { status: "saving" | "saved" | "error", message? } }
+  const userSaveSeq = useRef({}); // latest request per user, so a slow older reply can't overwrite a newer change
+  const userSavedTimers = useRef({});
+  const setSaveState = (id, state) => {
+    clearTimeout(userSavedTimers.current[id]);
+    setUserSaveState((m) => ({ ...m, [id]: state }));
+    if (state?.status === "saved") {
+      userSavedTimers.current[id] = setTimeout(
+        () => setUserSaveState((m) => (m[id]?.status === "saved" ? { ...m, [id]: undefined } : m)),
+        3000
+      );
+    }
+  };
+  // Mirrors server/auth.js's effectiveTabs closely enough to show the
+  // right ticks instantly; the server's reply replaces it a moment later.
+  const previewUser = (u, patch) => {
+    const next = { ...u, ...patch };
+    if (patch.allowedTabs !== undefined || patch.role !== undefined) {
+      const own = Array.isArray(next.allowedTabs) ? next.allowedTabs : null;
+      const clientLogin = !FULL_ACCESS_ROLES.includes(next.role);
+      let tabs = own
+        ? navItems.map((i) => i.key).filter((k) => own.includes(k))
+        : clientLogin
+          ? ["conversation", "contacts", "reports", "portal", "calendars"]
+          : navItems.map((i) => i.key);
+      if (clientLogin) tabs = tabs.filter((k) => !CLIENT_LOCKED_TABS.includes(k));
+      next.tabs = tabs;
+    }
+    if (patch.seeAllContacts !== undefined || patch.role !== undefined) {
+      next.seesAllContacts = !FULL_ACCESS_ROLES.includes(next.role) ? false : next.seeAllContacts !== false;
+    }
+    return next;
+  };
+
   const patchTeamUser = async (id, patch) => {
+    const seq = (userSaveSeq.current[id] || 0) + 1;
+    userSaveSeq.current[id] = seq;
+    setTeamUsers((us) => us.map((u) => (u.id === id ? previewUser(u, patch) : u)));
+    setSaveState(id, { status: "saving" });
     try {
       const updated = await api.patch("/api/users", { id, ...patch });
+      if (userSaveSeq.current[id] !== seq) return; // a newer change is in flight
       setTeamUsers((us) => us.map((u) => (u.id === id ? updated : u)));
+      setSaveState(id, { status: "saved" });
     } catch (err) {
-      setDbError(err.message || "Could not update that user.");
-      // Show what's actually saved rather than a change that didn't stick.
-      loadTeamUsers({ quiet: true });
+      if (userSaveSeq.current[id] !== seq) return;
+      setSaveState(id, { status: "error", message: err.message || "Not saved" });
+      setDbError(`Not saved: ${err.message || "could not update that user."}`);
+      loadTeamUsers({ quiet: true }); // show what's actually stored
     }
   };
 
+  const [removingUserIds, setRemovingUserIds] = useState([]);
   const handleDeleteTeamUser = async (id) => {
+    const target = teamUsers.find((u) => u.id === id);
+    if (!window.confirm(`Remove ${target?.name || "this user"}? They won't be able to log in any more.`)) return;
+    // Gone from the list straight away; put back if the server refuses.
+    setRemovingUserIds((ids) => [...ids, id]);
     try {
       await api.delete(`/api/users?id=${id}`);
       setTeamUsers((us) => us.filter((u) => u.id !== id));
     } catch (err) {
-      setDbError(err.message || "Could not remove that user.");
+      setDbError(`Not removed: ${err.message || "could not remove that user."}`);
+    } finally {
+      setRemovingUserIds((ids) => ids.filter((x) => x !== id));
     }
   };
 
@@ -3067,8 +3135,21 @@ export default function SimpleCRM() {
   const [tagMenuPos, setTagMenuPos] = useState({ top: 0, left: 0 }); // viewport coords of the open popover (fixed, so the table's overflow-hidden can't clip it)
   const toggleTeamUserTag = (u, tag) => {
     const next = u.allowedTags.includes(tag) ? u.allowedTags.filter((t) => t !== tag) : [...u.allowedTags, tag];
-    setTeamUsers((us) => us.map((x) => (x.id === u.id ? { ...x, allowedTags: next } : x)));
     patchTeamUser(u.id, { allowedTags: next });
+  };
+  const toggleTeamUserTab = (u, tab) => {
+    const current = Array.isArray(u.tabs) ? u.tabs : [];
+    const adding = !current.includes(tab);
+    if (adding && !FULL_ACCESS_ROLES.includes(u.role) && CLIENT_UNSCOPED_TABS.includes(tab)) {
+      const label = navItems.find((i) => i.key === tab)?.label || tab;
+      const ok = window.confirm(
+        `${u.name} is a Client. The ${label} tab isn't limited to their tags — they'll see everything in it, ` +
+          `including other clients' data. Give ${u.name} the ${label} tab?`
+      );
+      if (!ok) return;
+    }
+    const next = adding ? [...current, tab] : current.filter((t) => t !== tab);
+    patchTeamUser(u.id, { allowedTabs: next });
   };
   const canDeleteTeamUser = (targetRole) => canManageUsers && targetRole !== "owner";
 
@@ -3117,8 +3198,8 @@ export default function SimpleCRM() {
     let cancelled = false;
     const steps = [
       () => !tagFoldersLoaded && loadTagFolders(),
-      () => !isClientRole && !calendarsLoaded && !calendarsLoading && loadCalendars(),
-      () => !isClientRole && !automationsLoaded && !automationsLoading && loadAutomations(),
+      () => hasTabAccess("calendars") && !calendarsLoaded && !calendarsLoading && loadCalendars(),
+      () => hasTabAccess("automations") && !automationsLoaded && !automationsLoading && loadAutomations(),
       () => !isClientRole && loadApiKey({ quiet: true }),
       () => !isClientRole && loadTeamUsers({ quiet: true }),
       () => !isClientRole && loadPortalInvites({ quiet: true }),
@@ -11168,36 +11249,27 @@ export default function SimpleCRM() {
             <div className="px-4 md:px-8 py-6 border-b border-gray-100">
               <h1 className="text-xl font-bold">Settings</h1>
             </div>
-            <div className="p-4 md:p-8 max-w-lg space-y-6">
+            <div className="px-4 md:px-8 pt-6 pb-10">
               <div>
-                <label className="text-sm font-medium block mb-1.5">Business name</label>
-                <input defaultValue="Scalbl.io" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400" />
-              </div>
-              <div>
-                <label className="text-sm font-medium block mb-1.5">Timezone</label>
-                <select className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 bg-white">
-                  <option>Australia/Adelaide</option>
-                  <option>Australia/Sydney</option>
-                  <option>Australia/Melbourne</option>
-                  <option>Australia/Perth</option>
-                  <option>Australia/Brisbane</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-sm font-medium block mb-1.5">Caller ID number</label>
-                <input defaultValue="+61 8 1234 5678" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400" />
-              </div>
-              <button className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">Save changes</button>
-            </div>
-
-            <div className="px-4 md:px-8 pb-10 max-w-3xl">
-              <div className="border-t border-gray-100 pt-8">
-                <h2 className="text-base font-bold">Team &amp; permissions</h2>
+                <h2 className="text-base font-bold">Team, access &amp; permissions</h2>
                 <p className="text-sm text-gray-500 mt-1 max-w-lg">
-                  Owner and Super Admin can invite people and change roles. Admin sees the team but can't edit
-                  it. A Client account only ever sees Conversation, Contacts and Reports — scoped to the lead
-                  tag(s) picked for them below.
+                  Each row shows exactly what that person can open and see. Tick the tabs they get, and choose
+                  which contacts they see — every contact, or only contacts under the tags listed. Client logins
+                  never see the team's notes; a "—" means that tab can't be given to a Client. Owner and Super Admin can change
+                  access; Admin can see it but not edit it.
                 </p>
+                <p className="text-sm text-gray-700 mt-2 max-w-lg">
+                  <strong>There's no Save button — every change saves on its own.</strong> Watch for{" "}
+                  <span className="text-green-600 font-medium">✓ Saved</span> under the person's name; if it says{" "}
+                  <span className="text-red-600 font-medium">Not saved</span>, the row goes back to what's really stored.
+                </p>
+
+                {!canManageUsers && authUser && (
+                  <div className="mt-4 max-w-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm rounded-lg px-4 py-3">
+                    You're signed in as <strong className="capitalize">{String(authUser.role || "").replace("_", " ")}</strong>.
+                    Only an Owner or Super Admin can add client users or change someone to the Client role.
+                  </div>
+                )}
 
                 {canManageUsers && (
                   <form onSubmit={handleInviteUser} className="flex items-end gap-2 mt-4 flex-wrap">
@@ -11227,10 +11299,10 @@ export default function SimpleCRM() {
                         onChange={(e) => setInviteForm((f) => ({ ...f, role: e.target.value }))}
                         className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
                       >
-                        <option value="admin">Admin</option>
-                        <option value="super_admin">Super Admin</option>
-                        <option value="client">Client</option>
-                        <option value="client_team">Client Team</option>
+                        <option value="client">Client (only their own tags)</option>
+                        <option value="client_team">Client Team (client + assigned calendars)</option>
+                        <option value="admin">Admin (sees everything)</option>
+                        <option value="super_admin">Super Admin (sees everything)</option>
                       </select>
                     </div>
                     <button
@@ -11270,151 +11342,290 @@ export default function SimpleCRM() {
                   </div>
                 )}
 
-                <div className="mt-5 border border-gray-200 rounded-xl overflow-x-auto">
-                  <table className="w-full text-sm whitespace-nowrap">
-                    <thead>
-                      <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60">
-                        <th className="px-4 py-2.5 font-medium">Name</th>
-                        <th className="px-4 py-2.5 font-medium">Email</th>
-                        <th className="px-4 py-2.5 font-medium">Phone</th>
-                        <th className="px-4 py-2.5 font-medium">Role</th>
-                        <th className="px-4 py-2.5 font-medium">Tags</th>
-                        <th className="px-4 py-2.5 font-medium">Status</th>
-                        <th className="px-4 py-2.5"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {teamUsers.map((u) => (
-                        <tr key={u.id} className="border-b border-gray-50 last:border-0">
-                          <td className="px-4 py-3 font-medium">{u.name}</td>
-                          <td className="px-4 py-3 text-gray-500">{u.email}</td>
-                          <td className="px-4 py-3">
-                            {/* Used by the Automations "Send SMS to user" step. Saved on blur. */}
-                            {canManageUsers ? (
-                              <input
-                                key={u.phone || ""}
-                                defaultValue={u.phone || ""}
-                                onBlur={(e) => {
-                                  const phone = e.target.value.trim();
-                                  if (phone !== (u.phone || "")) patchTeamUser(u.id, { phone });
-                                }}
-                                placeholder="04xx xxx xxx"
-                                className="w-36 border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400"
-                              />
-                            ) : (
-                              <span className="text-xs text-gray-600">{u.phone || "—"}</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3">
-                            {u.role === "owner" ? (
-                              <span className="text-xs px-2.5 py-1 rounded-full border bg-purple-50 text-purple-700 border-purple-200">
-                                Owner
-                              </span>
-                            ) : canManageUsers ? (
-                              <select
-                                value={u.role}
-                                onChange={(e) => patchTeamUser(u.id, { role: e.target.value })}
-                                className="border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400 bg-white"
-                              >
-                                <option value="admin">Admin</option>
-                                <option value="super_admin">Super Admin</option>
-                                <option value="client">Client</option>
-                                <option value="client_team">Client Team</option>
-                              </select>
-                            ) : (
-                              <span className="text-xs text-gray-600 capitalize">{u.role.replace("_", " ")}</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3">
-                            {u.role !== "client" && u.role !== "client_team" ? (
-                              <span className="text-gray-300 text-xs">—</span>
-                            ) : (
-                              <div className="relative">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    if (!canManageUsers) return;
-                                    const r = e.currentTarget.getBoundingClientRect();
-                                    // keep the popover on-screen: it's up to 224px tall (max-h-56) and 224px wide (w-56)
-                                    setTagMenuPos({
-                                      top: Math.max(8, Math.min(r.bottom + 6, window.innerHeight - 232)),
-                                      left: Math.max(8, Math.min(r.left, window.innerWidth - 232)),
-                                    });
-                                    setTagMenuUserId((cur) => (cur === u.id ? null : u.id));
-                                  }}
-                                  className="flex flex-wrap gap-1 max-w-[220px]"
+                {[
+                  {
+                    key: "users",
+                    title: "Users",
+                    hint: "Everyone who can log in. Staff see the team's notes; Client logins never do.",
+                    sectionUsers: [...teamUsers].sort(
+                      (x, y) => (x.role === "owner" ? 0 : 1) - (y.role === "owner" ? 0 : 1)
+                    ),
+                    emptyText: "No users yet",
+                  },
+                ].map(({ key, title, hint, sectionUsers, emptyText }) => (
+                  <div key={key} className="mt-6">
+                    <div className="flex items-baseline gap-2">
+                      <h3 className="text-sm font-semibold">{title}</h3>
+                      <span className="text-xs text-gray-400">{sectionUsers.length}</span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">{hint}</p>
+                    <div className="mt-2 border border-gray-200 rounded-xl overflow-x-auto">
+                      <table className="text-sm min-w-full">
+                        <thead>
+                          <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100 bg-gray-50/60 align-bottom">
+                            <th className="px-4 py-2.5 font-medium min-w-[180px]">User</th>
+                            <th className="px-4 py-2.5 font-medium">Phone</th>
+                            <th className="px-4 py-2.5 font-medium">Role</th>
+                            <th className="px-4 py-2.5 font-medium min-w-[240px]">Contacts they can see</th>
+                            {navItems.map((item) => (
+                              <th key={item.key} className="px-1 py-2.5 font-medium text-center normal-case tracking-normal">
+                                <span
+                                  className="inline-block whitespace-nowrap text-[11px] text-gray-500"
+                                  style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
                                 >
-                                  {u.allowedTags.length ? (
-                                    u.allowedTags.map((tag) => (
-                                      <span
-                                        key={tag}
-                                        className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-600 border-gray-200 whitespace-nowrap"
-                                      >
-                                        {tag}
-                                      </span>
-                                    ))
-                                  ) : (
-                                    <span className="text-xs text-red-500">No tags — sees nothing</span>
-                                  )}
-                                </button>
-                                {canManageUsers && tagMenuUserId === u.id && (
-                                  <>
-                                    <div className="fixed inset-0 z-40" onClick={() => setTagMenuUserId(null)} />
-                                    <div
-                                      className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-56 max-h-56 overflow-y-auto"
-                                      style={{ top: tagMenuPos.top, left: tagMenuPos.left }}
-                                    >
-                                      {contactTagNames.map((tag) => (
-                                        <label
-                                          key={tag}
-                                          className="flex items-center gap-2 px-1.5 py-1 rounded-md hover:bg-gray-50 text-xs cursor-pointer"
-                                        >
-                                          <input
-                                            type="checkbox"
-                                            checked={u.allowedTags.includes(tag)}
-                                            onChange={() => toggleTeamUserTag(u, tag)}
-                                            className="w-3.5 h-3.5 rounded border-gray-300"
-                                          />
-                                          <span className="truncate">{tag}</span>
-                                        </label>
-                                      ))}
+                                  {item.label}
+                                </span>
+                              </th>
+                            ))}
+                            <th className="px-4 py-2.5 font-medium">Status</th>
+                            <th className="px-4 py-2.5"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sectionUsers.filter((u) => !removingUserIds.includes(u.id)).map((u) => {
+                            const isOwnerRow = u.role === "owner";
+                            const saveState = userSaveState[u.id];
+                            const editable = canManageUsers && !isOwnerRow;
+                            const userTabs = Array.isArray(u.tabs) ? u.tabs : [];
+                            // Client and Client Team logins (any non-staff role) are
+                            // always limited to their tags and never get the locked tabs.
+                            const clientLogin = !FULL_ACCESS_ROLES.includes(u.role);
+                            const allContacts = clientLogin ? false : (u.seesAllContacts ?? true);
+                            return (
+                              <tr key={u.id} className="border-b border-gray-50 last:border-0 align-top">
+                                <td className="px-4 py-3">
+                                  <div className="font-medium">{u.name}</div>
+                                  <div className="text-xs text-gray-500">{u.email}</div>
+                                  {saveState?.status === "saving" && (
+                                    <div className="mt-1 flex items-center gap-1 text-xs text-gray-500">
+                                      <Loader2 size={12} className="animate-spin" /> Saving…
                                     </div>
-                                  </>
-                                )}
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-gray-500">{u.hasPassword ? "Active" : "Invited"}</td>
-                          <td className="px-4 py-3 text-right">
-                            {canDeleteTeamUser(u.role) && u.id !== authUser?.id && (
-                              <button
-                                onClick={() => handleDeleteTeamUser(u.id)}
-                                className="text-gray-300 hover:text-red-500"
-                                title="Remove user"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                      {!teamUsersLoading && teamUsers.length === 0 && (
-                        <tr>
-                          <td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-400">
-                            No team members yet
-                          </td>
-                        </tr>
-                      )}
-                      {teamUsersLoading && (
-                        <tr>
-                          <td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-400">
-                            <Loader2 size={14} className="animate-spin inline" />
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                                  )}
+                                  {saveState?.status === "saved" && (
+                                    <div className="mt-1 text-xs font-medium text-green-600">✓ Saved</div>
+                                  )}
+                                  {saveState?.status === "error" && (
+                                    <div className="mt-1 text-xs font-medium text-red-600" title={saveState.message}>
+                                      ✕ Not saved — {saveState.message}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3">
+                                  {/* Used by the Automations "Send SMS to user" step. Saved on blur. */}
+                                  {canManageUsers ? (
+                                    <input
+                                      key={u.phone || ""}
+                                      defaultValue={u.phone || ""}
+                                      onBlur={(e) => {
+                                        const phone = e.target.value.trim();
+                                        if (phone !== (u.phone || "")) patchTeamUser(u.id, { phone });
+                                      }}
+                                      placeholder="04xx xxx xxx"
+                                      className="w-36 border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400"
+                                    />
+                                  ) : (
+                                    <span className="text-xs text-gray-600">{u.phone || "—"}</span>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3">
+                                  {isOwnerRow ? (
+                                    <span className="text-xs px-2.5 py-1 rounded-full border bg-purple-50 text-purple-700 border-purple-200">
+                                      Owner
+                                    </span>
+                                  ) : canManageUsers ? (
+                                    <select
+                                      value={u.role}
+                                      onChange={(e) => patchTeamUser(u.id, { role: e.target.value })}
+                                      className="border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400 bg-white"
+                                    >
+                                      <option value="client">Client</option>
+                                      <option value="client_team">Client Team</option>
+                                      <option value="admin">Admin</option>
+                                      <option value="super_admin">Super Admin</option>
+                                    </select>
+                                  ) : (
+                                    <span className="text-xs text-gray-600 capitalize">{u.role.replace("_", " ")}</span>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3">
+                                  {isOwnerRow ? (
+                                    <span className="text-xs text-gray-600">All contacts</span>
+                                  ) : (
+                                    <div className="space-y-1.5">
+                                      {!clientLogin && (
+                                        <select
+                                          value={allContacts ? "all" : "tags"}
+                                          disabled={!editable}
+                                          onChange={(e) => patchTeamUser(u.id, { seeAllContacts: e.target.value === "all" })}
+                                          className="border border-gray-200 rounded-md px-2 py-1 text-xs outline-none focus:border-gray-400 bg-white disabled:bg-gray-50"
+                                        >
+                                          <option value="all">All contacts</option>
+                                          <option value="tags">Only these tags</option>
+                                        </select>
+                                      )}
+                                      {!allContacts && (
+                                        <div className="relative">
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              if (!editable) return;
+                                              const r = e.currentTarget.getBoundingClientRect();
+                                              // keep the popover on-screen: it's up to 224px tall (max-h-56) and 224px wide (w-56)
+                                              setTagMenuPos({
+                                                top: Math.max(8, Math.min(r.bottom + 6, window.innerHeight - 232)),
+                                                left: Math.max(8, Math.min(r.left, window.innerWidth - 232)),
+                                              });
+                                              setTagMenuUserId((cur) => (cur === u.id ? null : u.id));
+                                            }}
+                                            className={`flex flex-wrap gap-1 max-w-[260px] text-left ${editable ? "cursor-pointer" : "cursor-default"}`}
+                                            title={editable ? "Edit tags" : undefined}
+                                          >
+                                            {u.allowedTags.length ? (
+                                              u.allowedTags.map((tag) => (
+                                                <span
+                                                  key={tag}
+                                                  className="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-700 border-gray-200 whitespace-nowrap"
+                                                >
+                                                  {tag}
+                                                </span>
+                                              ))
+                                            ) : (
+                                              <span className="text-xs text-red-500">No tags — sees no contacts</span>
+                                            )}
+                                            {editable && <span className="text-xs text-blue-600 underline ml-1">edit</span>}
+                                          </button>
+                                          {editable && tagMenuUserId === u.id && (
+                                            <>
+                                              <div className="fixed inset-0 z-40" onClick={() => setTagMenuUserId(null)} />
+                                              <div
+                                                className="fixed z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 w-56 max-h-56 overflow-y-auto"
+                                                style={{ top: tagMenuPos.top, left: tagMenuPos.left }}
+                                              >
+                                                {contactTagNames.length === 0 && (
+                                                  <div className="text-xs text-gray-400 px-1.5 py-1">No tags yet</div>
+                                                )}
+                                                {contactTagNames.map((tag) => (
+                                                  <label
+                                                    key={tag}
+                                                    className="flex items-center gap-2 px-1.5 py-1 rounded-md hover:bg-gray-50 text-xs cursor-pointer"
+                                                  >
+                                                    <input
+                                                      type="checkbox"
+                                                      checked={u.allowedTags.includes(tag)}
+                                                      onChange={() => toggleTeamUserTag(u, tag)}
+                                                      className="w-3.5 h-3.5 rounded border-gray-300"
+                                                    />
+                                                    <span className="truncate">{tag}</span>
+                                                  </label>
+                                                ))}
+                                              </div>
+                                            </>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+                                {navItems.map((item) => {
+                                  const locked = clientLogin && CLIENT_LOCKED_TABS.includes(item.key);
+                                  const unscoped = clientLogin && CLIENT_UNSCOPED_TABS.includes(item.key);
+                                  const checked = userTabs.includes(item.key);
+                                  return (
+                                    <td key={item.key} className="px-1 py-3 text-center">
+                                      {locked ? (
+                                        <span
+                                          className="text-gray-300 text-xs cursor-help"
+                                          title={`${item.label} isn't available to Client logins — change their role to Admin to give it.`}
+                                        >
+                                          —
+                                        </span>
+                                      ) : (
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={!editable}
+                                          onChange={() => toggleTeamUserTab(u, item.key)}
+                                          className="w-3.5 h-3.5 rounded border-gray-300 disabled:opacity-60"
+                                          title={`${item.label}: ${checked ? "can open" : "hidden"}${
+                                            unscoped ? " — not limited to their tags" : ""
+                                          }`}
+                                        />
+                                      )}
+                                    </td>
+                                  );
+                                })}
+                                <td className="px-4 py-3 text-gray-500 whitespace-nowrap">
+                                  {u.hasPassword ? "Active" : "Invited"}
+                                  {editable && Array.isArray(u.allowedTabs) && (
+                                    <button
+                                      type="button"
+                                      onClick={() => patchTeamUser(u.id, { allowedTabs: null })}
+                                      className="block text-xs text-blue-600 underline mt-1"
+                                      title="Go back to the default tabs for this role"
+                                    >
+                                      Reset tabs
+                                    </button>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3 text-right">
+                                  {canDeleteTeamUser(u.role) && u.id !== authUser?.id && (
+                                    <button
+                                      onClick={() => handleDeleteTeamUser(u.id)}
+                                      className="text-gray-300 hover:text-red-500"
+                                      title="Remove user"
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {!teamUsersLoading && sectionUsers.length === 0 && (
+                            <tr>
+                              <td colSpan={navItems.length + 6} className="px-4 py-8 text-center text-sm text-gray-400">
+                                {emptyText}
+                              </td>
+                            </tr>
+                          )}
+                          {teamUsersLoading && (
+                            <tr>
+                              <td colSpan={navItems.length + 6} className="px-4 py-8 text-center text-sm text-gray-400">
+                                <Loader2 size={14} className="animate-spin inline" />
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="px-4 md:px-8 pb-10 max-w-3xl">
+              <div className="border-t border-gray-100 pt-8">
+            <div className="max-w-lg space-y-6">
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Business name</label>
+                <input defaultValue="Scalbl.io" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400" />
+              </div>
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Timezone</label>
+                <select className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 bg-white">
+                  <option>Australia/Adelaide</option>
+                  <option>Australia/Sydney</option>
+                  <option>Australia/Melbourne</option>
+                  <option>Australia/Perth</option>
+                  <option>Australia/Brisbane</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Caller ID number</label>
+                <input defaultValue="+61 8 1234 5678" className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400" />
+              </div>
+              <button className="bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium">Save changes</button>
+            </div>
               </div>
             </div>
 
@@ -11700,19 +11911,19 @@ export default function SimpleCRM() {
         )}
         {/* Team only — a client role never gets the nav item, and the
             API refuses them too (api/proposals.js). */}
-        {page === "proposals" && !isClientRole && (
+        {page === "proposals" && !isClientRole && hasTabAccess("proposals") && (
           <Suspense fallback={<TabLoading />}>
             <ProposalsPanel />
           </Suspense>
         )}
-        {(page === "memo" || memoMounted) && !isClientRole && (
+        {(page === "memo" || memoMounted) && hasTabAccess("memo") && (
           <div className={page === "memo" ? "flex-1 flex min-h-0 min-w-0" : "hidden"}>
             <Suspense fallback={<TabLoading />}>
               <MemoPanel active={page === "memo"} currentUserId={authUser?.id} onUnreadChange={setMemoUnread} />
             </Suspense>
           </div>
         )}
-        {(page === "csm" || csmMounted) && (
+        {(page === "csm" || csmMounted) && hasTabAccess("csm") && (
           <div className={page === "csm" ? "flex-1 flex min-h-0 min-w-0" : "hidden"}>
             <Suspense fallback={<TabLoading />}>
               <CsmPanel

@@ -1,6 +1,6 @@
 import { ensureSchema, getContactsByIds, createMultilineBatch, addMultilineBatchCall, mapWithConcurrency } from "../server/db.js";
 import { missingTwilioEnv, getCallerIdPool, generateMultilineConferenceName, publicBaseUrl, MULTILINE_RING_SECONDS } from "../server/twilioCore.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidClientRole, forbidWithoutTab } from "../server/auth.js";
 
 // Dial several leads at once for one rep — first to answer gets
 // bridged in (see api/multiline-status.js), the rest get hung up.
@@ -22,6 +22,7 @@ export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "multiline", res)) return;
   try {
     await ensureSchema();
     if (req.method !== "POST") {

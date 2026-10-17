@@ -26,7 +26,10 @@ import { findApiKeyByHash, touchApiKeyLastUsed, getUserById } from "./db.js";
 //                and set availability.
 export const ROLES = ["owner", "super_admin", "admin", "client", "client_team"];
 const FULL_ACCESS_ROLES = ["owner", "super_admin", "admin"];
-const FULL_ACCESS_TABS = [
+// Every tab in the app (matches navItems in src/SimpleCRM.jsx). Each
+// user's own tab list (users.allowed_tabs, ticked in Settings) is a
+// subset of these; NULL means "the default for their role".
+export const ALL_TABS = [
   "memo",
   "conversation",
   "contacts",
@@ -34,16 +37,27 @@ const FULL_ACCESS_TABS = [
   "multiline",
   "bulk-sms",
   "log",
-  "clients",
   "reports",
   "portal",
   "working-hours",
+  "clients",
+  "csm",
+  "proposals",
+  "calendars",
+  "automations",
+  "ai-voice",
   "settings",
 ];
 // Portal is the client-facing summary screen — a client role sees their
 // own scoped view, everyone else browses it via the client picker.
-const CLIENT_TABS = ["conversation", "contacts", "reports", "portal", "calendars"];
-const CLIENT_TEAM_TABS = CLIENT_TABS;
+export const CLIENT_TABS = ["conversation", "contacts", "reports", "portal", "calendars"];
+// Tabs a client login can never be given, whatever is ticked for them:
+// the diallers and Bulk SMS can reach any lead, Proposals is team-only
+// (api/proposals.js), AI Voice holds API keys, Settings manages the
+// team. Every other tab can be ticked for a client in Settings (Inbox,
+// CSM, Clients, Calendars and Automations aren't
+// limited by tags — the Settings screen warns before granting those).
+export const CLIENT_FORBIDDEN_TABS = ["powerdialler", "multiline", "bulk-sms", "proposals", "ai-voice", "settings"];
 
 // FAIL CLOSED: only the three named roles get full access. Anything
 // else — client, client_team, or a missing/unknown role — is treated
@@ -53,13 +67,57 @@ export function hasFullAccess(role) {
   return FULL_ACCESS_ROLES.includes(role);
 }
 
+export function defaultTabsForRole(role) {
+  return hasFullAccess(role) ? ALL_TABS : CLIENT_TABS;
+}
+
 export function tabsForRole(role) {
-  if (hasFullAccess(role)) return FULL_ACCESS_TABS;
-  return role === "client_team" ? CLIENT_TEAM_TABS : CLIENT_TABS;
+  return defaultTabsForRole(role);
+}
+
+// The tabs one user can actually open: owner (and the API key) always
+// get everything; otherwise their own list if one is set, else their
+// role's default. A client login never gets CLIENT_FORBIDDEN_TABS.
+export function effectiveTabs(user) {
+  if (!user) return [];
+  if (user.role === "owner" || user.isApiKey) return ALL_TABS;
+  const own = Array.isArray(user.allowedTabs) ? user.allowedTabs : null;
+  let tabs = own ? ALL_TABS.filter((t) => own.includes(t)) : defaultTabsForRole(user.role);
+  if (!hasFullAccess(user.role)) tabs = tabs.filter((t) => !CLIENT_FORBIDDEN_TABS.includes(t));
+  return tabs;
+}
+
+export function hasTab(user, tab) {
+  return effectiveTabs(user).includes(tab);
+}
+
+// For endpoints that belong to one tab: 403 unless the caller has it.
+// Writes the response itself; callers do `if (forbidWithoutTab(user, "csm", res)) return;`.
+export function forbidWithoutTab(user, tab, res) {
+  if (hasTab(user, tab)) return false;
+  res.status(403).json({ error: "You don't have access to this tab." });
+  return true;
+}
+
+// Does this user see every contact, or only the ones under their tags?
+// Owner and API keys: always everything. Client logins: always only
+// their tags. Staff: everything unless "only these tags" was set
+// (users.see_all_contacts = false).
+export function seesAllContacts(user) {
+  if (!user) return false;
+  if (user.role === "owner" || user.isApiKey) return true;
+  if (!hasFullAccess(user.role)) return false;
+  return user.seeAllContacts !== false;
 }
 
 export function isDataScoped(role) {
   return !hasFullAccess(role);
+}
+
+// Team comments (lead notes, closer notes, call wrap-up notes) are
+// hidden from client logins — staff limited to some tags still see them.
+export function hidesInternalNotes(user) {
+  return !user || !hasFullAccess(user.role);
 }
 
 // A team member's phone as typed in Settings → Users: digits plus the
@@ -69,11 +127,10 @@ export function isValidUserPhone(phone) {
   return typeof phone === "string" && phone.length <= 32 && /^[\d +()-]*$/.test(phone);
 }
 
-// Everyone but a client role sees every lead; a client role is scoped
-// to their own allowedTags. Returns null for "no filter" (full
-// access) so callers can pass it straight through to a query.
+// Returns null for "no filter" (sees every contact) or the list of tags
+// whose contacts this user may see — see seesAllContacts.
 export function scopeTagsForUser(user) {
-  return isDataScoped(user.role) ? user.allowedTags || [] : null;
+  return seesAllContacts(user) ? null : user.allowedTags || [];
 }
 
 // ---------- Calendars ----------
@@ -95,11 +152,14 @@ export function canAccessCalendar(user, calendar) {
 }
 
 // For the calendar endpoints: 403s anyone who can't use calendars at
-// all. Same calling convention as forbidClientRole.
+// all, or who hasn't been given the Calendars tab. Same calling
+// convention as forbidClientRole.
 export function forbidNonCalendarRole(user, res) {
-  if (canUseCalendars(user.role)) return false;
-  res.status(403).json({ error: "Not available on this account." });
-  return true;
+  if (!canUseCalendars(user.role)) {
+    res.status(403).json({ error: "Not available on this account." });
+    return true;
+  }
+  return forbidWithoutTab(user, "calendars", res);
 }
 
 export function canManageUsers(role) {
@@ -249,13 +309,22 @@ export async function getSessionUser(req) {
     });
   }
   if (!row) return null;
-  return {
-    id: identity.id,
+  return sessionUserFromRow(row);
+}
+
+// The shape every login/session response uses, including the tabs this
+// person can open and whether they see every contact.
+export function sessionUserFromRow(row) {
+  const user = {
+    id: row.id,
     email: row.email,
     name: row.name,
     role: row.role || "admin",
     allowedTags: row.allowed_tags || [],
+    allowedTabs: Array.isArray(row.allowed_tabs) ? row.allowed_tabs : null,
+    seeAllContacts: row.see_all_contacts === false ? false : row.see_all_contacts === true ? true : null,
   };
+  return { ...user, tabs: effectiveTabs(user), seesAllContacts: seesAllContacts(user) };
 }
 
 // ---------- API keys (programmatic/agent access) ----------

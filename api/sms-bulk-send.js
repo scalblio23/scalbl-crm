@@ -1,6 +1,6 @@
 import { ensureSchema, getContactsByIds, logMessage, mapWithConcurrency } from "../server/db.js";
 import { sendSms, missingTwilioEnv } from "../server/twilioCore.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidClientRole, forbidWithoutTab } from "../server/auth.js";
 
 // Cap on how many outbound sends run at once — Twilio will happily
 // queue more, but firing hundreds of REST calls in one tick from a
@@ -18,6 +18,7 @@ export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "bulk-sms", res)) return;
   try {
     await ensureSchema();
     if (req.method !== "POST") {

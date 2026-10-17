@@ -9,7 +9,7 @@ import {
   getCallLog,
   getArchivedTags,
 } from "../server/db.js";
-import { requireAuth, scopeTagsForUser } from "../server/auth.js";
+import { requireAuth, scopeTagsForUser, hidesInternalNotes, hasTab, isDataScoped } from "../server/auth.js";
 
 // GET /api/bootstrap — everything the app needs on first load, in one
 // request. Firing separate requests on mount meant separate
@@ -27,16 +27,19 @@ export default async function handler(req, res) {
     // — those aren't on their tab list at all — so skip fetching them
     // rather than shipping data down just to hide it client-side.
     const scoped = allowedTags !== null;
+    const hideInternal = hidesInternalNotes(user);
+    // A client only gets the Clients list if that tab was ticked for them.
+    const showClients = !isDataScoped(user.role) || hasTab(user, "clients");
     const [clients, clientColumns, contacts, contactColumns, conversations, dialLists, callLog, archivedTags] =
       await Promise.all([
-      scoped ? [] : getClients(),
-      scoped ? [] : getClientColumns(),
-      getContacts(allowedTags),
+      showClients ? getClients() : [],
+      showClients ? getClientColumns() : [],
+      getContacts(allowedTags, hideInternal),
       getContactColumns(),
       getConversations(allowedTags),
       scoped ? [] : getDialLists(),
-      getCallLog(allowedTags),
-      scoped ? [] : getArchivedTags(),
+      getCallLog(allowedTags, hideInternal),
+      isDataScoped(user.role) ? [] : getArchivedTags(),
     ]);
     res.setHeader("Cache-Control", "no-store");
     res.status(200).json({

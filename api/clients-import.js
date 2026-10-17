@@ -1,5 +1,5 @@
 import { ensureSchema, importClientData } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidClientRole, forbidWithoutTab } from "../server/auth.js";
 
 // POST /api/clients-import — wipes existing clients + column
 // definitions and replaces them with the real client-list data from
@@ -9,6 +9,7 @@ export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
+  if (forbidWithoutTab(user, "clients", res)) return;
   try {
     await ensureSchema();
     if (req.method !== "POST") {

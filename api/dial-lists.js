@@ -6,12 +6,15 @@ import {
   removeLeadFromDialLists,
   deleteDialList,
 } from "../server/db.js";
-import { requireAuth, forbidClientRole } from "../server/auth.js";
+import { requireAuth, forbidClientRole, hasTab } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   if (forbidClientRole(user, res)) return;
+  if (!hasTab(user, "powerdialler") && !hasTab(user, "multiline")) {
+    return res.status(403).json({ error: "You don't have access to this tab." });
+  }
   try {
     await ensureSchema();
 
