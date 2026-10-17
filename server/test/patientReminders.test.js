@@ -626,7 +626,7 @@ test("17b: a stuck 'processing' row is failed as outcome_uncertain, never re-sen
 
 // ---------- 18, 19, 20: everything else unchanged ----------
 
-test("19: a calendar WITHOUT the workflow books exactly as before — no reminder rows, automations still fire, GET cancel link still cancels", { skip }, async () => {
+test("19: a calendar WITHOUT the workflow books exactly as before — no reminder rows, automations still fire, Y/N replies ignored", { skip }, async () => {
   const cal = await makeCalendar({ workflow: false, name: "Other Client Calendar" });
   const auto = await db.createAutomation({ name: "other client booking automation" });
   await db.updateAutomation(auto.id, { triggerType: "booking_created", triggerConfig: { calendarId: cal.id }, actions: [{ type: "sms", body: "hi {{name}}" }] });
@@ -638,12 +638,87 @@ test("19: a calendar WITHOUT the workflow books exactly as before — no reminde
   const row = await bookingRow(b.id);
   assert.equal(row.status, "confirmed");
   assert.equal(row.schedule_version, 1);
-  const get = await call(handlers.cancel, { method: "GET", query: { token: b.token } });
-  assert.equal(get.statusCode, 200);
-  assert.equal((await bookingRow(b.id)).status, "cancelled");
   // their Y/N replies are ignored entirely
   assert.equal(await reply(b.phone, "N"), "no_match");
   await db.updateAutomation(auto.id, { active: false });
+});
+
+test("cancel link on a calendar WITHOUT the workflow: GET never cancels, lands on a cancel-only manage view; the button cancels and deletes the Google event", { skip }, async () => {
+  const cal = await makeCalendar({ workflow: false, name: "Plain Calendar" });
+  const b = await book(cal, 50);
+  const b2 = await book(cal, 60);
+  // Booked first so calendar-book doesn't try a real Google call; then
+  // pretend the calendar is connected and the bookings have events.
+  await sql("UPDATE calendars SET google_connected = true, google_calendar_id = 'primary' WHERE id = $1", [cal.id]);
+  await sql("UPDATE calendar_bookings SET google_event_id = 'evt-plain' WHERE id = $1", [b.id]);
+  await sql("UPDATE calendar_bookings SET google_event_id = 'evt-plain-2' WHERE id = $1", [b2.id]);
+  const deleted = [];
+  pr.__setDepsForTests({
+    sendSms: async (m) => { sent.sms.push(m); return { sid: "SMx", status: "queued" }; },
+    sendEmail: async (m) => { sent.email.push(m); },
+    missingEmailEnv: () => [], missingTwilioEnv: () => [], baseUrl: () => BASE, env: () => ({ TWILIO_AUTH_TOKEN: AUTH_TOKEN }),
+    google: { getValidAccessToken: async () => "tok", deleteGoogleEvent: async (args) => { deleted.push(args); } },
+  });
+  try {
+    // What a link scanner / chat preview does: GET (and HEAD) — redirected
+    // to the confirm page, never cancelled, the token moved into the fragment.
+    for (const method of ["GET", "HEAD"]) {
+      const get = await call(handlers.cancel, { method, query: { token: b.token } });
+      assert.equal(get.statusCode, 302);
+      assert.match(get.headers.location, new RegExp(`/book/${cal.slug}#manage=${b.token}&action=cancel$`));
+    }
+    assert.equal((await bookingRow(b.id)).status, "confirmed");
+    assert.equal(deleted.length, 0);
+
+    // Old links keep working even after the calendar is switched off.
+    await db.updateCalendar(cal.id, { active: false });
+    assert.equal((await call(handlers.cancel, { method: "GET", query: { token: b.token } })).statusCode, 302);
+    assert.equal((await bookingRow(b.id)).status, "confirmed");
+
+    // The manage page: cancel-only view, workflow-only actions refused.
+    const view = await call(handlers.manage, { method: "POST", body: { token: b.token, action: "view" } });
+    assert.equal(view.statusCode, 200);
+    assert.equal(view.body.workflow, false);
+    assert.equal(view.body.canChange, true);
+    assert.equal(view.body.calendarName, "Plain Calendar");
+    for (const action of ["confirm", "ics", "reschedule"]) {
+      const r = await call(handlers.manage, { method: "POST", body: { token: b.token, action } });
+      assert.equal(r.statusCode, 400, action);
+    }
+    assert.equal((await bookingRow(b.id)).status, "confirmed");
+    assert.equal((await bookingRow(b.id)).attendance_status === "confirmed", false);
+
+    // The explicit button press.
+    const r = await call(handlers.manage, { method: "POST", body: { token: b.token, action: "cancel" } });
+    assert.equal(r.statusCode, 200);
+    assert.equal(r.body.status, "cancelled");
+    const row = await bookingRow(b.id);
+    assert.equal(row.status, "cancelled");
+    assert.ok(row.cancelled_at);
+    assert.deepEqual(deleted, [{ accessToken: "tok", calendarId: "primary", eventId: "evt-plain" }]);
+    assert.equal((await reminders(b.id)).length, 0);
+    assert.equal(to(b).sms.length + to(b).email.length, 0); // no workflow messages
+
+    // A cancelled booking's link still lands on the page (which says so).
+    assert.equal((await call(handlers.cancel, { method: "GET", query: { token: b.token } })).statusCode, 302);
+
+    // POST to the legacy endpoint still cancels, with the same side effects.
+    const post = await call(handlers.cancel, { method: "POST", body: { token: b2.token } });
+    assert.equal(post.statusCode, 200);
+    assert.equal((await bookingRow(b2.id)).status, "cancelled");
+    assert.equal(deleted.at(-1).eventId, "evt-plain-2");
+
+    // Unknown token → 404 page, not a redirect.
+    const missing = await call(handlers.cancel, { method: "GET", query: { token: "0".repeat(32) } });
+    assert.equal(missing.statusCode, 404);
+  } finally {
+    await sql("UPDATE calendars SET google_connected = false WHERE id = $1", [cal.id]);
+    pr.__setDepsForTests({
+      sendSms: async (msg) => { if (smsBehavior) return smsBehavior(msg); sent.sms.push(msg); return { sid: `SM${sent.sms.length}${Date.now()}`, status: "queued" }; },
+      sendEmail: async (msg) => { sent.email.push(msg); },
+      missingEmailEnv: () => [], missingTwilioEnv: () => [], baseUrl: () => BASE, env: () => ({ TWILIO_AUTH_TOKEN: AUTH_TOKEN }),
+    });
+  }
 });
 
 test("workflow calendar suppresses 'Booking Created' automations (no duplicate confirmations)", { skip }, async () => {
@@ -684,8 +759,9 @@ test("patient cancel link stops that booking's pending automation runs; pre-exis
     context: { calendarId: cal.id, contact: { name: "Old Run" } },
     runAt: new Date(Date.now() + 365 * 86400000),
   });
-  const get = await call(handlers.cancel, { method: "GET", query: { token: b.token } });
-  assert.equal(get.statusCode, 200);
+  // A GET only redirects to the manage page; the cancel itself is a POST.
+  const post = await call(handlers.cancel, { method: "POST", query: {}, body: { token: b.token } });
+  assert.equal(post.statusCode, 200);
   assert.equal((await bookingRow(b.id)).status, "cancelled");
   const run = await runRow(runId);
   assert.equal(run.status, "done");

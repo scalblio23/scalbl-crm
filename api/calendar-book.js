@@ -192,7 +192,10 @@ export default async function handler(req, res) {
     const owner = calendar.ownerUserId ? await getUserById(calendar.ownerUserId) : null;
     const bookerWhen = formatInZone(startUTC, timezone || calendar.timezone);
     const ownerWhen = formatInZone(startUTC, calendar.timezone);
-    const cancelUrl = `${publicBaseUrl() || ""}/api/calendar-cancel?token=${booking.cancelToken}`;
+    // Links to the manage page, where cancelling takes a button press —
+    // link scanners that pre-fetch email URLs can't cancel anything, and
+    // the token sits in the fragment, out of server access logs.
+    const cancelUrl = `${publicBaseUrl() || ""}/book/${calendar.slug}#manage=${booking.cancelToken}&action=cancel`;
 
     // Once a calendar has its own "Booking Created" automation, that
     // automation's own actions ARE the booker-facing confirmation —

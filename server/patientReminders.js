@@ -672,6 +672,14 @@ export async function cancelWorkflowBooking(bookingId, { reason, source, notifyP
     );
     const booking = calendarBookingFromRow(rows[0]);
     const stopped = await cancelPendingReminders(db, bookingId, "booking_cancelled");
+    // Same as cancelCalendarBooking in server/db.js: stop the "Booking
+    // Created" automation runs this booking started, so a cancelled
+    // appointment doesn't keep getting automation reminders either.
+    await db.query(
+      `UPDATE automation_runs SET status = 'done', last_error = 'booking_cancelled', updated_at = now()
+       WHERE status = 'pending' AND context->>'bookingId' = $1`,
+      [String(bookingId)]
+    );
     await logEvent(db, bookingId, "cancelled", { reason, source, remindersStopped: stopped });
     const ids = [];
     if (notifyPatient && workflowFor(locked.calendar)) {
@@ -741,6 +749,8 @@ export function publicBookingView(booking, calendar) {
     attendanceStatus: booking.attendanceStatus,
     meetLink: booking.status === "confirmed" ? meetLinkFor(booking, calendar) : null,
     canChange: booking.status === "confirmed" && new Date(booking.startTime) > new Date(),
+    // false → cancel-only view (no confirm / reschedule / add to calendar)
+    workflow: Boolean(workflow),
   };
 }
 

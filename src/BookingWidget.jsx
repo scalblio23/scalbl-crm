@@ -104,8 +104,9 @@ export default function BookingWidget({ slug }) {
   }, [slug]);
 
   // Manage mode — /book/<slug>#manage=<token>[&action=reschedule|cancel|confirm|calendar],
-  // the link in a patient confirmation-workflow message (see
-  // api/calendar-manage.js). The token lives in the URL fragment, which
+  // the link in a booking confirmation message (see api/calendar-manage.js).
+  // Calendars with the patient confirmation workflow get the full set of
+  // actions; every other calendar gets a cancel-only view. The token lives in the URL fragment, which
   // the browser never sends anywhere; it's posted in request bodies.
   // Nothing happens on page load beyond showing the appointment — every
   // change is an explicit click, so link scanners can't trigger one.
@@ -126,7 +127,7 @@ export default function BookingWidget({ slug }) {
     manageCall("view")
       .then((view) => {
         setManageView(view);
-        if (view.canChange && manageAction === "reschedule") setRescheduling(true);
+        if (view.workflow && view.canChange && manageAction === "reschedule") setRescheduling(true);
         if (view.canChange && manageAction === "cancel") setConfirmingCancel(true);
       })
       .catch((err) => setManageError(err.message || "We couldn't find this appointment."));
@@ -279,7 +280,11 @@ export default function BookingWidget({ slug }) {
     }
   }
 
-  if (loadError) {
+  // The manage view only needs the token, so it still works for a
+  // calendar that has since been deactivated (its booking page 404s).
+  const showManage = manageToken && !rescheduling;
+
+  if (loadError && !showManage) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
         <p className="text-gray-500 text-sm">{loadError}</p>
@@ -287,7 +292,7 @@ export default function BookingWidget({ slug }) {
     );
   }
 
-  if (!calendarInfo) {
+  if (!calendarInfo && !showManage) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <Loader2 size={20} className="animate-spin text-gray-400" />
@@ -295,7 +300,7 @@ export default function BookingWidget({ slug }) {
     );
   }
 
-  if (manageToken && !rescheduling) {
+  if (showManage) {
     const v = manageView;
     const whenText = v
       ? new Intl.DateTimeFormat("en-AU", {
@@ -340,11 +345,16 @@ export default function BookingWidget({ slug }) {
               {v.canChange ? (
                 confirmingCancel ? (
                   <div className="space-y-2">
-                    <p className="text-sm text-gray-700">Cancel this appointment? Its reminders will stop, and you can book another time afterwards.</p>
+                    <p className="text-sm text-gray-700">
+                      {v.workflow
+                        ? "Cancel this appointment? Its reminders will stop, and you can book another time afterwards."
+                        : "Cancel this appointment? You can book another time afterwards."}
+                    </p>
                     <button
                       disabled={manageBusy}
                       onClick={async () => {
-                        if (await runManageAction("cancel", {}, "Your appointment has been cancelled. A confirmation is on its way.")) setConfirmingCancel(false);
+                        const notice = v.workflow ? "Your appointment has been cancelled. A confirmation is on its way." : "Your appointment has been cancelled.";
+                        if (await runManageAction("cancel", {}, notice)) setConfirmingCancel(false);
                       }}
                       className={`${btn} bg-red-600 text-white`}
                     >
@@ -361,7 +371,7 @@ export default function BookingWidget({ slug }) {
                         Join with Google Meet
                       </a>
                     )}
-                    {v.attendanceStatus !== "confirmed" && (
+                    {v.workflow && v.attendanceStatus !== "confirmed" && (
                       <button
                         disabled={manageBusy}
                         onClick={() => runManageAction("confirm", {}, "Thanks for confirming. We look forward to speaking with you.")}
@@ -370,12 +380,16 @@ export default function BookingWidget({ slug }) {
                         Confirm I'll attend
                       </button>
                     )}
-                    <button onClick={downloadIcs} className={`${btn} border border-gray-200 text-gray-700`}>
-                      Add to calendar
-                    </button>
-                    <button onClick={() => { setManageNotice(""); setRescheduling(true); }} className={`${btn} border border-gray-200 text-gray-700`}>
-                      Reschedule
-                    </button>
+                    {v.workflow && (
+                      <>
+                        <button onClick={downloadIcs} className={`${btn} border border-gray-200 text-gray-700`}>
+                          Add to calendar
+                        </button>
+                        <button onClick={() => { setManageNotice(""); setRescheduling(true); }} className={`${btn} border border-gray-200 text-gray-700`}>
+                          Reschedule
+                        </button>
+                      </>
+                    )}
                     <button onClick={() => setConfirmingCancel(true)} className={`${btn} text-red-600`}>
                       Cancel appointment
                     </button>
