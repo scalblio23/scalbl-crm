@@ -10,12 +10,19 @@ import {
 } from "../server/db.js";
 import { requireAuth, canAccessCalendar } from "../server/auth.js";
 import { getValidAccessToken, deleteGoogleEvent } from "../server/googleCalendar.js";
+import { workflowFor, cancelWorkflowBooking, getBookingTimeline } from "../server/patientReminders.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();
+
+    // Reminder/reply audit trail for one booking (the booking list's
+    // "History" view). Same full-access roles as the list itself.
+    if (req.method === "GET" && req.query.timelineFor) {
+      return res.status(200).json(await getBookingTimeline(req.query.timelineFor));
+    }
 
     if (req.method === "GET") {
       const calendarId = req.query.calendarId;
@@ -31,6 +38,20 @@ export default async function handler(req, res) {
       if (!booking) return res.status(404).json({ error: "Booking not found" });
       if (!canAccessCalendar(user, await getCalendarById(booking.calendarId))) {
         return res.status(404).json({ error: "Booking not found" });
+      }
+
+      // On a patient-confirmation-workflow calendar, a setter's cancel
+      // also stops every pending reminder (otherwise the patient would
+      // still get "join now" texts). The patient isn't messaged — same
+      // as a staff cancel has always been.
+      const bookingCalendar = await getCalendarById(booking.calendarId);
+      if (workflowFor(bookingCalendar)) {
+        const result = await cancelWorkflowBooking(booking.id, {
+          reason: "cancelled_by_staff",
+          source: `crm_user_${user.id ?? "api"}`,
+          notifyPatient: false,
+        });
+        return res.status(200).json(result.booking);
       }
 
       if (booking.googleEventId) {

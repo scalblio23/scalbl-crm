@@ -4,6 +4,7 @@
 // (see canAccessCalendar in server/auth.js).
 import { ensureSchema, getCalendars, getCalendarById, createCalendar, updateCalendar, deleteCalendar } from "../server/db.js";
 import { requireAuth, canAccessCalendar, isDataScoped } from "../server/auth.js";
+import { WORKFLOWS } from "../server/patientReminders.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -38,6 +39,13 @@ export default async function handler(req, res) {
         if (patch.metaPixelId && !/^\d{5,20}$/.test(patch.metaPixelId)) {
           return res.status(400).json({ error: "Meta Pixel ID should be a number, e.g. 1234567890123456" });
         }
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(patch, "confirmationWorkflow") &&
+        patch.confirmationWorkflow !== null &&
+        !Object.prototype.hasOwnProperty.call(WORKFLOWS, patch.confirmationWorkflow)
+      ) {
+        return res.status(400).json({ error: "Unknown confirmation workflow" });
       }
       const calendar = await updateCalendar(id, patch);
       if (!calendar) return res.status(404).json({ error: "Calendar not found" });

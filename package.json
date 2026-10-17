@@ -13,7 +13,8 @@
     "test:sip": "node --test --test-timeout=30000 server/sip/test/*.test.js",
     "test:whatsapp": "node --test --test-timeout=30000 server/whatsapp/test/*.test.js",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:reminders": "node --test --test-concurrency=1 --test-timeout=60000 server/test/*.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",

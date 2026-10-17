@@ -19,6 +19,7 @@ import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAva
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "../server/email.js";
 import { sendSms, missingTwilioEnv, publicBaseUrl } from "../server/twilioCore.js";
 import { runAutomationsForTrigger, hasMatchingAutomation } from "../server/automations.js";
+import { workflowFor, createWorkflowGoogleEvent, onWorkflowBookingCreated } from "../server/patientReminders.js";
 
 function formatInZone(iso, timeZone) {
   return new Intl.DateTimeFormat("en-US", {
@@ -119,6 +120,41 @@ export default async function handler(req, res) {
       await setCalendarBookingContactsSynced(booking.id);
     } catch (err) {
       console.error("[api/calendar-book] failed to mark contact Booked", err);
+    }
+
+    // A calendar with the patient confirmation workflow switched on
+    // (currently Keevo Health) is handled end to end by
+    // server/patientReminders.js: Google event with a generated Meet
+    // link, the confirmation email/SMS, and the 12h/30m/10m reminders.
+    // Its own confirmations replace both the generic built-in ones
+    // below AND any "Booking Created" automations — every automation
+    // step messages the booker, so running them as well would send
+    // duplicate confirmations and competing reminders. The owner
+    // notification email is still sent. Every other calendar carries
+    // on exactly as before.
+    const workflow = workflowFor(calendar);
+    if (workflow) {
+      await createWorkflowGoogleEvent(booking, calendar);
+      const owner = calendar.ownerUserId ? await getUserById(calendar.ownerUserId) : null;
+      await Promise.all([
+        onWorkflowBookingCreated(booking.id).catch((err) =>
+          console.error("[api/calendar-book] confirmation workflow failed", err)
+        ),
+        owner?.email && !missingEmailEnv().length
+          ? sendCalendarEmail({
+              to: owner.email,
+              subject: `New booking: ${calendar.name} with ${name}`,
+              html: `
+                <p>${name} just booked <strong>${calendar.name}</strong> for:</p>
+                <p style="font-size:16px"><strong>${formatInZone(startUTC, calendar.timezone)}</strong></p>
+                <p>Contact: ${email || "—"} ${phone || ""}</p>
+                ${notes ? `<p>Notes: ${notes}</p>` : ""}
+              `,
+            }).catch((err) => console.error("[api/calendar-book] owner notification email failed", err))
+          : null,
+      ]);
+      const { cancelToken, ...publicBooking } = booking;
+      return res.status(201).json({ booking: publicBooking, whenText: formatInZone(startUTC, timezone || calendar.timezone) });
     }
 
     if (calendar.googleConnected) {
@@ -241,6 +277,7 @@ export default async function handler(req, res) {
     // suppressed the built-in ones above).
     confirmationSends.push(
       runAutomationsForTrigger("booking_created", {
+        bookingId: booking.id,
         calendarId: calendar.id,
         calendarName: calendar.name,
         contact: { name, email, phone },

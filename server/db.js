@@ -622,6 +622,13 @@ export async function ensureSchema() {
     // to, the exact text, the outcome and when — for the builder's Recent
     // activity. Appended by appendAutomationRunStep below.
     await query(`ALTER TABLE automation_runs ADD COLUMN IF NOT EXISTS step_log JSONB NOT NULL DEFAULT '[]'`);
+    // cancelCalendarBooking stops a booking's still-pending
+    // "Booking Created" runs by context->>'bookingId' — this keeps that
+    // lookup off a full scan of every run ever recorded.
+    await query(
+      `CREATE INDEX IF NOT EXISTS automation_runs_pending_booking_idx
+       ON automation_runs ((context->>'bookingId')) WHERE status = 'pending'`
+    );
     // ---------- Tag folders ----------
     // Purely organizational — a tag is still just free text on a
     // contact (see contacts.tag), never owned by a folder at the
@@ -845,6 +852,8 @@ export async function ensureSchema() {
     await query(
       `ALTER TABLE calendar_bookings ADD COLUMN IF NOT EXISTS contacts_synced BOOLEAN NOT NULL DEFAULT false`
     );
+    // Outside the fast path for the same reason — see its own comment.
+    await ensurePatientReminderSchema();
     // Never allowed to fail schema init — a booking it couldn't match
     // now is retried on the next cold start.
     await syncBookedContactsFromCalendarBookings().catch((err) =>
@@ -2427,7 +2436,7 @@ export async function updateAiVoiceSettings(patch) {
 
 // ---------- Calendars ----------
 
-function calendarFromRow(r, { includeSecrets = false } = {}) {
+export function calendarFromRow(r, { includeSecrets = false } = {}) {
   const base = {
     id: r.id,
     ownerUserId: r.owner_user_id,
@@ -2443,6 +2452,7 @@ function calendarFromRow(r, { includeSecrets = false } = {}) {
     availability: r.availability || {},
     videoConferenceLink: r.video_conference_link || "",
     metaPixelId: r.meta_pixel_id || "",
+    confirmationWorkflow: r.confirmation_workflow || null,
     googleConnected: r.google_connected,
     googleEmail: r.google_email,
     googleCalendarId: r.google_calendar_id || "primary",
@@ -2529,7 +2539,19 @@ export async function updateCalendar(id, patch) {
        active = COALESCE($12, active),
        google_calendar_id = COALESCE($13, google_calendar_id),
        video_conference_link = COALESCE($14, video_conference_link),
-       meta_pixel_id = COALESCE($15, meta_pixel_id)
+       meta_pixel_id = COALESCE($15, meta_pixel_id),
+       -- Nullable by design (null = off), so same "was it part of this
+       -- patch" flag as max_bookings_per_day. enabled_at records when it
+       -- was switched on — the reminder self-heal only ever schedules
+       -- bookings made after that, never retroactively messaging
+       -- people who booked before.
+       confirmation_workflow_enabled_at = CASE
+         WHEN NOT $16 THEN confirmation_workflow_enabled_at
+         WHEN $17::text IS NULL THEN NULL
+         WHEN confirmation_workflow IS NULL THEN now()
+         ELSE confirmation_workflow_enabled_at
+       END,
+       confirmation_workflow = CASE WHEN $16 THEN $17::text ELSE confirmation_workflow END
      WHERE id = $1
      RETURNING *`,
     [
@@ -2548,6 +2570,8 @@ export async function updateCalendar(id, patch) {
       patch.googleCalendarId ?? null,
       patch.videoConferenceLink ?? null,
       patch.metaPixelId ?? null,
+      Object.prototype.hasOwnProperty.call(patch, "confirmationWorkflow"),
+      patch.confirmationWorkflow || null,
     ]
   );
   return rows[0] ? calendarFromRow(rows[0]) : null;
@@ -2602,9 +2626,110 @@ export async function clearCalendarGoogleTokens(id) {
   return rows[0] ? calendarFromRow(rows[0]) : null;
 }
 
+// ---------- Patient confirmation & reminder workflow ----------
+// Opt-in per calendar (calendars.confirmation_workflow, null = off —
+// every existing calendar keeps exactly the behavior it had). The
+// workflow itself lives in server/patientReminders.js; this is just
+// its storage. Purely additive: new nullable columns and new tables,
+// nothing existing renamed, retyped or backfilled.
+//
+// calendar_bookings.status keeps its two existing meanings
+// ('confirmed' = booked/active, 'cancelled') — the double-booking
+// index, slot availability and the contact sync all key off
+// 'confirmed'. Whether the *patient* has confirmed they'll attend is
+// tracked separately in attendance_status, so it can never be
+// mistaken for (or break) the existing booked state.
+async function ensurePatientReminderSchema() {
+  // Runs on every cold start, and ALTER TABLE takes a brief exclusive
+  // lock even when IF NOT EXISTS makes it a no-op — so once everything
+  // below exists (checked with one read-only query), skip it entirely
+  // rather than touching calendar_bookings' lock on every function start.
+  const [{ ready }] = await query(`
+    SELECT to_regclass('public.booking_sms_replies') IS NOT NULL
+      AND to_regclass('public.booking_events') IS NOT NULL
+      AND to_regclass('public.booking_reminders') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'calendar_bookings' AND column_name = 'meet_link')
+      AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'calendars' AND column_name = 'confirmation_workflow_enabled_at')
+      AS ready
+  `);
+  if (ready) return;
+  await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS confirmation_workflow TEXT`);
+  await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS confirmation_workflow_enabled_at TIMESTAMPTZ`);
+  for (const ddl of [
+    "attendance_status TEXT",
+    "attendance_confirmed_at TIMESTAMPTZ",
+    "cancel_reason TEXT",
+    "cancelled_at TIMESTAMPTZ",
+    // Bumped on every reschedule. Every reminder row is stamped with
+    // the version it was scheduled for, so a reminder for an old time
+    // can never send after the booking moves.
+    "schedule_version INTEGER NOT NULL DEFAULT 1",
+    "reschedule_count INTEGER NOT NULL DEFAULT 0",
+    "rescheduled_at TIMESTAMPTZ",
+    // Set once the 12-hour Y/N request for the current version has
+    // gone out — a Y/N reply only acts on a booking that was asked.
+    "confirmation_requested_at TIMESTAMPTZ",
+    "meet_link TEXT",
+  ]) {
+    await query(`ALTER TABLE calendar_bookings ADD COLUMN IF NOT EXISTS ${ddl}`);
+  }
+  // One row per (booking, version, message kind, channel) — the unique
+  // constraint is what makes scheduling idempotent: a retried request,
+  // a duplicate webhook or a second cron tick can't create a second
+  // copy of the same message.
+  await query(`
+    CREATE TABLE IF NOT EXISTS booking_reminders (
+      id SERIAL PRIMARY KEY,
+      booking_id INTEGER NOT NULL REFERENCES calendar_bookings(id) ON DELETE CASCADE,
+      schedule_version INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      send_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      provider_id TEXT,
+      provider_status TEXT,
+      last_error TEXT,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now(),
+      UNIQUE (booking_id, schedule_version, kind, channel)
+    )
+  `);
+  await query(
+    `CREATE INDEX IF NOT EXISTS booking_reminders_due_idx ON booking_reminders (send_at) WHERE status = 'pending'`
+  );
+  await query(
+    `CREATE INDEX IF NOT EXISTS booking_reminders_provider_idx ON booking_reminders (provider_id) WHERE provider_id IS NOT NULL`
+  );
+  // Audit trail: reminders scheduled/sent/failed/skipped, replies,
+  // confirmations, cancellations, reschedules.
+  await query(`
+    CREATE TABLE IF NOT EXISTS booking_events (
+      id SERIAL PRIMARY KEY,
+      booking_id INTEGER REFERENCES calendar_bookings(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      detail JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ DEFAULT now()
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS booking_events_booking_idx ON booking_events (booking_id, id)`);
+  // Twilio MessageSid of every Y/N reply acted on — a webhook Twilio
+  // delivers twice is recognised and ignored the second time.
+  await query(`
+    CREATE TABLE IF NOT EXISTS booking_sms_replies (
+      message_sid TEXT PRIMARY KEY,
+      booking_id INTEGER REFERENCES calendar_bookings(id) ON DELETE SET NULL,
+      intent TEXT,
+      outcome TEXT,
+      created_at TIMESTAMPTZ DEFAULT now()
+    )
+  `);
+}
+
 // ---------- Calendar bookings ----------
 
-function calendarBookingFromRow(r) {
+export function calendarBookingFromRow(r) {
   return {
     id: r.id,
     calendarId: r.calendar_id,
@@ -2619,6 +2744,17 @@ function calendarBookingFromRow(r) {
     googleEventId: r.google_event_id,
     cancelToken: r.cancel_token,
     createdAt: r.created_at,
+    // Patient confirmation workflow (server/patientReminders.js) —
+    // null/0 on every booking from a calendar without it.
+    attendanceStatus: r.attendance_status || null,
+    attendanceConfirmedAt: r.attendance_confirmed_at || null,
+    cancelReason: r.cancel_reason || null,
+    cancelledAt: r.cancelled_at || null,
+    scheduleVersion: r.schedule_version || 1,
+    rescheduleCount: r.reschedule_count || 0,
+    rescheduledAt: r.rescheduled_at || null,
+    confirmationRequestedAt: r.confirmation_requested_at || null,
+    meetLink: r.meet_link || null,
   };
 }
 
@@ -2844,12 +2980,29 @@ export async function getCalendarBookingById(id) {
   return rows[0] ? calendarBookingFromRow(rows[0]) : null;
 }
 
-export async function cancelCalendarBooking(id) {
+export async function cancelCalendarBooking(id, { reason = null } = {}) {
   const rows = await query(
-    "UPDATE calendar_bookings SET status = 'cancelled' WHERE id = $1 RETURNING *",
-    [id]
+    `UPDATE calendar_bookings
+     SET status = 'cancelled', cancel_reason = COALESCE($2, cancel_reason), cancelled_at = COALESCE(cancelled_at, now())
+     WHERE id = $1 RETURNING *`,
+    [id, reason]
   );
+  if (rows[0]) await cancelAutomationRunsForBooking(rows[0].id);
   return rows[0] ? calendarBookingFromRow(rows[0]) : null;
+}
+
+// Stops the "Booking Created" automation runs this booking started
+// (api/calendar-book.js puts bookingId in their context) so a
+// cancelled appointment doesn't keep getting "wait before appointment"
+// reminders. Only 'pending' rows — one mid-advance ('processing') is
+// caught by advanceAutomationRun's own booking-status check instead.
+// Runs from before bookingId was recorded have none and are untouched.
+export async function cancelAutomationRunsForBooking(bookingId) {
+  await query(
+    `UPDATE automation_runs SET status = 'done', last_error = 'booking_cancelled', updated_at = now()
+     WHERE status = 'pending' AND context->>'bookingId' = $1`,
+    [String(bookingId)]
+  );
 }
 
 // ---------- Automations ----------

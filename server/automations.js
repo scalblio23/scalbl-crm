@@ -20,6 +20,7 @@
 import {
   getActiveAutomationsByTrigger,
   getAutomationById,
+  getCalendarBookingById,
   createAutomationRun,
   claimAutomationRunById,
   claimDueAutomationRuns,
@@ -218,6 +219,19 @@ export async function advanceAutomationRun(run) {
       await updateAutomationRunProgress(run.id, { status: "done" });
       return;
     }
+    // A booking_created run belongs to one booking (bookingId in its
+    // context — absent on runs from before that was recorded, which
+    // carry on as they always have). Cancelling the booking already
+    // stops its pending runs (cancelCalendarBooking); this catches one
+    // that was mid-advance at the time, so a cancelled appointment
+    // never gets its later reminders.
+    if (run.context?.bookingId != null) {
+      const booking = await getCalendarBookingById(run.context.bookingId);
+      if (booking?.status !== "confirmed") {
+        await updateAutomationRunProgress(run.id, { status: "done", lastError: "booking_cancelled" });
+        return;
+      }
+    }
     const actions = automation.actions || [];
     let index = run.nextStepIndex;
     while (index < actions.length) {
@@ -272,8 +286,8 @@ export async function advanceAutomationRun(run) {
 // `triggerType`: "contact_tag_added" | "booking_created".
 // `context` shapes:
 //   contact_tag_added: { tag, contact: { name, email, phone } }
-//   booking_created: { calendarId, calendarName, contact, whenText,
-//     timezone, appointmentStartUTC }
+//   booking_created: { bookingId, calendarId, calendarName, contact,
+//     whenText, timezone, appointmentStartUTC }
 export async function runAutomationsForTrigger(triggerType, context) {
   let automations;
   try {

@@ -13,6 +13,7 @@
 // local dev, but set it in Vercel before relying on this in production.
 import { ensureSchema, reapStuckAutomationRuns } from "../server/db.js";
 import { processDueAutomationRuns } from "../server/automations.js";
+import { processDueBookingReminders } from "../server/patientReminders.js";
 
 export default async function handler(req, res) {
   if (process.env.CRON_SECRET) {
@@ -28,7 +29,13 @@ export default async function handler(req, res) {
     // see reapStuckAutomationRuns' own comment in server/db.js.
     await reapStuckAutomationRuns();
     const processed = await processDueAutomationRuns();
-    return res.status(200).json({ processed });
+    // Patient confirmation workflow reminders ride the same cron. A
+    // failure there is logged, never allowed to break automation runs.
+    const reminders = await processDueBookingReminders().catch((err) => {
+      console.error("[api/automations-process-runs] booking reminders failed", err);
+      return 0;
+    });
+    return res.status(200).json({ processed, reminders });
   } catch (err) {
     console.error("[api/automations-process-runs]", err);
     return res.status(500).json({ error: err.message || "Failed to process automation runs" });

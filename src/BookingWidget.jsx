@@ -103,6 +103,78 @@ export default function BookingWidget({ slug }) {
     return () => window.removeEventListener("message", onMessage);
   }, [slug]);
 
+  // Manage mode — /book/<slug>#manage=<token>[&action=reschedule|cancel|confirm|calendar],
+  // the link in a patient confirmation-workflow message (see
+  // api/calendar-manage.js). The token lives in the URL fragment, which
+  // the browser never sends anywhere; it's posted in request bodies.
+  // Nothing happens on page load beyond showing the appointment — every
+  // change is an explicit click, so link scanners can't trigger one.
+  const manageParams = useMemo(() => new URLSearchParams(window.location.hash.slice(1)), []);
+  const manageToken = manageParams.get("manage");
+  const manageAction = manageParams.get("action");
+  const [manageView, setManageView] = useState(null);
+  const [manageError, setManageError] = useState("");
+  const [manageBusy, setManageBusy] = useState(false);
+  const [manageNotice, setManageNotice] = useState("");
+  const [rescheduling, setRescheduling] = useState(false);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+
+  const manageCall = (action, extra = {}) => api.post("/api/calendar-manage", { token: manageToken, action, ...extra });
+
+  useEffect(() => {
+    if (!manageToken) return;
+    manageCall("view")
+      .then((view) => {
+        setManageView(view);
+        if (view.canChange && manageAction === "reschedule") setRescheduling(true);
+        if (view.canChange && manageAction === "cancel") setConfirmingCancel(true);
+      })
+      .catch((err) => setManageError(err.message || "We couldn't find this appointment."));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manageToken]);
+
+  async function runManageAction(action, extra, notice) {
+    setManageBusy(true);
+    setManageError("");
+    try {
+      const view = await manageCall(action, extra);
+      setManageView(view);
+      setManageNotice(notice);
+      return true;
+    } catch (err) {
+      setManageError(err.message || "Something went wrong — please try again.");
+      return false;
+    } finally {
+      setManageBusy(false);
+    }
+  }
+
+  async function downloadIcs() {
+    try {
+      const { ics } = await manageCall("ics");
+      const url = URL.createObjectURL(new Blob([ics], { type: "text/calendar" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "appointment.ics";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setManageError(err.message || "Couldn't create the calendar invite.");
+    }
+  }
+
+  async function submitReschedule() {
+    const ok = await runManageAction(
+      "reschedule",
+      { startUTC: selectedSlot.startUTC, endUTC: selectedSlot.endUTC, timezone },
+      "Your appointment has been moved. A new confirmation is on its way."
+    );
+    if (ok) {
+      setRescheduling(false);
+      setSelectedSlot(null);
+    }
+  }
+
   const tzOptions = useMemo(() => timezoneOptions(), []);
   const visibleDays = useMemo(() => Array.from({ length: 7 }, (_, i) => {
     const d = new Date(windowStart);
@@ -223,6 +295,104 @@ export default function BookingWidget({ slug }) {
     );
   }
 
+  if (manageToken && !rescheduling) {
+    const v = manageView;
+    const whenText = v
+      ? new Intl.DateTimeFormat("en-AU", {
+          timeZone: v.timezone,
+          weekday: "long",
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          timeZoneName: "short",
+        }).format(new Date(v.startTime))
+      : "";
+    const btn = "w-full flex items-center justify-center gap-2 text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40";
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+        <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-8 max-w-md w-full">
+          {!v ? (
+            manageError ? (
+              <p className="text-sm text-gray-500 text-center">{manageError}</p>
+            ) : (
+              <div className="flex justify-center">
+                <Loader2 size={20} className="animate-spin text-gray-400" />
+              </div>
+            )
+          ) : (
+            <div className="space-y-4">
+              <div className="text-center">
+                <CalendarDays size={28} className="text-gray-400 mx-auto mb-3" />
+                <h1 className="text-lg font-bold">{v.calendarName}</h1>
+                <p className="text-sm font-medium text-gray-900 mt-1">{whenText}</p>
+                {v.status === "cancelled" ? (
+                  <p className="text-sm text-red-600 mt-2">This appointment is cancelled.</p>
+                ) : v.attendanceStatus === "confirmed" ? (
+                  <p className="text-sm text-emerald-600 mt-2 flex items-center justify-center gap-1">
+                    <CheckCircle2 size={14} /> You've confirmed you'll attend.
+                  </p>
+                ) : null}
+              </div>
+              {manageNotice && <p className="text-sm text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2">{manageNotice}</p>}
+              {manageError && <p className="text-sm text-red-600">{manageError}</p>}
+              {v.canChange ? (
+                confirmingCancel ? (
+                  <div className="space-y-2">
+                    <p className="text-sm text-gray-700">Cancel this appointment? Its reminders will stop, and you can book another time afterwards.</p>
+                    <button
+                      disabled={manageBusy}
+                      onClick={async () => {
+                        if (await runManageAction("cancel", {}, "Your appointment has been cancelled. A confirmation is on its way.")) setConfirmingCancel(false);
+                      }}
+                      className={`${btn} bg-red-600 text-white`}
+                    >
+                      {manageBusy && <Loader2 size={14} className="animate-spin" />} Yes, cancel it
+                    </button>
+                    <button onClick={() => setConfirmingCancel(false)} className={`${btn} border border-gray-200 text-gray-700`}>
+                      Keep my appointment
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {v.meetLink && (
+                      <a href={v.meetLink} target="_blank" rel="noreferrer noopener" className={`${btn} bg-gray-900 text-white`}>
+                        Join with Google Meet
+                      </a>
+                    )}
+                    {v.attendanceStatus !== "confirmed" && (
+                      <button
+                        disabled={manageBusy}
+                        onClick={() => runManageAction("confirm", {}, "Thanks for confirming. We look forward to speaking with you.")}
+                        className={`${btn} ${manageAction === "confirm" ? "bg-emerald-600 text-white" : "border border-gray-200 text-gray-700"}`}
+                      >
+                        Confirm I'll attend
+                      </button>
+                    )}
+                    <button onClick={downloadIcs} className={`${btn} border border-gray-200 text-gray-700`}>
+                      Add to calendar
+                    </button>
+                    <button onClick={() => { setManageNotice(""); setRescheduling(true); }} className={`${btn} border border-gray-200 text-gray-700`}>
+                      Reschedule
+                    </button>
+                    <button onClick={() => setConfirmingCancel(true)} className={`${btn} text-red-600`}>
+                      Cancel appointment
+                    </button>
+                  </div>
+                )
+              ) : (
+                <a href={`/book/${slug}`} className={`${btn} bg-gray-900 text-white`}>
+                  Book another time
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (confirmation) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
@@ -246,6 +416,14 @@ export default function BookingWidget({ slug }) {
               <CalendarDays size={18} className="text-gray-400" /> {calendarInfo.name}
             </h1>
             {calendarInfo.description && <p className="text-sm text-gray-500 mt-1">{calendarInfo.description}</p>}
+            {rescheduling && (
+              <p className="text-sm text-gray-700 mt-2">
+                Pick a new time.{" "}
+                <button type="button" onClick={() => { setRescheduling(false); setSelectedSlot(null); }} className="text-gray-400 hover:text-gray-700 underline">
+                  Back
+                </button>
+              </p>
+            )}
             <p className="text-xs text-gray-400 mt-1">{calendarInfo.eventLengthMinutes} minute call</p>
           </div>
           <div className="w-full sm:w-56 shrink-0">
@@ -336,6 +514,24 @@ export default function BookingWidget({ slug }) {
                 )}
               </div>
             )}
+          </div>
+        ) : rescheduling ? (
+          <div className="p-6 max-w-sm mx-auto space-y-4">
+            <button type="button" onClick={() => setSelectedSlot(null)} className="text-xs text-gray-400 hover:text-gray-700">
+              ← Pick a different time
+            </button>
+            <p className="text-sm font-medium text-gray-900">
+              Move to {dayLabel(new Date(selectedSlot.startUTC), timezone)} at {timeLabel(selectedSlot.startUTC, timezone)}?
+            </p>
+            {manageError && <p className="text-sm text-red-600">{manageError}</p>}
+            <button
+              onClick={submitReschedule}
+              disabled={manageBusy}
+              className="w-full flex items-center justify-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40"
+            >
+              {manageBusy && <Loader2 size={14} className="animate-spin" />}
+              Confirm new time
+            </button>
           </div>
         ) : (
           <form onSubmit={submitBooking} className="p-6 max-w-sm mx-auto space-y-4">
