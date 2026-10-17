@@ -4,13 +4,20 @@
 // (see canAccessCalendar in server/auth.js).
 import { ensureSchema, getCalendars, getCalendarById, createCalendar, updateCalendar, deleteCalendar } from "../server/db.js";
 import { requireAuth, canAccessCalendar, isDataScoped } from "../server/auth.js";
-import { WORKFLOWS } from "../server/patientReminders.js";
+import { WORKFLOWS, workflowReadiness } from "../server/patientReminders.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
   try {
     await ensureSchema();
+
+    // Setup checklist for the "Patient reminders" settings tab.
+    if (req.method === "GET" && req.query.workflowReadiness) {
+      const calendar = await getCalendarById(req.query.workflowReadiness);
+      if (!canAccessCalendar(user, calendar)) return res.status(404).json({ error: "Calendar not found" });
+      return res.status(200).json({ checks: workflowReadiness(calendar) });
+    }
 
     if (req.method === "GET") {
       const calendars = await getCalendars();

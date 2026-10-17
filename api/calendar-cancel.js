@@ -5,8 +5,7 @@
 // v1); returns the same result either way.
 import { ensureSchema, getCalendarBookingByCancelToken, cancelCalendarBooking, getCalendarById } from "../server/db.js";
 import { getValidAccessToken, deleteGoogleEvent } from "../server/googleCalendar.js";
-import { workflowFor, cancelWorkflowBooking } from "../server/patientReminders.js";
-import { publicBaseUrl } from "../server/twilioCore.js";
+import { workflowFor, cancelWorkflowBooking, patientLinkBase } from "../server/patientReminders.js";
 
 export default async function handler(req, res) {
   try {
@@ -29,7 +28,7 @@ export default async function handler(req, res) {
     const workflowCalendar = await getCalendarById(booking.calendarId);
     if (workflowFor(workflowCalendar)) {
       if (req.method === "GET") {
-        res.setHeader("Location", `${publicBaseUrl() || ""}/book/${workflowCalendar.slug}#manage=${booking.cancelToken}&action=cancel`);
+        res.setHeader("Location", `${patientLinkBase() || ""}/book/${workflowCalendar.slug}#manage=${booking.cancelToken}&action=cancel`);
         return res.status(302).end();
       }
       await cancelWorkflowBooking(booking.id, { reason: "cancelled_by_patient", source: "cancel_link" });

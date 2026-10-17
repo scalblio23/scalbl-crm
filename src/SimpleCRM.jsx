@@ -1400,6 +1400,18 @@ export default function SimpleCRM() {
   const timezoneDropdownOptions = useMemo(() => timezoneOptions(), []);
   const timeOfDayDropdownOptions = useMemo(() => timeOfDayOptions(), []);
 
+  // Setup checklist for the "Patient reminders" tab — refetched each
+  // time the tab is opened, so fixing an env var and redeploying shows up.
+  const [workflowReadiness, setWorkflowReadiness] = useState(null);
+  useEffect(() => {
+    if (!openCalendarId || calendarSettingsTab !== "reminders") return;
+    setWorkflowReadiness(null);
+    api
+      .get(`/api/calendars?workflowReadiness=${openCalendarId}`)
+      .then((r) => setWorkflowReadiness(r.checks))
+      .catch(() => setWorkflowReadiness([]));
+  }, [openCalendarId, calendarSettingsTab]);
+
   useEffect(() => {
     if (!openCalendarId) return;
     api
@@ -10304,11 +10316,38 @@ export default function SimpleCRM() {
                           Created” automations for it, so patients never get two sets of messages. It only applies to
                           bookings made after it's switched on.
                         </p>
+                        <div className="border border-gray-100 rounded-lg divide-y divide-gray-100">
+                          {!workflowReadiness ? (
+                            <p className="px-4 py-3 text-sm text-gray-400">Checking setup…</p>
+                          ) : (
+                            workflowReadiness.map((c) => (
+                              <div key={c.key} className="px-4 py-2.5">
+                                <p className="text-sm flex items-center gap-2">
+                                  <span
+                                    className={
+                                      c.ok === true ? "text-emerald-600" : c.ok === false && c.required ? "text-red-500" : "text-amber-500"
+                                    }
+                                  >
+                                    {c.ok === true ? "✓" : c.ok === false && c.required ? "✕" : "!"}
+                                  </span>
+                                  {c.label}
+                                  {c.required && c.ok === false && <span className="text-xs text-red-500">(required)</span>}
+                                </p>
+                                {c.ok !== true && <p className="text-xs text-gray-500 mt-0.5 ml-5">{c.fix}</p>}
+                              </div>
+                            ))
+                          )}
+                        </div>
                         <label className="flex items-center gap-2 text-sm font-medium">
                           <input
                             type="checkbox"
                             checked={openCalendar.confirmationWorkflow === "keevo_health"}
-                            disabled={savingCalendar}
+                            disabled={
+                              savingCalendar ||
+                              // Can always be switched off; switching on needs every required item green.
+                              (openCalendar.confirmationWorkflow !== "keevo_health" &&
+                                (!workflowReadiness || workflowReadiness.some((c) => c.required && c.ok === false)))
+                            }
                             onChange={(e) => {
                               const on = e.target.checked;
                               if (
