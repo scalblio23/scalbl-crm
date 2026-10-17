@@ -29,6 +29,20 @@ const SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email",
 ].join(" ");
 
+// Google's consent screen shows each permission as its own checkbox,
+// and a user can untick "View and edit events" while still finishing
+// the flow. The connection then looked fine (free/busy still worked
+// through calendar.readonly) but every booking's event insert came
+// back 403 and was only ever logged — appointments silently never
+// reached Google Calendar. The callback now checks the granted scopes
+// against this and refuses a connection that can't create events.
+export const GOOGLE_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+
+export function hasGoogleEventsScope(grantedScope) {
+  const granted = String(grantedScope || "").split(/\s+/);
+  return granted.includes(GOOGLE_EVENTS_SCOPE) || granted.includes("https://www.googleapis.com/auth/calendar");
+}
+
 export function missingGoogleEnv(env = process.env) {
   return ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"].filter((key) => !env[key]);
 }
@@ -78,6 +92,16 @@ async function googleFetch(url, options) {
   const res = await fetch(url, options);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
+    // invalid_grant = the refresh token is dead: the user revoked
+    // access, changed their password, or (very commonly) the Google
+    // Cloud OAuth app is still in "Testing", where Google expires every
+    // refresh token after 7 days. Only reconnecting fixes it, so say so.
+    if (body?.error === "invalid_grant") {
+      throw new Error(
+        "Google access has expired or was revoked — disconnect and reconnect Google on this calendar. " +
+          "(If this keeps happening every week, publish the Google Cloud OAuth app from Testing to Production.)"
+      );
+    }
     const message = body?.error_description || body?.error?.message || body?.error || res.statusText;
     throw new Error(`Google API error (${res.status}): ${message}`);
   }
@@ -104,6 +128,7 @@ export async function exchangeCodeForTokens({ code, baseUrl }, env = process.env
     accessToken: body.access_token,
     refreshToken: body.refresh_token || null,
     expiresAt: new Date(Date.now() + body.expires_in * 1000).toISOString(),
+    scope: body.scope || "",
   };
 }
 
@@ -147,6 +172,11 @@ export async function getValidAccessToken(calendar, env = process.env) {
   }
   const { accessToken, expiresAt: newExpiresAt } = await refreshAccessToken(calendar.googleRefreshToken, env);
   await updateCalendarGoogleAccessToken(calendar.id, { accessToken, expiry: newExpiresAt });
+  // Kept on the in-memory row too, so a second call in the same request
+  // (free/busy check, then the event insert) reuses it instead of
+  // refreshing again.
+  calendar.googleAccessToken = accessToken;
+  calendar.googleTokenExpiry = newExpiresAt;
   return accessToken;
 }
 
@@ -161,7 +191,10 @@ export async function listGoogleCalendars({ accessToken }) {
   const body = await googleFetch(`${GOOGLE_CALENDAR_API}/users/me/calendarList`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  const items = body.items || [];
+  // Only calendars the account can add events to — picking one that's
+  // merely shared read-only with it (accessRole "reader" /
+  // "freeBusyReader") made every booking's event insert fail with 403.
+  const items = (body.items || []).filter((c) => c.accessRole === "owner" || c.accessRole === "writer");
   return items
     .map((c) => ({ id: c.id, summary: c.summary || c.id, primary: Boolean(c.primary) }))
     .sort((a, b) => (a.primary === b.primary ? a.summary.localeCompare(b.summary) : a.primary ? -1 : 1));

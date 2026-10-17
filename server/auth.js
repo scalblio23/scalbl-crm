@@ -11,16 +11,21 @@ import crypto from "crypto";
 import { findApiKeyByHash, touchApiKeyLastUsed, getUserById } from "./db.js";
 
 // ---------- Roles ----------
-// owner        — henryfortunatow@gmail.com only (see db.js's
-//                self-healing UPDATE in ensureSchema). All tabs, all
-//                lead data, can't be edited or deleted by anyone.
+// owner        — pinned by email in code (see db.js's OWNER_EMAILS and
+//                the self-healing UPDATE in ensureSchema). All tabs,
+//                all lead data, can't be edited or deleted by anyone.
 // super_admin  — all tabs, all lead data, can edit other users
-//                (except the owner) and can't delete the owner.
+//                (except an owner) and can't delete an owner.
 // admin        — all tabs, all lead data, can't edit or delete anyone.
 // client       — only Conversation/Contacts/Reports/Portal/Calendars,
 //                only leads whose tag is in that user's allowedTags,
-//                and only calendars they own.
-export const ROLES = ["owner", "super_admin", "admin", "client"];
+//                and only calendars they own or are assigned to.
+// client_team  — everything a client gets; meant for a client's staff
+//                who are assigned calendars (Calendar settings → Team
+//                access) so they can connect their own Google/Outlook
+//                and set availability.
+export const ROLES = ["owner", "super_admin", "admin", "client", "client_team"];
+const FULL_ACCESS_ROLES = ["owner", "super_admin", "admin"];
 const FULL_ACCESS_TABS = [
   "memo",
   "conversation",
@@ -38,22 +43,23 @@ const FULL_ACCESS_TABS = [
 // Portal is the client-facing summary screen — a client role sees their
 // own scoped view, everyone else browses it via the client picker.
 const CLIENT_TABS = ["conversation", "contacts", "reports", "portal", "calendars"];
+const CLIENT_TEAM_TABS = CLIENT_TABS;
+
+// FAIL CLOSED: only the three named roles get full access. Anything
+// else — client, client_team, or a missing/unknown role — is treated
+// as a tag-scoped client everywhere, so a new role can never widen
+// access by slipping past a `role === "client"` check.
+export function hasFullAccess(role) {
+  return FULL_ACCESS_ROLES.includes(role);
+}
 
 export function tabsForRole(role) {
-  return role === "client" ? CLIENT_TABS : FULL_ACCESS_TABS;
+  if (hasFullAccess(role)) return FULL_ACCESS_TABS;
+  return role === "client_team" ? CLIENT_TEAM_TABS : CLIENT_TABS;
 }
 
 export function isDataScoped(role) {
-  return role === "client";
-}
-
-// Full-access roles manage every calendar; a client only the calendars
-// they own (the ones they created), so one client never sees another
-// client's calendar or bookings.
-export function canAccessCalendar(user, calendar) {
-  if (!calendar) return false;
-  if (!isDataScoped(user.role)) return true;
-  return calendar.ownerUserId != null && Number(calendar.ownerUserId) === Number(user.id);
+  return !hasFullAccess(role);
 }
 
 // A team member's phone as typed in Settings → Users: digits plus the
@@ -68,6 +74,32 @@ export function isValidUserPhone(phone) {
 // access) so callers can pass it straight through to a query.
 export function scopeTagsForUser(user) {
   return isDataScoped(user.role) ? user.allowedTags || [] : null;
+}
+
+// ---------- Calendars ----------
+// Full-access roles manage every calendar; a client or client_team
+// user only the calendars they own (the ones they created) or have
+// been assigned to (Calendar settings → Team access), so one client
+// never sees another client's calendar or bookings. An unknown role
+// gets none.
+export function canUseCalendars(role) {
+  return hasFullAccess(role) || role === "client" || role === "client_team";
+}
+
+export function canAccessCalendar(user, calendar) {
+  if (!calendar) return false;
+  if (hasFullAccess(user.role)) return true;
+  if (!canUseCalendars(user.role)) return false;
+  if (calendar.ownerUserId != null && Number(calendar.ownerUserId) === Number(user.id)) return true;
+  return (calendar.assignedUserIds || []).map(Number).includes(Number(user.id));
+}
+
+// For the calendar endpoints: 403s anyone who can't use calendars at
+// all. Same calling convention as forbidClientRole.
+export function forbidNonCalendarRole(user, res) {
+  if (canUseCalendars(user.role)) return false;
+  res.status(403).json({ error: "Not available on this account." });
+  return true;
 }
 
 export function canManageUsers(role) {
@@ -87,13 +119,13 @@ export function canDeleteUser(actingRole, targetRole) {
   return canManageUsers(actingRole);
 }
 
-// For endpoints a client role has no business reaching at all (client
+// For endpoints a client role (client or client_team) has no business reaching at all (client
 // org management, dial lists, bulk/reset imports, column schema
 // changes) — not just data they can't see, but capability they don't
 // have, regardless of tag scoping. Writes the 403 itself; callers do
 // `if (forbidClientRole(user, res)) return;` right after requireAuth.
 export function forbidClientRole(user, res) {
-  if (user.role !== "client") return false;
+  if (hasFullAccess(user.role)) return false;
   res.status(403).json({ error: "Not available on this account." });
   return true;
 }

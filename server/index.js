@@ -113,6 +113,10 @@ import calendarGoogleConnectHandler from "../api/calendar-google-connect.js";
 import calendarGoogleCallbackHandler from "../api/calendar-google-callback.js";
 import calendarGoogleDisconnectHandler from "../api/calendar-google-disconnect.js";
 import calendarGoogleCalendarsHandler from "../api/calendar-google-calendars.js";
+import calendarOutlookConnectHandler from "../api/calendar-outlook-connect.js";
+import calendarOutlookCallbackHandler from "../api/calendar-outlook-callback.js";
+import calendarOutlookDisconnectHandler from "../api/calendar-outlook-disconnect.js";
+import calendarOutlookCalendarsHandler from "../api/calendar-outlook-calendars.js";
 import calendarBookingsHandler from "../api/calendar-bookings.js";
 import calendarPublicHandler from "../api/calendar-public.js";
 import calendarSlotsHandler from "../api/calendar-slots.js";
@@ -149,6 +153,7 @@ import {
   canDeleteUser,
   forbidClientRole,
   isValidUserPhone,
+  hasFullAccess,
   ROLES,
 } from "./auth.js";
 import {
@@ -212,6 +217,7 @@ const PUBLIC_PATHS = new Set([
   // for how each authenticates itself instead: signed OAuth state,
   // a calendar's own slug, or a booking's cancel token).
   "/api/calendar-google-callback",
+  "/api/calendar-outlook-callback",
   "/api/calendar-public",
   "/api/calendar-slots",
   "/api/calendar-book",
@@ -263,11 +269,9 @@ app.use(
     "/api/soundboard-clips",
     "/api/users", // team roster (names/emails) is internal-only
     "/api/portal-invites",
-    "/api/calendars",
-    "/api/calendar-google-connect",
-    "/api/calendar-google-disconnect",
-    "/api/calendar-google-calendars",
-    "/api/calendar-bookings",
+    // The calendar routes aren't here: a client_team user can reach
+    // them for their own assigned calendars, so each handler does its
+    // own forbidNonCalendarRole + canAccessCalendar check.
     "/api/automations",
     "/api/proposals",
     "/api/archived-tags",
@@ -399,7 +403,7 @@ async function requireKeyManager(req, res) {
     res.status(401).json({ error: "Log in to manage the API key." });
     return null;
   }
-  if (user.role === "client") {
+  if (!hasFullAccess(user.role)) {
     res.status(403).json({ error: "Not available on this account." });
     return null;
   }
@@ -982,7 +986,7 @@ async function requireAiVoiceSettingsManager(req, res) {
     res.status(401).json({ error: "Log in to manage AI Voice settings." });
     return null;
   }
-  if (user.role === "client") {
+  if (!hasFullAccess(user.role)) {
     res.status(403).json({ error: "Not available on this account." });
     return null;
   }
@@ -1536,6 +1540,10 @@ app.all("/api/calendar-google-connect", calendarGoogleConnectHandler);
 app.all("/api/calendar-google-callback", calendarGoogleCallbackHandler);
 app.all("/api/calendar-google-disconnect", calendarGoogleDisconnectHandler);
 app.all("/api/calendar-google-calendars", calendarGoogleCalendarsHandler);
+app.all("/api/calendar-outlook-connect", calendarOutlookConnectHandler);
+app.all("/api/calendar-outlook-callback", calendarOutlookCallbackHandler);
+app.all("/api/calendar-outlook-disconnect", calendarOutlookDisconnectHandler);
+app.all("/api/calendar-outlook-calendars", calendarOutlookCalendarsHandler);
 app.all("/api/calendar-bookings", calendarBookingsHandler);
 app.all("/api/calendar-public", calendarPublicHandler);
 app.all("/api/calendar-slots", calendarSlotsHandler);

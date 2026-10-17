@@ -1,5 +1,5 @@
 import { ensureSchema, getAiVoiceSettings, updateAiVoiceSettings } from "../server/db.js";
-import { getSessionUser } from "../server/auth.js";
+import { getSessionUser, hasFullAccess } from "../server/auth.js";
 import { DEFAULT_SYSTEM_PROMPT } from "../server/aiVoiceCore.js";
 
 const ENV_FALLBACK_KEYS = {
@@ -35,7 +35,7 @@ export default async function handler(req, res) {
   if (!user) {
     return res.status(401).json({ error: "Log in to manage AI Voice settings." });
   }
-  if (user.role === "client") {
+  if (!hasFullAccess(user.role)) {
     return res.status(403).json({ error: "Not available on this account." });
   }
   try {

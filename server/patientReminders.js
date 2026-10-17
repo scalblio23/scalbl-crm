@@ -34,6 +34,7 @@ import {
   deleteGoogleEvent,
 } from "./googleCalendar.js";
 import { computeAvailableSlots, localDateStrInZone } from "./calendarAvailability.js";
+import { getValidOutlookAccessToken, deleteOutlookEvent } from "./outlookCalendar.js";
 
 export const WORKFLOWS = {
   keevo_health: { brand: "Keevo Health", callName: "Keevo Health discovery call" },
@@ -645,6 +646,16 @@ export async function createWorkflowGoogleEvent(booking, calendar) {
 }
 
 async function removeGoogleEvent(booking, calendar) {
+  // An Outlook copy of the booking (server/calendarSync.js puts one on
+  // a calendar with Outlook connected) goes too.
+  if (booking.outlookEventId && calendar.outlookConnected) {
+    try {
+      const accessToken = await getValidOutlookAccessToken(calendar);
+      await deleteOutlookEvent({ accessToken, eventId: booking.outlookEventId });
+    } catch (err) {
+      console.error(`[patientReminders] failed to delete Outlook event for booking ${booking.id}`, err?.message || err);
+    }
+  }
   if (!booking.googleEventId || !calendar.googleConnected) return;
   try {
     const accessToken = await deps.google.getValidAccessToken(calendar);
