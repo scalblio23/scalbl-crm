@@ -507,6 +507,33 @@ redeploy — the next schema check seeds the row (`password_hash` starts
   requires a valid session cookie except the Twilio webhooks
   (`/api/voice`, `/api/status`, `/api/sms-inbound`) and `/api/health`.
 
+## Updating a lead's status from outside (`/api/lead-status`)
+
+`/api/lead-webhook` only creates leads. To change an **existing** lead's
+status from another system (e.g. a "booked" tag in GHL → **Booked** here),
+call `/api/lead-status` with the same CRM API key from Settings:
+
+```
+POST {your domain}/api/lead-status?token=<CRM API key>
+Content-Type: application/json
+
+{ "phone": "+61412345678", "email": "jane@example.com", "status": "Booked", "notes": "Booked via GHL" }
+```
+
+- `status` (required): `New Lead`, `No Answer`, `Booked` or `Not Interested`
+  (case-insensitive; anything else is a 400).
+- Find the lead by `phone` and/or `email` (or `id`). Phone matches on digits
+  with the `+61`/`0` prefix ignored, so `0412 345 678` = `+61412345678`;
+  email is case-insensitive. Every matching lead is updated.
+- `tag` (optional) limits the match to one Contacts tag; `notes` (optional)
+  is appended to the lead's notes.
+- Also accepts `PATCH`, a JSON array of leads, a `GET` with query params,
+  or the key as `Authorization: Bearer …` / `X-API-Key`.
+- Response: `{ ok, updated, notFound, failed, results }`. No matching lead
+  is a 200 with `notFound: 1` (not an error), so a scheduled Make scenario
+  doesn't stop on a GHL contact that was never in the CRM. A lead already on
+  that status is left as is (`updated: 0`).
+
 ## Calendars (Google Calendar + booking widget)
 
 Sidebar → **Calendars** → **Add Calendar** → name it → lands in that

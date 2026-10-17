@@ -105,6 +105,7 @@ import {
 // SendGrid, Twilio SMS) is substantial enough that keeping one copy
 // of it is worth the small deviation from this file's usual pattern.
 import calendarsHandler from "../api/calendars.js";
+import leadStatusHandler from "../api/lead-status.js";
 import calendarGoogleConnectHandler from "../api/calendar-google-connect.js";
 import calendarGoogleCallbackHandler from "../api/calendar-google-callback.js";
 import calendarGoogleDisconnectHandler from "../api/calendar-google-disconnect.js";
@@ -190,6 +191,9 @@ const PUBLIC_PATHS = new Set([
   // (?token=) and checked inside the route below — see
   // api/lead-webhook.js.
   "/api/lead-webhook",
+  // Same ?token= API-key auth, checked inside the route — see
+  // api/lead-status.js.
+  "/api/lead-status",
   // Multi-line dialling's per-lead-leg TwiML and status callback —
   // Twilio-only, identified by the batch/row ids baked into the URL
   // (see api/multiline-start.js), same trust model as /api/voice and
@@ -1218,6 +1222,9 @@ async function handleLeadWebhook(req, res) {
 }
 app.post("/api/lead-webhook", handleLeadWebhook);
 app.get("/api/lead-webhook", handleLeadWebhook);
+// Its counterpart for changing an existing lead's status by phone/email
+// (e.g. GHL "booked" tag → Booked) — the api/ handler mounted directly.
+app.all("/api/lead-status", leadStatusHandler);
 
 // ---------- Database ----------
 

@@ -2728,6 +2728,55 @@ export async function markContactsBookedForBooking(booking, calendar, { onlyOpen
   return rows.map(contactFromRow);
 }
 
+// Sets the status of every lead matching a phone number and/or email
+// (or an exact id) — for outside systems that know a lead by its
+// contact details, not by its CRM id, e.g. a "booked" tag in GHL
+// marking the lead Booked here (see api/lead-status.js). Phone is
+// matched on its digits with the AU 61/0 prefix stripped, same as
+// markContactsBookedForBooking, so "+61 412 345 678" and
+// "0412345678" are the same lead. A lead already on that status is
+// left alone (and its note isn't appended twice).
+export async function setContactStatusByMatch({ id, phone, email, tag, status, note } = {}) {
+  const newStatus = coerceLeadStatusOrThrow(status);
+  const contactId = Number(id) || null;
+  const phoneDigits = normalizeAuPhoneDigits(phone);
+  const usablePhone = phoneDigits.length >= 8 ? phoneDigits : null;
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  const usableEmail = cleanEmail.includes("@") ? cleanEmail : null;
+  if (!contactId && !usablePhone && !usableEmail) {
+    const err = new Error("Need an id, a phone number or an email to find the lead");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const matches = await query(
+    `SELECT id, status FROM contacts
+     WHERE (($1::int IS NOT NULL AND id = $1)
+        OR ($2::text IS NOT NULL AND ${BOOKING_PHONE_DIGITS_SQL} = $2)
+        OR ($3::text IS NOT NULL AND lower(trim(COALESCE(email, ''))) = $3))
+       AND ($4::text IS NULL OR tag = $4)`,
+    [contactId, usablePhone, usableEmail, tag ? String(tag).trim() : null]
+  );
+  const targets = matches.filter((m) => m.status !== newStatus);
+  if (!targets.length) return { matched: matches.length, updated: [] };
+
+  const cleanNote = String(note || "").trim() || null;
+  const rows = await query(
+    `UPDATE contacts SET
+       status = $2,
+       last_contact = 'Today',
+       notes = CASE
+         WHEN $3::text IS NULL THEN notes
+         WHEN COALESCE(notes, '') = '' THEN $3
+         ELSE notes || E'\\n' || $3
+       END
+     WHERE id = ANY($1::int[])
+     RETURNING *`,
+    [targets.map((t) => t.id), newStatus, cleanNote]
+  );
+  return { matched: matches.length, updated: rows.map(contactFromRow) };
+}
+
 export async function setCalendarBookingContactsSynced(id) {
   await query("UPDATE calendar_bookings SET contacts_synced = true WHERE id = $1", [id]);
 }
