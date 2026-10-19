@@ -35,7 +35,7 @@ const NAME = env.DROPLET_NAME || "scalbl-voice";
 const REGION = env.DO_REGION || "syd1";
 const SIZE = env.DO_SIZE || "s-1vcpu-1gb";
 const REPO = "scalblio23/scalbl-crm";
-const BRANCH = env.BRANCH || "claude/optimistic-franklin-6gwm5z";
+const BRANCH = env.BRANCH || "main"; // the branch Production deploys from
 const FIREWALL_NAME = `${NAME}-firewall`;
 
 function die(msg) {

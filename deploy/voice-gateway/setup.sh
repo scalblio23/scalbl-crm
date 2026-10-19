@@ -18,7 +18,10 @@
 set -euo pipefail
 
 REPO="scalblio23/scalbl-crm"
-BRANCH="${BRANCH:-claude/optimistic-franklin-6gwm5z}"
+# Defaults to main, the branch Production deploys from, so re-running
+# this always installs the current gateway (live transfer, End call
+# fixes, recordings) rather than an old one.
+BRANCH="${BRANCH:-main}"
 APP_DIR="/opt/scalbl-crm"
 APP_USER="scalbl"
 SERVICE="scalbl-voice"
