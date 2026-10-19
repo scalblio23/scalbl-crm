@@ -15,7 +15,7 @@ function shortTime(value) {
     : date.toLocaleDateString([], { day: "numeric", month: "short" });
 }
 
-function sender(email) {
+function senderLabel(email) {
   if (email.outgoing) return `To: ${email.contactName || email.to?.[0] || "—"}`;
   return email.contactName || email.fromName || email.fromEmail || "Unknown sender";
 }
@@ -293,7 +293,7 @@ export default function EmailInbox({ active, contacts = [] }) {
             >
               <div className="flex items-center gap-2">
                 {e.unread && <Circle size={8} className="fill-blue-500 text-blue-500 shrink-0" aria-label="Unread" />}
-                <span className={`flex-1 truncate text-sm ${e.unread ? "font-semibold" : "font-medium"}`}>{sender(e)}</span>
+                <span className={`flex-1 truncate text-sm ${e.unread ? "font-semibold" : "font-medium"}`}>{senderLabel(e)}</span>
                 {e.outgoing && (
                   <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 shrink-0">Sent</span>
                 )}
