@@ -216,7 +216,7 @@ export async function getFreeBusy({ accessToken, calendarId = "primary", timeMin
 }
 
 // Creates the event on the booker's behalf as an attendee.
-// sendUpdates: "none" — the app's own SendGrid email is the
+// sendUpdates: "none" — the app's own Resend email is the
 // confirmation the booker sees, not Google's default invite email, so
 // there's exactly one confirmation rather than two different-looking
 // ones landing seconds apart.

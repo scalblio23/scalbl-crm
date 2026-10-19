@@ -401,10 +401,10 @@ function smsStatusCallbackUrl(base) {
 
 async function sendOne(row, booking, msg, base) {
   if (row.channel === "email") {
-    if (deps.missingEmailEnv().length) throw Object.assign(new Error("SendGrid not configured"), { permanent: true });
-    await deps.sendEmail({ to: booking.contactEmail, subject: msg.subject, html: msg.html, ics: msg.ics });
-    // SendGrid's 202 means accepted for delivery, not delivered.
-    return { providerId: null, providerStatus: "accepted" };
+    if (deps.missingEmailEnv().length) throw Object.assign(new Error("Resend not configured"), { permanent: true });
+    const sent = await deps.sendEmail({ to: booking.contactEmail, subject: msg.subject, html: msg.html, ics: msg.ics });
+    // Resend accepting it means queued for delivery, not delivered.
+    return { providerId: sent?.id || null, providerStatus: "accepted" };
   }
   if (deps.missingTwilioEnv().length) throw Object.assign(new Error("Twilio not configured"), { permanent: true });
   const result = await deps.sendSms({
@@ -565,7 +565,7 @@ export function workflowReadiness(calendar, env = process.env) {
   return [
     { key: "sms_send", required: true, ok: !missingTwilioEnv(env).length, label: "Twilio can send SMS", fix: "Twilio account/API key and caller ID env vars (same as calling)." },
     { key: "sms_replies", required: true, ok: Boolean(env.TWILIO_AUTH_TOKEN), label: "Y/N replies can be verified", fix: "Set TWILIO_AUTH_TOKEN in Vercel (Twilio Console → Account → Auth Token)." },
-    { key: "email", required: true, ok: !missingEmailEnv(env).length, label: "SendGrid can send email", fix: "Set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL in Vercel." },
+    { key: "email", required: true, ok: !missingEmailEnv(env).length, label: "Resend can send email", fix: "Set RESEND_API_KEY and RESEND_FROM_EMAIL (on a domain verified in Resend) in Vercel." },
     { key: "links", required: true, ok: Boolean(base) && /^https:\/\//.test(base), label: base ? `Patient links use ${base}` : "Patient links have a public address", fix: "Set PUBLIC_URL to the CRM's production address (https://…) in Vercel." },
     { key: "meet", required: false, ok: Boolean(calendar.googleConnected || calendar.videoConferenceLink), label: calendar.googleConnected ? "Google Meet links are generated per booking" : calendar.videoConferenceLink ? "Uses this calendar's Video conference link" : "Meeting link", fix: "Connect Google (Integrate tab) to generate Meet links, or set a Video conference link." },
     { key: "inbound", required: false, ok: null, label: "Twilio sends replies to the CRM", fix: `Set every sending number's (or the Messaging Service's) incoming message webhook to POST ${base || "https://<your-domain>"}/api/sms-inbound — can't be checked from here.` },

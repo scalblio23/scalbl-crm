@@ -1715,7 +1715,7 @@ export default function SimpleCRM() {
   // "did this fire": zero rows means the trigger never matched at all
   // (check the filter, Active, and whether it was saved); a 'done' row
   // means it ran — so a missing message from there is a delivery
-  // problem (SendGrid/Twilio), not an automation problem.
+  // problem (Resend/Twilio), not an automation problem.
   const [automationRuns, setAutomationRuns] = useState([]);
   const [automationRunsLoading, setAutomationRunsLoading] = useState(false);
   const loadAutomationRuns = async (id) => {
