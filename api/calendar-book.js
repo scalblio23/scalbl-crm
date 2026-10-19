@@ -3,7 +3,7 @@
 // This is the one endpoint that does everything the feature promises
 // once a visitor picks a slot: re-validates it's still free, books it,
 // creates the Google and/or Outlook calendar event (if connected), and sends the
-// confirmation email (SendGrid) + confirmation SMS (Twilio).
+// confirmation email (Resend) + confirmation SMS (Twilio).
 import {
   ensureSchema,
   getCalendarBySlug,

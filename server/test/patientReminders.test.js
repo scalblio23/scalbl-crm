@@ -1,6 +1,6 @@
 // Integration tests for the patient confirmation & reminder workflow
 // (server/patientReminders.js) against a real Postgres database, with
-// Twilio / SendGrid / Google replaced by in-memory fakes — nothing is
+// Twilio / Resend / Google replaced by in-memory fakes — nothing is
 // ever sent to a real person. Run with:
 //   TEST_POSTGRES_URL=postgres://... npm run test:reminders
 // Skipped entirely when TEST_POSTGRES_URL isn't set. Point it at a
@@ -43,7 +43,7 @@ const sql = async (text, params) => (await pool.query(text, params)).rows;
 before(async () => {
   if (skip) return;
   process.env.POSTGRES_URL = DB_URL.includes("sslmode") ? DB_URL : `${DB_URL}${DB_URL.includes("?") ? "&" : "?"}sslmode=disable`;
-  delete process.env.SENDGRID_API_KEY; // owner-notification path in calendar-book stays off
+  delete process.env.RESEND_API_KEY; // owner-notification path in calendar-book stays off
   db = await import("../db.js");
   pr = await import("../patientReminders.js");
   handlers = {
@@ -895,7 +895,7 @@ test("workflowReadiness: required items reflect the environment, never expose va
   assert.deepEqual(empty.filter((c) => c.required && !c.ok).map((c) => c.key).sort(), ["email", "links", "sms_replies", "sms_send"]);
   const env = {
     TWILIO_ACCOUNT_SID: "AC1", TWILIO_API_KEY_SID: "SK1", TWILIO_API_KEY_SECRET: "secret-value", TWILIO_TWIML_APP_SID: "AP1", TWILIO_CALLER_ID: "+61400000000",
-    TWILIO_AUTH_TOKEN: "auth-secret", SENDGRID_API_KEY: "sg-secret", SENDGRID_FROM_EMAIL: "a@b.c", VERCEL_PROJECT_PRODUCTION_URL: "crm.example.com",
+    TWILIO_AUTH_TOKEN: "auth-secret", RESEND_API_KEY: "re-secret", RESEND_FROM_EMAIL: "a@b.c", VERCEL_PROJECT_PRODUCTION_URL: "crm.example.com",
   };
   const ready = pr.workflowReadiness({ googleConnected: true }, env);
   assert.ok(ready.filter((c) => c.required).every((c) => c.ok));

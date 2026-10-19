@@ -1,52 +1,46 @@
-// SendGrid email — used by the Calendars feature for booking
-// confirmation/notification/cancellation emails. Same shared-module,
-// fetch-only pattern as server/googleCalendar.js: one JSON POST to
-// SendGrid's REST API, no @sendgrid/mail dependency needed for that.
-const SENDGRID_URL = "https://api.sendgrid.com/v3/mail/send";
+// Resend email — used by the Calendars feature for booking
+// confirmation/notification/cancellation emails, Automations "Send
+// email" steps and patient reminders. Same shared-module, fetch-only
+// pattern as server/googleCalendar.js: one JSON POST to Resend's REST
+// API, no SDK dependency needed for that.
+const RESEND_URL = "https://api.resend.com/emails";
 
 export function missingEmailEnv(env = process.env) {
-  return ["SENDGRID_API_KEY", "SENDGRID_FROM_EMAIL"].filter((key) => !env[key]);
+  return ["RESEND_API_KEY", "RESEND_FROM_EMAIL"].filter((key) => !env[key]);
 }
 
 // `ics`, if passed, is attached as a text/calendar file so the email
 // works as an "add to calendar" action in Gmail/Outlook/Apple Mail
 // even when the calendar isn't Google-connected (no real Google
-// Calendar invite to fall back on in that case).
+// Calendar invite to fall back on in that case). Resolves to Resend's
+// email id.
 export async function sendCalendarEmail({ to, subject, html, ics }, env = process.env) {
   const missing = missingEmailEnv(env);
-  if (missing.length) throw new Error(`SendGrid is not configured. Missing: ${missing.join(", ")}`);
+  if (missing.length) throw new Error(`Resend is not configured. Missing: ${missing.join(", ")}`);
 
+  const from = env.RESEND_FROM_NAME
+    ? `${env.RESEND_FROM_NAME.replace(/[<>"]/g, "")} <${env.RESEND_FROM_EMAIL}>`
+    : env.RESEND_FROM_EMAIL;
   const attachments = ics
-    ? [
-        {
-          content: Buffer.from(ics).toString("base64"),
-          filename: "invite.ics",
-          type: "text/calendar",
-          disposition: "attachment",
-        },
-      ]
+    ? [{ filename: "invite.ics", content: Buffer.from(ics).toString("base64"), content_type: "text/calendar" }]
     : undefined;
 
-  const res = await fetch(SENDGRID_URL, {
+  const res = await fetch(RESEND_URL, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.SENDGRID_API_KEY}`,
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      personalizations: [{ to: [{ email: to }] }],
-      from: { email: env.SENDGRID_FROM_EMAIL, name: env.SENDGRID_FROM_NAME || undefined },
-      subject,
-      content: [{ type: "text/html", value: html }],
-      attachments,
-    }),
+    body: JSON.stringify({ from, to: [to], subject, html, attachments }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    const err = new Error(`SendGrid error (${res.status}): ${body || res.statusText}`);
+    const err = new Error(`Resend error (${res.status}): ${body || res.statusText}`);
     err.status = res.status;
     throw err;
   }
+  const data = await res.json().catch(() => ({}));
+  return { id: data?.id || null };
 }
 
 function icsDate(isoString) {

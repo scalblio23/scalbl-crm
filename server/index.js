@@ -107,7 +107,7 @@ import {
 // Each handler is a plain (req, res) function with no Vercel-specific
 // behavior (query/body/status/json all work identically under
 // Express), and the feature's actual logic (Google OAuth, freebusy,
-// SendGrid, Twilio SMS) is substantial enough that keeping one copy
+// Resend, Twilio SMS) is substantial enough that keeping one copy
 // of it is worth the small deviation from this file's usual pattern.
 import calendarsHandler from "../api/calendars.js";
 import leadStatusHandler from "../api/lead-status.js";

@@ -616,12 +616,13 @@ booking is added to it. The booker goes in the event description rather
 than as an attendee, because Outlook always emails an invite to attendees
 and the booker already gets the app's own confirmation.
 
-### 2. Set up SendGrid (confirmation emails)
+### 2. Set up Resend (confirmation emails)
 
-Create an API key at [app.sendgrid.com](https://app.sendgrid.com) → Settings
-→ API Keys (Mail Send access is enough), verify a sender/domain under
-Settings → Sender Authentication, then set `SENDGRID_API_KEY`,
-`SENDGRID_FROM_EMAIL`, and `SENDGRID_FROM_NAME`. Every booking sends a
+Add and verify your sending domain at [resend.com](https://resend.com) →
+Domains (it gives you DNS records to add), create an API key under API Keys
+("Sending access" is enough), then set `RESEND_API_KEY`,
+`RESEND_FROM_EMAIL` (an address on the verified domain), and
+`RESEND_FROM_NAME`. Every booking sends a
 confirmation email (with a `.ics` calendar file attached) to the booker and
 a notification email to the calendar's owner.
 
@@ -647,7 +648,7 @@ the text rather than failing the booking.
   + booking rules + existing busy time into actual bookable UTC slots,
   using the runtime's built-in `Intl` for timezone conversion (no
   date/timezone library).
-- `server/email.js` — SendGrid + a minimal `.ics` builder.
+- `server/email.js` — Resend + a minimal `.ics` builder.
 - `api/calendars.js`, `api/calendar-google-connect.js`,
   `api/calendar-google-callback.js`, `api/calendar-google-disconnect.js`,
   `api/calendar-outlook-*.js`, `api/calendar-bookings.js` — the
@@ -689,5 +690,5 @@ For each booking on a calendar with it switched on:
 - While on, it replaces the calendar's built-in confirmation **and** its "Booking Created" automations (they'd otherwise be duplicate messages). The owner notification email is unchanged. A setter cancelling from the CRM stops reminders without messaging the patient.
 - Reminders are `booking_reminders` rows (unique per booking/version/kind/channel), sent by the existing every-minute cron (`/api/automations-process-runs`). Before each send the booking is locked and re-checked. Failures are logged to `booking_events`; provider 429/5xx are retried, unknown outcomes are not (no duplicates). SMS delivery status comes from Twilio's status callback.
 
-**Setup:** `TWILIO_AUTH_TOKEN` and `PUBLIC_URL` (see `.env.example`); every Twilio number in the caller-ID pool (or the Messaging Service) needs its inbound Messaging webhook set to `POST {PUBLIC_URL}/api/sms-inbound`, since a patient replies to whichever number texted them; SendGrid as for calendars; Google connected on the calendar for generated Meet links (otherwise the calendar's Video conference link is used); Vercel Pro for the every-minute cron.
+**Setup:** `TWILIO_AUTH_TOKEN` and `PUBLIC_URL` (see `.env.example`); every Twilio number in the caller-ID pool (or the Messaging Service) needs its inbound Messaging webhook set to `POST {PUBLIC_URL}/api/sms-inbound`, since a patient replies to whichever number texted them; Resend as for calendars; Google connected on the calendar for generated Meet links (otherwise the calendar's Video conference link is used); Vercel Pro for the every-minute cron.
 

@@ -3326,7 +3326,7 @@ export async function reapStuckAutomationRuns(olderThanMinutes = 5) {
 // answer "did this actually fire" without direct DB access: zero rows
 // means the trigger never matched at all (wrong filter, not saved, or
 // not active); a 'done' row that didn't seem to do anything points at
-// delivery (SendGrid/Twilio) rather than the trigger; a 'pending' row
+// delivery (Resend/Twilio) rather than the trigger; a 'pending' row
 // with a future run_at is just mid-wait, not stuck.
 export async function getAutomationRunsByAutomationId(automationId, limit = 20) {
   const rows = await query(
