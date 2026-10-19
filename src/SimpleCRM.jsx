@@ -6479,7 +6479,7 @@ export default function SimpleCRM() {
           </div>
         )}
         <CrazytelSmsInbox active={page === "conversation" && inboxView === "crazytel"} contacts={contacts} />
-        <EmailInbox active={page === "conversation" && inboxView === "email"} />
+        <EmailInbox active={page === "conversation" && inboxView === "email"} contacts={contacts} />
         {page === "conversation" && inboxView === "legacy" && (
           <div className="flex flex-1 overflow-hidden">
             <div

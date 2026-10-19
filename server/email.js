@@ -15,6 +15,13 @@ export function missingEmailEnv(env = process.env) {
 // Calendar invite to fall back on in that case). Resolves to Resend's
 // email id.
 export async function sendCalendarEmail({ to, subject, html, ics }, env = process.env) {
+  return sendEmail({ to, subject, html, ics }, env);
+}
+
+// The one Resend send every email goes through. `text` is an optional
+// plain-text part; `headers` e.g. In-Reply-To / References so a reply
+// threads in the recipient's mail app.
+export async function sendEmail({ to, subject, html, text, ics, headers }, env = process.env) {
   const missing = missingEmailEnv(env);
   if (missing.length) throw new Error(`Resend is not configured. Missing: ${missing.join(", ")}`);
 
@@ -34,7 +41,16 @@ export async function sendCalendarEmail({ to, subject, html, ics }, env = proces
     // RESEND_REPLY_TO (optional): where replies go — an address on the
     // domain Resend receives for, so replies land in Conversations →
     // Email (see api/email-inbound.js).
-    body: JSON.stringify({ from, to: [to], subject, html, attachments, reply_to: env.RESEND_REPLY_TO || undefined }),
+    body: JSON.stringify({
+      from,
+      to: [to],
+      subject,
+      html,
+      text: text || undefined,
+      attachments,
+      headers: headers && Object.keys(headers).length ? headers : undefined,
+      reply_to: env.RESEND_REPLY_TO || undefined,
+    }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -71,6 +87,16 @@ export function parseAddress(value) {
   const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(raw);
   if (m) return { name: m[1].trim(), email: m[2].trim().toLowerCase() };
   return { name: "", email: raw.toLowerCase() };
+}
+
+// Plain text typed in the CRM → safe HTML (escaped, line breaks kept).
+export function textToHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/\r?\n/g, "<br>");
 }
 
 function icsDate(isoString) {

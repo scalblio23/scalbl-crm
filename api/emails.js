@@ -1,9 +1,21 @@
-import { ensureSchema, listInboundEmails, getInboundEmail, setInboundEmailUnread } from "../server/db.js";
+import { randomUUID } from "node:crypto";
+import {
+  ensureSchema,
+  listInboundEmails,
+  getInboundEmail,
+  setInboundEmailUnread,
+  saveOutgoingEmail,
+  canEmailAddress,
+} from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
+import { sendEmail, missingEmailEnv, textToHtml } from "../server/email.js";
+
+const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
 // Conversations → Email. GET lists received emails (newest first);
 // GET ?id= returns one with its body and marks it read; PATCH
-// { id, unread } flips read state. A client role (or staff limited to
+// { id, unread } flips read state; POST { to, subject, body,
+// replyToId? } sends one (a reply threads under the email it answers). A client role (or staff limited to
 // some tags) only ever sees emails from contacts under their tags.
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -29,7 +41,47 @@ export default async function handler(req, res) {
       if (!email) return res.status(404).json({ error: "Email not found" });
       return res.status(200).json(email);
     }
-    res.setHeader("Allow", "GET, PATCH");
+    if (req.method === "POST") {
+      const missing = missingEmailEnv();
+      if (missing.length) return res.status(503).json({ error: `Email isn't set up yet. Missing: ${missing.join(", ")}` });
+      const { replyToId } = req.body || {};
+      let to = String(req.body?.to || "").trim().toLowerCase();
+      let subject = String(req.body?.subject || "").trim();
+      const body = String(req.body?.body || "");
+      const headers = {};
+      if (replyToId) {
+        const original = await getInboundEmail(replyToId, scopeTags);
+        if (!original) return res.status(404).json({ error: "Email not found" });
+        if (!to) to = original.outgoing ? String(original.to?.[0] || "") : original.fromEmail;
+        if (!subject) subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject || ""}`.trim();
+        if (original.messageId) {
+          headers["In-Reply-To"] = original.messageId;
+          headers.References = original.messageId;
+        }
+      }
+      if (!EMAIL_RE.test(to)) return res.status(400).json({ error: "Enter a valid email address." });
+      if (!subject) return res.status(400).json({ error: "Add a subject." });
+      if (!body.trim()) return res.status(400).json({ error: "Write a message." });
+      if (subject.length > 300 || body.length > 50000) return res.status(400).json({ error: "That email is too long." });
+      // A client (or tag-limited staff) can only email their own contacts.
+      if (!(await canEmailAddress(to, scopeTags))) {
+        return res.status(403).json({ error: "You can only email contacts under your tags." });
+      }
+      const html = textToHtml(body);
+      const sent = await sendEmail({ to, subject, html, text: body, headers });
+      const saved = await saveOutgoingEmail({
+        resendId: sent?.id || `out-${randomUUID()}`,
+        fromEmail: process.env.RESEND_FROM_EMAIL,
+        fromName: process.env.RESEND_FROM_NAME || "",
+        to,
+        subject,
+        text: body,
+        html,
+        sentBy: user.name || user.email || "",
+      });
+      return res.status(201).json(saved);
+    }
+    res.setHeader("Allow", "GET, PATCH, POST");
     return res.status(405).json({ error: "Method not allowed" });
   } catch (err) {
     console.error("[api/emails]", err);

@@ -878,6 +878,13 @@ export async function ensureSchema() {
       )
     `);
     await query(`CREATE INDEX IF NOT EXISTS inbound_emails_received ON inbound_emails (received_at DESC)`);
+    // Emails sent from Conversations → Email live in the same table
+    // (outgoing = true), so a contact's emails read as one list.
+    // message_id is the email's Message-ID header, used to thread a
+    // reply in the recipient's mail app.
+    await query(`ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS outgoing BOOLEAN NOT NULL DEFAULT false`);
+    await query(`ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS message_id TEXT NOT NULL DEFAULT ''`);
+    await query(`ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS sent_by TEXT NOT NULL DEFAULT ''`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS closer_notes TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deal_outcome TEXT DEFAULT 'Pending'`);
     // Calendars: which client_team users a calendar is assigned to
@@ -1843,11 +1850,14 @@ function inboundEmailFromRow(r, { full = false } = {}) {
     contactId: r.contact_id,
     contactName: r.contact_name,
     unread: r.unread,
+    outgoing: Boolean(r.outgoing),
+    sentBy: r.sent_by || "",
     receivedAt: r.received_at,
   };
   if (full) {
     email.text = r.text_body;
     email.html = r.html_body;
+    email.messageId = r.message_id || "";
   }
   return email;
 }
@@ -1870,8 +1880,8 @@ export async function saveInboundEmail(e) {
   const tags = [...new Set(matches.map((m) => m.tag).filter(Boolean))];
   const rows = await query(
     `INSERT INTO inbound_emails
-       (resend_id, from_email, from_name, to_emails, subject, text_body, html_body, contact_id, contact_name, tags, received_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       (resend_id, from_email, from_name, to_emails, subject, text_body, html_body, contact_id, contact_name, tags, received_at, message_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (resend_id) DO NOTHING
      RETURNING *`,
     [
@@ -1886,9 +1896,46 @@ export async function saveInboundEmail(e) {
       matches[0]?.name || "",
       JSON.stringify(tags),
       e.receivedAt || new Date().toISOString(),
+      e.messageId || "",
     ]
   );
   return rows[0] ? inboundEmailFromRow(rows[0]) : null;
+}
+
+// Records an email sent from Conversations → Email, matched (and so
+// scoped) by its recipient the same way a received one is by sender.
+export async function saveOutgoingEmail(e) {
+  const matches = await findContactsByEmail(e.to);
+  const tags = [...new Set(matches.map((m) => m.tag).filter(Boolean))];
+  const rows = await query(
+    `INSERT INTO inbound_emails
+       (resend_id, from_email, from_name, to_emails, subject, text_body, html_body, contact_id, contact_name, tags,
+        outgoing, unread, sent_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,false,$11)
+     RETURNING *`,
+    [
+      e.resendId,
+      e.fromEmail || "",
+      e.fromName || "",
+      JSON.stringify([e.to]),
+      e.subject || "",
+      e.text || "",
+      e.html || "",
+      matches[0]?.id || null,
+      matches[0]?.name || "",
+      JSON.stringify(tags),
+      e.sentBy || "",
+    ]
+  );
+  return inboundEmailFromRow(rows[0]);
+}
+
+// Whether a tag-scoped user may email this address: only if it belongs
+// to a contact under one of their tags (null scope = anyone).
+export async function canEmailAddress(address, scopeTags) {
+  if (!scopeTags) return true;
+  const matches = await findContactsByEmail(address);
+  return matches.some((m) => m.tag && scopeTags.includes(m.tag));
 }
 
 export async function listInboundEmails(scopeTags, limit = 200) {
