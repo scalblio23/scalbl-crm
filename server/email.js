@@ -21,13 +21,15 @@ export async function sendCalendarEmail({ to, subject, html, ics }, env = proces
 // The one Resend send every email goes through. `text` is an optional
 // plain-text part; `headers` e.g. In-Reply-To / References so a reply
 // threads in the recipient's mail app.
-export async function sendEmail({ to, subject, html, text, ics, headers }, env = process.env) {
+// fromName / fromEmail override the default sender for one email (see
+// checkSender — callers validate them first).
+export async function sendEmail({ to, subject, html, text, ics, headers, fromName, fromEmail }, env = process.env) {
   const missing = missingEmailEnv(env);
   if (missing.length) throw new Error(`Resend is not configured. Missing: ${missing.join(", ")}`);
 
-  const from = env.RESEND_FROM_NAME
-    ? `${env.RESEND_FROM_NAME.replace(/[<>"]/g, "")} <${env.RESEND_FROM_EMAIL}>`
-    : env.RESEND_FROM_EMAIL;
+  const senderName = String(fromName ?? env.RESEND_FROM_NAME ?? "").replace(/[<>"\r\n]/g, "").trim();
+  const senderEmail = fromEmail || env.RESEND_FROM_EMAIL;
+  const from = senderName ? `${senderName} <${senderEmail}>` : senderEmail;
   const attachments = ics
     ? [{ filename: "invite.ics", content: Buffer.from(ics).toString("base64"), content_type: "text/calendar" }]
     : undefined;
@@ -87,6 +89,25 @@ export function parseAddress(value) {
   const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(raw);
   if (m) return { name: m[1].trim(), email: m[2].trim().toLowerCase() };
   return { name: "", email: raw.toLowerCase() };
+}
+
+// The default sender, and the domain every custom From address must be
+// on (the one RESEND_FROM_EMAIL is on — verified in Resend).
+export function senderDefaults(env = process.env) {
+  const email = String(env.RESEND_FROM_EMAIL || "").trim().toLowerCase();
+  return { name: String(env.RESEND_FROM_NAME || "").trim(), email, domain: email.split("@")[1] || "" };
+}
+
+// Validates a sender chosen in the CRM. Returns { name, email } or
+// { error }.
+export function checkSender({ fromName, fromEmail }, env = process.env) {
+  const d = senderDefaults(env);
+  const email = String(fromEmail || d.email).trim().toLowerCase();
+  const name = String(fromName ?? d.name).replace(/[<>"\r\n]/g, "").trim();
+  if (name.length > 100) return { error: "That sender name is too long." };
+  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+$/.test(email)) return { error: "Enter a valid From address." };
+  if (!d.domain || email.split("@")[1] !== d.domain) return { error: `The From address must end in @${d.domain}.` };
+  return { name, email };
 }
 
 // Plain text typed in the CRM → safe HTML (escaped, line breaks kept).

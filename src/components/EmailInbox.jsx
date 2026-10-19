@@ -22,6 +22,67 @@ function sender(email) {
 
 const EMPTY_COMPOSE = { to: "", subject: "", body: "" };
 
+// The last sender used in this browser — a convenience only, so every
+// read/write is guarded (private windows can throw).
+const SENDER_KEY = "scalbl.emailSender";
+function loadSavedSender() {
+  try {
+    const v = JSON.parse(localStorage.getItem(SENDER_KEY) || "null");
+    return v && typeof v.email === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+function saveSender(sender) {
+  try {
+    localStorage.setItem(SENDER_KEY, JSON.stringify(sender));
+  } catch {
+    // ignore
+  }
+}
+
+// "From: Name <address> · Change" — expands to name + address fields.
+function SenderFields({ sender, setSender, info }) {
+  const [editing, setEditing] = useState(false);
+  if (!info) return null;
+  const label = sender.name ? `${sender.name} <${sender.email}>` : sender.email;
+  if (!info.canChange) return <div className="text-xs text-gray-500">From: {label}</div>;
+  if (!editing) {
+    return (
+      <div className="text-xs text-gray-500">
+        From: <span className="text-gray-700">{label}</span>{" "}
+        <button type="button" onClick={() => setEditing(true)} className="text-blue-600 hover:underline">
+          Change
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col sm:flex-row gap-2">
+      <input
+        value={sender.name}
+        onChange={(e) => setSender((s) => ({ ...s, name: e.target.value }))}
+        placeholder="From name, e.g. Henry at Scalbl"
+        className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+      />
+      <input
+        type="email"
+        value={sender.email}
+        onChange={(e) => setSender((s) => ({ ...s, email: e.target.value }))}
+        placeholder={`name@${info.domain}`}
+        className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+      />
+      <button
+        type="button"
+        onClick={() => setSender({ name: info.name, email: info.email })}
+        className="text-xs text-gray-500 hover:text-gray-800 whitespace-nowrap"
+      >
+        Reset
+      </button>
+    </div>
+  );
+}
+
 // Inbound HTML is untrusted: it's shown in a fully sandboxed iframe (no
 // scripts, no same-origin access, links open in a new tab) so nothing in
 // an email can touch the CRM or the signed-in session.
@@ -55,6 +116,23 @@ export default function EmailInbox({ active, contacts = [] }) {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [sentNotice, setSentNotice] = useState("");
+  // Who emails go out as: the server's default sender, or the last one
+  // used in this browser (staff only can change it).
+  const [senderInfo, setSenderInfo] = useState(null);
+  const [sender, setSender] = useState({ name: "", email: "" });
+
+  useEffect(() => {
+    if (!active || senderInfo) return;
+    api
+      .get("/api/emails?sender=1")
+      .then((info) => {
+        setSenderInfo(info);
+        const saved = info.canChange ? loadSavedSender() : null;
+        const ok = saved && saved.email.toLowerCase().endsWith(`@${info.domain}`);
+        setSender(ok ? { name: saved.name || "", email: saved.email } : { name: info.name, email: info.email });
+      })
+      .catch(() => {});
+  }, [active, senderInfo]);
 
   // Polled every 30s while the tab is open and visible, like the SMS inbox.
   useEffect(() => {
@@ -92,7 +170,9 @@ export default function EmailInbox({ active, contacts = [] }) {
     setSending(true);
     setSendError("");
     try {
-      const saved = await api.post("/api/emails", payload);
+      const from = senderInfo?.canChange ? { fromName: sender.name, fromEmail: sender.email } : {};
+      const saved = await api.post("/api/emails", { ...payload, ...from });
+      if (senderInfo?.canChange) saveSender(sender);
       setEmails((list) => [saved, ...list]);
       return saved;
     } catch (err) {
@@ -237,6 +317,7 @@ export default function EmailInbox({ active, contacts = [] }) {
               <ArrowLeft size={13} /> Back
             </button>
             <h2 className="text-base font-bold">New email</h2>
+            <SenderFields sender={sender} setSender={setSender} info={senderInfo} />
             <input
               type="email"
               list="email-contacts"
@@ -312,6 +393,7 @@ export default function EmailInbox({ active, contacts = [] }) {
             </div>
             <form onSubmit={sendReply} className="border-t border-gray-100 p-3 md:p-4 space-y-2">
               {sentNotice && <div className="text-xs text-emerald-700">{sentNotice}</div>}
+              <SenderFields sender={sender} setSender={setSender} info={senderInfo} />
               {sendError && <div className="text-xs text-red-600">{sendError}</div>}
               <textarea
                 value={reply}

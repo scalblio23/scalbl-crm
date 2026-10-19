@@ -7,8 +7,8 @@ import {
   saveOutgoingEmail,
   canEmailAddress,
 } from "../server/db.js";
-import { requireAuth, scopeTagsForUser } from "../server/auth.js";
-import { sendEmail, missingEmailEnv, textToHtml } from "../server/email.js";
+import { requireAuth, scopeTagsForUser, hasFullAccess } from "../server/auth.js";
+import { sendEmail, missingEmailEnv, textToHtml, senderDefaults, checkSender } from "../server/email.js";
 
 const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 
@@ -24,6 +24,12 @@ export default async function handler(req, res) {
   try {
     await ensureSchema();
     if (req.method === "GET") {
+      // The default sender, and whether this user may change it (staff
+      // yes; a client always sends as the company).
+      if (req.query?.sender) {
+        const d = senderDefaults();
+        return res.status(200).json({ ...d, canChange: hasFullAccess(user.role) });
+      }
       if (req.query?.id) {
         const email = await getInboundEmail(req.query.id, scopeTags);
         if (!email) return res.status(404).json({ error: "Email not found" });
@@ -67,12 +73,16 @@ export default async function handler(req, res) {
       if (!(await canEmailAddress(to, scopeTags))) {
         return res.status(403).json({ error: "You can only email contacts under your tags." });
       }
+      // Staff can pick the From name/address (on the verified domain); a
+      // client always sends as the default sender.
+      const sender = hasFullAccess(user.role) ? checkSender(req.body || {}) : checkSender({});
+      if (sender.error) return res.status(400).json({ error: sender.error });
       const html = textToHtml(body);
-      const sent = await sendEmail({ to, subject, html, text: body, headers });
+      const sent = await sendEmail({ to, subject, html, text: body, headers, fromName: sender.name, fromEmail: sender.email });
       const saved = await saveOutgoingEmail({
         resendId: sent?.id || `out-${randomUUID()}`,
-        fromEmail: process.env.RESEND_FROM_EMAIL,
-        fromName: process.env.RESEND_FROM_NAME || "",
+        fromEmail: sender.email,
+        fromName: sender.name,
         to,
         subject,
         text: body,
