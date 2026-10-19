@@ -31,7 +31,10 @@ export async function sendCalendarEmail({ to, subject, html, ics }, env = proces
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ from, to: [to], subject, html, attachments }),
+    // RESEND_REPLY_TO (optional): where replies go — an address on the
+    // domain Resend receives for, so replies land in Conversations →
+    // Email (see api/email-inbound.js).
+    body: JSON.stringify({ from, to: [to], subject, html, attachments, reply_to: env.RESEND_REPLY_TO || undefined }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -41,6 +44,33 @@ export async function sendCalendarEmail({ to, subject, html, ics }, env = proces
   }
   const data = await res.json().catch(() => ({}));
   return { id: data?.id || null };
+}
+
+// The full content of one email Resend received (the webhook only
+// carries its id, sender and subject). Fetched with our own API key, so
+// whatever the webhook claims, only a real email in our Resend account
+// can come back from here.
+export async function fetchReceivedEmail(id, env = process.env) {
+  if (!env.RESEND_API_KEY) throw new Error("Resend is not configured. Missing: RESEND_API_KEY");
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(String(id || ""))) throw new Error("Invalid email id");
+  const res = await fetch(`https://api.resend.com/emails/receiving/${id}`, {
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    const err = new Error(`Resend error (${res.status}): ${body || res.statusText}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+// "Jane Smith <jane@x.com>" → { name: "Jane Smith", email: "jane@x.com" }.
+export function parseAddress(value) {
+  const raw = String(value || "").trim();
+  const m = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(raw);
+  if (m) return { name: m[1].trim(), email: m[2].trim().toLowerCase() };
+  return { name: "", email: raw.toLowerCase() };
 }
 
 function icsDate(isoString) {
