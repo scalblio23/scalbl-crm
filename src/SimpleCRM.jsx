@@ -96,6 +96,7 @@ import {
 import { api } from "./lib/api";
 import { getCachedUser, setCachedUser, readSnapshot, writeSnapshot, clearStartupCache } from "./lib/startupCache";
 import CrazytelSmsInbox from "./components/CrazytelSmsInbox";
+import EmailInbox from "./components/EmailInbox";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
 // Tabs with their own code load when first opened (and in the
@@ -6471,9 +6472,14 @@ export default function SimpleCRM() {
               className={`rounded px-3 py-2 text-sm ${inboxView === "crazytel" ? "bg-gray-900 text-white" : "text-gray-600"}`}>
               Crazytel SMS
             </button>
+            <button type="button" aria-pressed={inboxView === "email"} onClick={() => setInboxView("email")}
+              className={`rounded px-3 py-2 text-sm ${inboxView === "email" ? "bg-gray-900 text-white" : "text-gray-600"}`}>
+              Email
+            </button>
           </div>
         )}
         <CrazytelSmsInbox active={page === "conversation" && inboxView === "crazytel"} contacts={contacts} />
+        <EmailInbox active={page === "conversation" && inboxView === "email"} />
         {page === "conversation" && inboxView === "legacy" && (
           <div className="flex flex-1 overflow-hidden">
             <div

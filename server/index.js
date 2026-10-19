@@ -138,6 +138,8 @@ import proposalPublicHandler from "../api/proposal-public.js";
 import usersHandler from "../api/users.js";
 import smsThreadsHandler from "../api/sms-threads.js";
 import smsCrazytelInboundHandler from "../api/sms-crazytel-inbound.js";
+import emailInboundHandler from "../api/email-inbound.js";
+import emailsHandler from "../api/emails.js";
 import whatsappHandler from "../api/whatsapp.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
@@ -199,6 +201,9 @@ const PUBLIC_PATHS = new Set([
   // Crazytel's Forward Inbound SMS webhook — checks its own ?key= (see
   // api/sms-crazytel-inbound.js).
   "/api/sms-crazytel-inbound",
+  // Resend's email.received webhook — checks its own ?key= (see
+  // api/email-inbound.js).
+  "/api/email-inbound",
   "/api/auth-login",
   "/api/auth-set-password",
   "/api/auth-logout",
@@ -1539,6 +1544,8 @@ app.all("/api/proposals", proposalsHandler);
 app.all("/api/proposal-public", proposalPublicHandler);
 app.all("/api/sms-threads", smsThreadsHandler);
 app.all("/api/sms-crazytel-inbound", smsCrazytelInboundHandler);
+app.all("/api/email-inbound", emailInboundHandler);
+app.all("/api/emails", emailsHandler);
 app.all("/api/whatsapp", whatsappHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 

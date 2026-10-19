@@ -856,6 +856,28 @@ export async function ensureSchema() {
     // which a fully set-up production database skips — so saving a user
     // failed with "column phone does not exist".
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT`);
+    // Emails received through Resend (see api/email-inbound.js), shown
+    // in Conversations → Email. tags = the tags of every contact whose
+    // email matched the sender, so a client role sees only emails from
+    // their own leads.
+    await query(`
+      CREATE TABLE IF NOT EXISTS inbound_emails (
+        id SERIAL PRIMARY KEY,
+        resend_id TEXT UNIQUE NOT NULL,
+        from_email TEXT NOT NULL DEFAULT '',
+        from_name TEXT NOT NULL DEFAULT '',
+        to_emails JSONB NOT NULL DEFAULT '[]',
+        subject TEXT NOT NULL DEFAULT '',
+        text_body TEXT NOT NULL DEFAULT '',
+        html_body TEXT NOT NULL DEFAULT '',
+        contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+        contact_name TEXT NOT NULL DEFAULT '',
+        tags JSONB NOT NULL DEFAULT '[]',
+        unread BOOLEAN NOT NULL DEFAULT true,
+        received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS inbound_emails_received ON inbound_emails (received_at DESC)`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS closer_notes TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deal_outcome TEXT DEFAULT 'Pending'`);
     // Calendars: which client_team users a calendar is assigned to
@@ -1808,6 +1830,91 @@ function normalizeAuPhoneDigits(raw) {
 
 // Matches an inbound SMS's From number to a contact, for logging it
 // onto the right conversation.
+// ---------- Inbound email (Resend) ----------
+
+function inboundEmailFromRow(r, { full = false } = {}) {
+  const email = {
+    id: r.id,
+    fromEmail: r.from_email,
+    fromName: r.from_name,
+    to: r.to_emails || [],
+    subject: r.subject,
+    preview: String(r.text_body || "").replace(/\s+/g, " ").trim().slice(0, 160),
+    contactId: r.contact_id,
+    contactName: r.contact_name,
+    unread: r.unread,
+    receivedAt: r.received_at,
+  };
+  if (full) {
+    email.text = r.text_body;
+    email.html = r.html_body;
+  }
+  return email;
+}
+
+// scopeTags: null = sees every email; an array = only emails from
+// contacts under one of those tags (an email from an unknown sender has
+// no tags, so it's staff-only).
+const INBOUND_EMAIL_SCOPE_SQL = `($1::jsonb IS NULL OR tags ?| ARRAY(SELECT jsonb_array_elements_text($1::jsonb)))`;
+
+export async function findContactsByEmail(rawEmail) {
+  const email = String(rawEmail || "").trim().toLowerCase();
+  if (!email.includes("@")) return [];
+  return query("SELECT id, name, tag FROM contacts WHERE lower(trim(COALESCE(email, ''))) = $1 ORDER BY id", [email]);
+}
+
+// Idempotent on resend_id — Resend retries a webhook it isn't sure was
+// delivered, and that must not create a second copy.
+export async function saveInboundEmail(e) {
+  const matches = await findContactsByEmail(e.fromEmail);
+  const tags = [...new Set(matches.map((m) => m.tag).filter(Boolean))];
+  const rows = await query(
+    `INSERT INTO inbound_emails
+       (resend_id, from_email, from_name, to_emails, subject, text_body, html_body, contact_id, contact_name, tags, received_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (resend_id) DO NOTHING
+     RETURNING *`,
+    [
+      e.resendId,
+      e.fromEmail || "",
+      e.fromName || "",
+      JSON.stringify(e.to || []),
+      e.subject || "",
+      e.text || "",
+      e.html || "",
+      matches[0]?.id || null,
+      matches[0]?.name || "",
+      JSON.stringify(tags),
+      e.receivedAt || new Date().toISOString(),
+    ]
+  );
+  return rows[0] ? inboundEmailFromRow(rows[0]) : null;
+}
+
+export async function listInboundEmails(scopeTags, limit = 200) {
+  const rows = await query(
+    `SELECT * FROM inbound_emails WHERE ${INBOUND_EMAIL_SCOPE_SQL} ORDER BY received_at DESC LIMIT $2`,
+    [scopeTags ? JSON.stringify(scopeTags) : null, limit]
+  );
+  return rows.map((r) => inboundEmailFromRow(r));
+}
+
+export async function getInboundEmail(id, scopeTags) {
+  const rows = await query(`SELECT * FROM inbound_emails WHERE ${INBOUND_EMAIL_SCOPE_SQL} AND id = $2`, [
+    scopeTags ? JSON.stringify(scopeTags) : null,
+    Number(id) || 0,
+  ]);
+  return rows[0] ? inboundEmailFromRow(rows[0], { full: true }) : null;
+}
+
+export async function setInboundEmailUnread(id, unread, scopeTags) {
+  const rows = await query(
+    `UPDATE inbound_emails SET unread = $3 WHERE ${INBOUND_EMAIL_SCOPE_SQL} AND id = $2 RETURNING *`,
+    [scopeTags ? JSON.stringify(scopeTags) : null, Number(id) || 0, Boolean(unread)]
+  );
+  return rows[0] ? inboundEmailFromRow(rows[0]) : null;
+}
+
 export async function findContactByPhone(rawPhone) {
   const target = normalizeAuPhoneDigits(rawPhone);
   if (!target) return null;
