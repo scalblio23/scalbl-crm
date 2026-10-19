@@ -885,6 +885,47 @@ export async function ensureSchema() {
     await query(`ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS outgoing BOOLEAN NOT NULL DEFAULT false`);
     await query(`ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS message_id TEXT NOT NULL DEFAULT ''`);
     await query(`ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS sent_by TEXT NOT NULL DEFAULT ''`);
+    // Broadcast emails (Broadcast tab, see server/broadcasts.js). One
+    // row per recipient so a send can resume where it stopped, and the
+    // unsubscribe list every broadcast honours.
+    await query(`
+      CREATE TABLE IF NOT EXISTS email_unsubscribes (
+        email TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS email_broadcasts (
+        id SERIAL PRIMARY KEY,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        from_name TEXT NOT NULL DEFAULT '',
+        from_email TEXT NOT NULL,
+        audience JSONB NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'sending',
+        total INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        finished_at TIMESTAMPTZ
+      )
+    `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS email_broadcast_recipients (
+        id SERIAL PRIMARY KEY,
+        broadcast_id INTEGER NOT NULL REFERENCES email_broadcasts(id) ON DELETE CASCADE,
+        email TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        contact_id INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error TEXT NOT NULL DEFAULT '',
+        resend_id TEXT NOT NULL DEFAULT '',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (broadcast_id, email)
+      )
+    `);
+    await query(
+      `CREATE INDEX IF NOT EXISTS email_broadcast_recipients_pending ON email_broadcast_recipients (broadcast_id, status)`
+    );
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS closer_notes TEXT`);
     await query(`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS deal_outcome TEXT DEFAULT 'Pending'`);
     // Calendars: which client_team users a calendar is assigned to
@@ -1960,6 +2001,161 @@ export async function setInboundEmailUnread(id, unread, scopeTags) {
     [scopeTags ? JSON.stringify(scopeTags) : null, Number(id) || 0, Boolean(unread)]
   );
   return rows[0] ? inboundEmailFromRow(rows[0]) : null;
+}
+
+// ---------- Broadcast email ----------
+
+// Who a broadcast would go to: contacts matching the tag AND status
+// filters (an empty filter doesn't narrow), plus hand-picked contacts.
+// Contacts without a usable email or who unsubscribed are dropped, and
+// each address appears once.
+export async function resolveBroadcastAudience({ tags = [], statuses = [], contactIds = [] }) {
+  const t = (Array.isArray(tags) ? tags : []).map(String).filter(Boolean);
+  const st = (Array.isArray(statuses) ? statuses : []).map(String).filter(Boolean);
+  const ids = (Array.isArray(contactIds) ? contactIds : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const useFilter = t.length > 0 || st.length > 0;
+  if (!useFilter && !ids.length) return { recipients: [], skippedNoEmail: 0, skippedUnsubscribed: 0 };
+  const rows = await query(
+    `SELECT id, name, email, tag, status FROM contacts
+     WHERE ($1::boolean AND (cardinality($2::text[]) = 0 OR tag = ANY($2::text[]))
+                       AND (cardinality($3::text[]) = 0 OR status = ANY($3::text[])))
+        OR id = ANY($4::int[])
+     ORDER BY id`,
+    [useFilter, t, st, ids]
+  );
+  const unsub = new Set((await query("SELECT email FROM email_unsubscribes")).map((r) => r.email));
+  const seen = new Set();
+  const recipients = [];
+  let skippedNoEmail = 0;
+  let skippedUnsubscribed = 0;
+  for (const r of rows) {
+    const email = String(r.email || "").trim().toLowerCase();
+    if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email)) {
+      skippedNoEmail++;
+      continue;
+    }
+    if (seen.has(email)) continue;
+    seen.add(email);
+    if (unsub.has(email)) {
+      skippedUnsubscribed++;
+      continue;
+    }
+    recipients.push({ contactId: r.id, name: r.name || "", email });
+  }
+  return { recipients, skippedNoEmail, skippedUnsubscribed };
+}
+
+export async function createBroadcast({ subject, body, fromName, fromEmail, audience, recipients, createdBy }) {
+  const [b] = await query(
+    `INSERT INTO email_broadcasts (subject, body, from_name, from_email, audience, total, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [subject, body, fromName || "", fromEmail, JSON.stringify(audience || {}), recipients.length, createdBy || ""]
+  );
+  for (let i = 0; i < recipients.length; i += 500) {
+    const chunk = recipients.slice(i, i + 500);
+    await query(
+      `INSERT INTO email_broadcast_recipients (broadcast_id, email, name, contact_id)
+       SELECT $1, x.email, x.name, x.contact_id
+       FROM jsonb_to_recordset($2::jsonb) AS x(email text, name text, contact_id int)
+       ON CONFLICT DO NOTHING`,
+      [b.id, JSON.stringify(chunk.map((r) => ({ email: r.email, name: r.name, contact_id: r.contactId || null })))]
+    );
+  }
+  return b;
+}
+
+// Atomically claims up to `limit` unsent recipients of one broadcast
+// (or of any broadcast still sending, when id is null) — safe to run
+// from the browser's loop and the cron at the same time.
+export async function claimBroadcastRecipients(broadcastId, limit = 100) {
+  return query(
+    `UPDATE email_broadcast_recipients SET status = 'processing', updated_at = now()
+     WHERE id IN (
+       SELECT r.id FROM email_broadcast_recipients r
+       JOIN email_broadcasts b ON b.id = r.broadcast_id
+       WHERE r.status = 'pending' AND b.status = 'sending' AND ($1::int IS NULL OR r.broadcast_id = $1)
+       ORDER BY r.broadcast_id, r.id
+       LIMIT $2
+       FOR UPDATE OF r SKIP LOCKED
+     )
+     RETURNING *`,
+    [broadcastId ?? null, limit]
+  );
+}
+
+export async function getBroadcastRow(id) {
+  const rows = await query("SELECT * FROM email_broadcasts WHERE id = $1", [Number(id) || 0]);
+  return rows[0] || null;
+}
+
+export async function markBroadcastRecipients(results) {
+  for (const r of results) {
+    await query(
+      `UPDATE email_broadcast_recipients SET status = $2, error = $3, resend_id = $4, updated_at = now() WHERE id = $1`,
+      [r.id, r.status, r.error || "", r.resendId || ""]
+    );
+  }
+}
+
+// A recipient stuck 'processing' (the function died mid-send) is marked
+// failed rather than retried — it may already have gone out, and a
+// broadcast must never email someone twice.
+export async function reapStuckBroadcastRecipients(olderThanMinutes = 10) {
+  await query(
+    `UPDATE email_broadcast_recipients SET status = 'failed', error = 'Interrupted — may or may not have been sent', updated_at = now()
+     WHERE status = 'processing' AND updated_at < now() - make_interval(mins => $1)`,
+    [olderThanMinutes]
+  );
+}
+
+// Flips finished broadcasts to 'done' and returns one broadcast's summary.
+export async function finishBroadcastsIfDone() {
+  await query(
+    `UPDATE email_broadcasts b SET status = 'done', finished_at = now()
+     WHERE b.status = 'sending' AND NOT EXISTS (
+       SELECT 1 FROM email_broadcast_recipients r WHERE r.broadcast_id = b.id AND r.status IN ('pending','processing')
+     )`
+  );
+}
+
+export async function listBroadcasts(limit = 50) {
+  const rows = await query(
+    `SELECT b.*,
+       COUNT(r.*) FILTER (WHERE r.status = 'sent')::int AS sent,
+       COUNT(r.*) FILTER (WHERE r.status = 'failed')::int AS failed,
+       COUNT(r.*) FILTER (WHERE r.status IN ('pending','processing'))::int AS remaining
+     FROM email_broadcasts b LEFT JOIN email_broadcast_recipients r ON r.broadcast_id = b.id
+     GROUP BY b.id ORDER BY b.created_at DESC LIMIT $1`,
+    [limit]
+  );
+  return rows.map((b) => ({
+    id: b.id,
+    subject: b.subject,
+    fromName: b.from_name,
+    fromEmail: b.from_email,
+    status: b.status,
+    total: b.total,
+    sent: b.sent,
+    failed: b.failed,
+    remaining: b.remaining,
+    createdBy: b.created_by,
+    createdAt: b.created_at,
+    finishedAt: b.finished_at,
+  }));
+}
+
+export async function listBroadcastFailures(id, limit = 200) {
+  return query(
+    `SELECT email, name, error FROM email_broadcast_recipients WHERE broadcast_id = $1 AND status = 'failed' ORDER BY id LIMIT $2`,
+    [Number(id) || 0, limit]
+  );
+}
+
+export async function addEmailUnsubscribe(email) {
+  const e = String(email || "").trim().toLowerCase();
+  if (!e.includes("@")) return false;
+  await query("INSERT INTO email_unsubscribes (email) VALUES ($1) ON CONFLICT DO NOTHING", [e]);
+  return true;
 }
 
 export async function findContactByPhone(rawPhone) {

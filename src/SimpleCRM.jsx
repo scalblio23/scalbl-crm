@@ -97,6 +97,7 @@ import { api } from "./lib/api";
 import { getCachedUser, setCachedUser, readSnapshot, writeSnapshot, clearStartupCache } from "./lib/startupCache";
 import CrazytelSmsInbox from "./components/CrazytelSmsInbox";
 import EmailInbox from "./components/EmailInbox";
+import BroadcastPanel from "./components/BroadcastPanel";
 import Dropdown from "./components/Dropdown";
 import AddStepMenu from "./components/AddStepMenu";
 // Tabs with their own code load when first opened (and in the
@@ -923,7 +924,7 @@ const FULL_ACCESS_ROLES = ["owner", "super_admin", "admin"];
 // Tabs a client login can never be given (mirrors server/auth.js's
 // CLIENT_FORBIDDEN_TABS): the diallers/Bulk SMS reach any lead, AI Voice
 // holds API keys, Settings manages the team.
-const CLIENT_LOCKED_TABS = ["powerdialler", "multiline", "bulk-sms", "proposals", "ai-voice", "settings"];
+const CLIENT_LOCKED_TABS = ["powerdialler", "multiline", "bulk-sms", "broadcast", "proposals", "ai-voice", "settings"];
 // Tabs a client can be given, but which show everything in them rather
 // than only the client's tags — Settings asks before ticking these.
 const CLIENT_UNSCOPED_TABS = ["memo", "csm", "clients", "calendars", "automations"];
@@ -934,7 +935,7 @@ const navItems = [
   { key: "contacts", label: "Contacts", icon: Users },
   { key: "powerdialler", label: "Powerdialler", icon: Phone },
   { key: "multiline", label: "Multi Line", icon: Layers },
-  { key: "bulk-sms", label: "Bulk SMS", icon: Send },
+  { key: "broadcast", label: "Broadcast", icon: Megaphone },
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "portal", label: "Portal", icon: Globe },
@@ -6466,7 +6467,7 @@ export default function SimpleCRM() {
           <div className="flex gap-2 border-b border-gray-200 px-4 py-2" aria-label="Inbox views">
             <button type="button" aria-pressed={inboxView === "legacy"} onClick={() => setInboxView("legacy")}
               className={`rounded px-3 py-2 text-sm ${inboxView === "legacy" ? "bg-gray-900 text-white" : "text-gray-600"}`}>
-              Legacy inbox · calls &amp; Twilio
+              Call history
             </button>
             <button type="button" aria-pressed={inboxView === "crazytel"} onClick={() => setInboxView("crazytel")}
               className={`rounded px-3 py-2 text-sm ${inboxView === "crazytel" ? "bg-gray-900 text-white" : "text-gray-600"}`}>
@@ -6488,7 +6489,7 @@ export default function SimpleCRM() {
               }`}
             >
               <div className="px-4 py-4 border-b border-gray-100 flex items-center justify-between">
-                <span className="font-semibold">Conversations</span>
+                <span className="font-semibold">Call history</span>
                 <div className="flex items-center gap-3">
                   {selectedConvoIds.length > 0 && !isClientRole && (
                     <button
@@ -6498,33 +6499,8 @@ export default function SimpleCRM() {
                       <Trash2 size={13} /> Delete {selectedConvoIds.length}
                     </button>
                   )}
-                  <button
-                    onClick={() => setShowNewMessage((v) => !v)}
-                    className="flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900"
-                  >
-                    <Plus size={13} /> New
-                  </button>
                 </div>
               </div>
-              {showNewMessage && (
-                <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
-                  <select
-                    autoFocus
-                    defaultValue=""
-                    onChange={(e) => e.target.value && startNewConversation(e.target.value)}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
-                  >
-                    <option value="" disabled>
-                      Text a contact…
-                    </option>
-                    {contacts.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} — {c.phone}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
               <div className="px-4 py-2.5 border-b border-gray-100">
                 <div className="relative">
                   <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -6638,36 +6614,12 @@ export default function SimpleCRM() {
                       )
                     )}
                   </div>
-                  <div className="p-4 border-t border-gray-100 flex flex-col gap-1.5">
-                    <div className="flex gap-2">
-                      <input
-                        value={messageDraft}
-                        onChange={(e) => setMessageDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") handleSendMessage();
-                        }}
-                        disabled={!activeConversationPhone}
-                        placeholder={activeConversationPhone ? "Type a message…" : "No phone number on file"}
-                        className="flex-1 min-w-0 border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400 disabled:bg-gray-50 disabled:text-gray-400"
-                      />
-                      <button
-                        onClick={handleSendMessage}
-                        disabled={!messageDraft.trim() || !activeConversationPhone || sendingMessage}
-                        className={`flex items-center justify-center bg-gray-900 text-white text-sm px-5 rounded-lg font-medium min-w-[72px] ${
-                          sendingMessage ? "" : "disabled:opacity-40 disabled:cursor-not-allowed"
-                        }`}
-                      >
-                        {sendingMessage ? <Loader2 size={15} className="animate-spin" /> : "Send"}
-                      </button>
-                    </div>
-                    <div className="text-xs text-gray-400">Sent as a real SMS via Twilio to {activeConversationPhone || "—"}</div>
-                  </div>
                 </>
               ) : (
                 <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
                   {conversations.length === 0
-                    ? 'No conversations yet — they\'ll appear automatically after a call or text, or start one with "New".'
-                    : "Select a conversation"}
+                    ? "No call history yet — calls and their outcomes appear here automatically."
+                    : "Select a lead to see their call history"}
                 </div>
               )}
             </div>
@@ -10824,6 +10776,13 @@ export default function SimpleCRM() {
         )}
 
         {/* Automations */}
+        <BroadcastPanel
+          active={page === "broadcast"}
+          contacts={contacts}
+          tags={contactTagNames}
+          statuses={LEAD_STATUSES}
+        />
+
         {page === "automations" && (
           <div className="flex-1 overflow-y-auto">
             {!openAutomation ? (

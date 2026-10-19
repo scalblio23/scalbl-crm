@@ -14,6 +14,7 @@
 import { ensureSchema, reapStuckAutomationRuns } from "../server/db.js";
 import { processDueAutomationRuns } from "../server/automations.js";
 import { processDueBookingReminders } from "../server/patientReminders.js";
+import { processPendingBroadcasts } from "../server/broadcasts.js";
 
 export default async function handler(req, res) {
   if (process.env.CRON_SECRET) {
@@ -35,7 +36,13 @@ export default async function handler(req, res) {
       console.error("[api/automations-process-runs] booking reminders failed", err);
       return 0;
     });
-    return res.status(200).json({ processed, reminders });
+    // Broadcasts whose browser send loop stopped (tab closed) carry on
+    // here. Same isolation as the reminders above.
+    const broadcastEmails = await processPendingBroadcasts({ budgetMs: 20000 }).catch((err) => {
+      console.error("[api/automations-process-runs] broadcasts failed", err);
+      return 0;
+    });
+    return res.status(200).json({ processed, reminders, broadcastEmails });
   } catch (err) {
     console.error("[api/automations-process-runs]", err);
     return res.status(500).json({ error: err.message || "Failed to process automation runs" });

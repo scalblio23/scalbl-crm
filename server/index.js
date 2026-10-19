@@ -140,6 +140,8 @@ import smsThreadsHandler from "../api/sms-threads.js";
 import smsCrazytelInboundHandler from "../api/sms-crazytel-inbound.js";
 import emailInboundHandler from "../api/email-inbound.js";
 import emailsHandler from "../api/emails.js";
+import broadcastsHandler from "../api/broadcasts.js";
+import unsubscribeHandler from "../api/unsubscribe.js";
 import whatsappHandler from "../api/whatsapp.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
@@ -204,6 +206,8 @@ const PUBLIC_PATHS = new Set([
   // Resend's email.received webhook — checks its own ?key= (see
   // api/email-inbound.js).
   "/api/email-inbound",
+  // Broadcast unsubscribe links — checked by their own signed token.
+  "/api/unsubscribe",
   "/api/auth-login",
   "/api/auth-set-password",
   "/api/auth-logout",
@@ -1546,6 +1550,8 @@ app.all("/api/sms-threads", smsThreadsHandler);
 app.all("/api/sms-crazytel-inbound", smsCrazytelInboundHandler);
 app.all("/api/email-inbound", emailInboundHandler);
 app.all("/api/emails", emailsHandler);
+app.all("/api/broadcasts", broadcastsHandler);
+app.all("/api/unsubscribe", unsubscribeHandler);
 app.all("/api/whatsapp", whatsappHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
