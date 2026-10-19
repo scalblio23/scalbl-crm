@@ -5155,6 +5155,23 @@ export default function SimpleCRM() {
         error: "",
       });
       startSipTransfer(toNumber);
+      // The gateway answers "placing"/"ringing" within a second or two.
+      // Silence means it never handled the request (e.g. it's running a
+      // build without live transfer) — say so rather than leaving the
+      // card on "Starting transfer…" forever. The call with the lead
+      // isn't touched either way.
+      const startedAt = Date.now();
+      updateTransfer({ sipStartedAt: startedAt });
+      setTimeout(() => {
+        const t = transferRef.current;
+        if (t?.sip && t.sipStartedAt === startedAt && t.targetStatus === "placing") {
+          cancelSipTransfer();
+          updateTransfer({
+            targetStatus: "failed",
+            error: "The voice server didn't respond to the transfer, so the number wasn't rung. Your call with the lead is unaffected.",
+          });
+        }
+      }, 20000);
       return;
     }
     // Already in a conference — a Multi Line call, or a second attempt
