@@ -53,6 +53,7 @@ export default async function handler(req, res) {
       text: email.text || "",
       html: email.html || "",
       receivedAt: email.created_at,
+      messageId: email.message_id || "",
     });
     return res.status(200).json({ ok: true, stored: Boolean(saved) });
   } catch (err) {
