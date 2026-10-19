@@ -36,6 +36,7 @@ export const ALL_TABS = [
   "powerdialler",
   "multiline",
   "bulk-sms",
+  "broadcast",
   "log",
   "reports",
   "portal",
@@ -57,7 +58,7 @@ export const CLIENT_TABS = ["conversation", "contacts", "reports", "portal", "ca
 // team. Every other tab can be ticked for a client in Settings (Inbox,
 // CSM, Clients, Calendars and Automations aren't
 // limited by tags — the Settings screen warns before granting those).
-export const CLIENT_FORBIDDEN_TABS = ["powerdialler", "multiline", "bulk-sms", "proposals", "ai-voice", "settings"];
+export const CLIENT_FORBIDDEN_TABS = ["powerdialler", "multiline", "bulk-sms", "broadcast", "proposals", "ai-voice", "settings"];
 
 // FAIL CLOSED: only the three named roles get full access. Anything
 // else — client, client_team, or a missing/unknown role — is treated
