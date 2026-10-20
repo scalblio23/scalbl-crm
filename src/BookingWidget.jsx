@@ -79,7 +79,13 @@ export default function BookingWidget({ slug }) {
   const [windowStart, setWindowStart] = useState(() => new Date());
   const [selectedDayKey, setSelectedDayKey] = useState(null);
   const [windowSlots, setWindowSlots] = useState([]);
-  const [loadingSlots, setLoadingSlots] = useState(false);
+  // Starts true so nothing reads the empty initial slot list as "no availability".
+  const [loadingSlots, setLoadingSlots] = useState(true);
+  // Until the visitor picks a day, select the first day that has times:
+  // "search" may page forward week by week to find one (on open), "window"
+  // only looks inside the week being shown (after the arrows are used).
+  const [autoPick, setAutoPick] = useState("search");
+  const autoWeeksRef = useRef(0);
   const [selectedSlot, setSelectedSlot] = useState(null);
   // ?name=&email=&phone= pre-fill the form, e.g. when embedded after a lead-capture survey.
   const [form, setForm] = useState(() => {
@@ -96,7 +102,14 @@ export default function BookingWidget({ slug }) {
   useEffect(() => {
     if (!isFramed) return;
     const onMessage = (e) => {
-      if (e.source === window.parent && e.data?.type === "scalbl:parent-tracking") parentTracksRef.current = true;
+      if (e.source !== window.parent) return;
+      if (e.data?.type === "scalbl:parent-tracking") parentTracksRef.current = true;
+      // Lets a host page that preloads this iframe hand over the visitor's
+      // details later, instead of reloading with ?name=&email=&phone=.
+      if (e.data?.type === "scalbl:prefill") {
+        const { name, email, phone } = e.data;
+        setForm((f) => ({ ...f, ...(name && { name }), ...(email && { email }), ...(phone && { phone }) }));
+      }
     };
     window.addEventListener("message", onMessage);
     window.parent.postMessage({ type: "scalbl:ready", slug }, "*");
@@ -218,6 +231,7 @@ export default function BookingWidget({ slug }) {
   // the selected day — the day picker needs every day's slot count up
   // front to grey out days with nothing available.
   useEffect(() => {
+    let stale = false;
     setLoadingSlots(true);
     // Query a day either side of the visible window too — a visitor's
     // local calendar day can span two of the host calendar's
@@ -232,9 +246,10 @@ export default function BookingWidget({ slug }) {
     const fmt = (d) => d.toISOString().slice(0, 10);
     api
       .get(`/api/calendar-slots?slug=${encodeURIComponent(slug)}&from=${fmt(from)}&to=${fmt(to)}`)
-      .then(({ slots: allSlots }) => setWindowSlots(allSlots))
-      .catch(() => setWindowSlots([]))
-      .finally(() => setLoadingSlots(false));
+      .then(({ slots: allSlots }) => !stale && setWindowSlots(allSlots))
+      .catch(() => !stale && setWindowSlots([]))
+      .finally(() => !stale && setLoadingSlots(false));
+    return () => { stale = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowStart, timezone, slug]);
 
@@ -248,6 +263,22 @@ export default function BookingWidget({ slug }) {
   }, [windowSlots, timezone]);
 
   const slots = slotsByDay[selectedDayKey] || [];
+
+  const MAX_AUTO_WEEKS = 8;
+  useEffect(() => {
+    if (loadingSlots || !autoPick) return;
+    const firstOpen = visibleDays.map((d) => dateKeyInZone(d, timezone)).find((k) => slotsByDay[k]?.length);
+    if (firstOpen) {
+      setSelectedDayKey(firstOpen);
+      setAutoPick(null);
+    } else if (autoPick === "search" && autoWeeksRef.current < MAX_AUTO_WEEKS) {
+      autoWeeksRef.current += 1;
+      setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; });
+    } else {
+      setAutoPick(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingSlots, slotsByDay, autoPick]);
 
   async function submitBooking(e) {
     e.preventDefault();
@@ -450,7 +481,7 @@ export default function BookingWidget({ slug }) {
           <div className="p-4 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <button
-                onClick={() => setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; })}
+                onClick={() => { setAutoPick("window"); setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; }); }}
                 className="text-gray-400 hover:text-gray-700"
               >
                 <ChevronLeft size={18} />
@@ -459,7 +490,7 @@ export default function BookingWidget({ slug }) {
                 {dayLabel(visibleDays[0], timezone)} – {dayLabel(visibleDays[6], timezone)}
               </span>
               <button
-                onClick={() => setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; })}
+                onClick={() => { setAutoPick("window"); setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; }); }}
                 className="text-gray-400 hover:text-gray-700"
               >
                 <ChevronRight size={18} />
@@ -481,7 +512,7 @@ export default function BookingWidget({ slug }) {
                   <button
                     key={key}
                     type="button"
-                    onClick={() => setSelectedDayKey(key)}
+                    onClick={() => { setAutoPick(null); setSelectedDayKey(key); }}
                     disabled={unavailable}
                     className={`flex flex-col items-center justify-center py-2 sm:py-2.5 rounded-xl sm:rounded-lg text-xs font-medium border ${
                       active
@@ -499,7 +530,7 @@ export default function BookingWidget({ slug }) {
               })}
             </div>
 
-            {loadingSlots ? (
+            {loadingSlots || autoPick ? (
               <div className="flex justify-center py-10">
                 <Loader2 size={18} className="animate-spin text-gray-400" />
               </div>
