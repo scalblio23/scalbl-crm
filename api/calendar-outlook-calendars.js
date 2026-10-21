@@ -18,7 +18,7 @@ export default async function handler(req, res) {
     if (!calendar.outlookConnected) return res.status(409).json({ error: "Connect Outlook first" });
 
     const accessToken = await getValidOutlookAccessToken(calendar);
-    return res.status(200).json(await listOutlookCalendars({ accessToken }));
+    return res.status(200).json(await listOutlookCalendars({ accessToken, includeReadOnly: req.query.all === "1" }));
   } catch (err) {
     console.error("[api/calendar-outlook-calendars]", err);
     return res.status(500).json({ error: err.message || "Could not load Outlook calendars" });

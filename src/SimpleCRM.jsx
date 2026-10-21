@@ -1028,6 +1028,41 @@ function formatTimeWithZone(value) {
   });
 }
 
+// "Also check these calendars for clashes" — ticked calendars' busy
+// time blocks off slots on the booking calendar being edited.
+function ClashCalendarChecklist({ title, options, selected, onChange, empty = "No other calendars on this account." }) {
+  const sel = new Set(selected.map(String));
+  return (
+    <div>
+      {title && <div className="text-xs font-medium mb-1.5 text-gray-500">{title}</div>}
+      {options.length === 0 ? (
+        <p className="text-xs text-gray-400">{empty}</p>
+      ) : (
+        <div className="border border-gray-100 rounded-lg divide-y divide-gray-100 max-h-56 overflow-y-auto">
+          {options.map((o) => (
+            <label key={o.value} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={sel.has(String(o.value))}
+                onChange={(e) =>
+                  onChange(
+                    e.target.checked
+                      ? [...selected.filter((v) => String(v) !== String(o.value)), o.value]
+                      : selected.filter((v) => String(v) !== String(o.value))
+                  )
+                }
+                className="w-4 h-4 rounded border-gray-300"
+              />
+              <span className="truncate">{o.label}</span>
+              {o.writable === false && <span className="text-[11px] text-gray-400 shrink-0">view only</span>}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
   // Phone-width layout: the sidebars become slide-in drawers opened
@@ -1466,8 +1501,8 @@ export default function SimpleCRM() {
     }
     setGoogleCalendarsLoading(true);
     api
-      .get(`/api/calendar-google-calendars?calendarId=${openCalendarId}`)
-      .then((list) => setGoogleCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary }))))
+      .get(`/api/calendar-google-calendars?calendarId=${openCalendarId}&all=1`)
+      .then((list) => setGoogleCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary, writable: c.writable !== false }))))
       .catch((err) => {
         setGoogleCalendarOptions([]);
         setGoogleCalendarsError(err.message || "Could not load your Google calendars.");
@@ -1488,8 +1523,10 @@ export default function SimpleCRM() {
     }
     setOutlookCalendarsLoading(true);
     api
-      .get(`/api/calendar-outlook-calendars?calendarId=${openCalendarId}`)
-      .then((list) => setOutlookCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary, primary: c.primary }))))
+      .get(`/api/calendar-outlook-calendars?calendarId=${openCalendarId}&all=1`)
+      .then((list) =>
+        setOutlookCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary, primary: c.primary, writable: c.writable !== false })))
+      )
       .catch((err) => {
         setOutlookCalendarOptions([]);
         setOutlookCalendarsError(err.message || "Could not load your Outlook calendars.");
@@ -10222,8 +10259,8 @@ export default function SimpleCRM() {
                                 value={openCalendar.googleCalendarId}
                                 onChange={(googleCalendarId) => patchCalendar(openCalendar.id, { googleCalendarId })}
                                 options={
-                                  googleCalendarOptions.length
-                                    ? googleCalendarOptions
+                                  googleCalendarOptions.some((o) => o.writable)
+                                    ? googleCalendarOptions.filter((o) => o.writable)
                                     : [{ value: openCalendar.googleCalendarId, label: openCalendar.googleCalendarId }]
                                 }
                                 disabled={googleCalendarsLoading}
@@ -10241,6 +10278,12 @@ export default function SimpleCRM() {
                                 </p>
                               )}
                             </div>
+                            <ClashCalendarChecklist
+                              title="Also check these Google calendars for clashes"
+                              options={googleCalendarOptions.filter((o) => o.value !== openCalendar.googleCalendarId)}
+                              selected={openCalendar.clashGoogleCalendarIds || []}
+                              onChange={(clashGoogleCalendarIds) => patchCalendar(openCalendar.id, { clashGoogleCalendarIds })}
+                            />
                           </>
                         ) : (
                           <button
@@ -10282,8 +10325,8 @@ export default function SimpleCRM() {
                                 }
                                 onChange={(outlookCalendarId) => patchCalendar(openCalendar.id, { outlookCalendarId })}
                                 options={
-                                  outlookCalendarOptions.length
-                                    ? outlookCalendarOptions
+                                  outlookCalendarOptions.some((o) => o.writable)
+                                    ? outlookCalendarOptions.filter((o) => o.writable)
                                     : [{ value: openCalendar.outlookCalendarId || "", label: "Default calendar" }]
                                 }
                                 disabled={outlookCalendarsLoading}
@@ -10297,6 +10340,16 @@ export default function SimpleCRM() {
                                 </p>
                               )}
                             </div>
+                            <ClashCalendarChecklist
+                              title="Also check these Outlook calendars for clashes"
+                              options={outlookCalendarOptions.filter(
+                                (o) =>
+                                  o.value !==
+                                  (openCalendar.outlookCalendarId || outlookCalendarOptions.find((x) => x.primary)?.value)
+                              )}
+                              selected={openCalendar.clashOutlookCalendarIds || []}
+                              onChange={(clashOutlookCalendarIds) => patchCalendar(openCalendar.id, { clashOutlookCalendarIds })}
+                            />
                           </>
                         ) : (
                           <button
@@ -10306,6 +10359,18 @@ export default function SimpleCRM() {
                             <Mail size={15} /> Connect with Outlook
                           </button>
                         )}
+
+                        <h2 className="text-base font-bold pt-4">Other booking calendars</h2>
+                        <p className="text-sm text-gray-500">
+                          Bookings on the calendars ticked here also block off time on this one — so the same person
+                          can't be double-booked across two booking links.
+                        </p>
+                        <ClashCalendarChecklist
+                          options={calendars.filter((c) => c.id !== openCalendar.id).map((c) => ({ value: c.id, label: c.name }))}
+                          selected={openCalendar.clashCrmCalendarIds || []}
+                          onChange={(clashCrmCalendarIds) => patchCalendar(openCalendar.id, { clashCrmCalendarIds })}
+                          empty="No other booking calendars yet."
+                        />
                       </div>
                     )}
 

@@ -9,6 +9,7 @@
 // saved on the booking and the calendar, so Calendar settings can show
 // what went wrong and offer a retry.
 import {
+  getConfirmedBookingsForCalendars,
   setCalendarBookingGoogleEventId,
   setCalendarBookingOutlookEventId,
   setCalendarBookingSyncError,
@@ -31,7 +32,13 @@ export async function getExternalBusy(calendar, timeMinISO, timeMaxISO, logTag =
     lookups.push(
       getValidAccessToken(calendar)
         .then((accessToken) =>
-          getFreeBusy({ accessToken, calendarId: calendar.googleCalendarId, timeMinISO, timeMaxISO })
+          getFreeBusy({
+            accessToken,
+            calendarId: calendar.googleCalendarId,
+            extraCalendarIds: calendar.clashGoogleCalendarIds || [],
+            timeMinISO,
+            timeMaxISO,
+          })
         )
         .catch((err) => {
           console.error(`${logTag} Google freebusy lookup failed`, err);
@@ -42,9 +49,20 @@ export async function getExternalBusy(calendar, timeMinISO, timeMaxISO, logTag =
   if (calendar.outlookConnected) {
     lookups.push(
       getValidOutlookAccessToken(calendar)
-        .then((accessToken) =>
-          getOutlookBusy({ accessToken, calendarId: calendar.outlookCalendarId, timeMinISO, timeMaxISO })
-        )
+        .then(async (accessToken) => {
+          // The booking calendar (null = the account's default) plus any
+          // extra ones ticked under "Also check for clashes".
+          const ids = [...new Set([calendar.outlookCalendarId || null, ...(calendar.clashOutlookCalendarIds || [])])].slice(0, 20);
+          const results = await Promise.all(
+            ids.map((calendarId) =>
+              getOutlookBusy({ accessToken, calendarId, timeMinISO, timeMaxISO }).catch((err) => {
+                console.error(`${logTag} Outlook busy lookup failed for one calendar`, err);
+                return [];
+              })
+            )
+          );
+          return results.flat();
+        })
         .catch((err) => {
           console.error(`${logTag} Outlook busy lookup failed`, err);
           return [];
@@ -52,6 +70,17 @@ export async function getExternalBusy(calendar, timeMinISO, timeMaxISO, logTag =
     );
   }
   return (await Promise.all(lookups)).flat();
+}
+
+// Bookings on the OTHER CRM calendars this one checks for clashes (so
+// one person isn't double-booked across two booking links), as plain
+// busy blocks — kept apart from the calendar's own bookings, which
+// also count toward its max-bookings-per-day limit.
+export async function getCrmClashBusy(calendar, fromISO, toISO) {
+  const others = (calendar.clashCrmCalendarIds || []).filter((id) => Number(id) !== Number(calendar.id));
+  if (!others.length) return [];
+  const bookings = await getConfirmedBookingsForCalendars(others, fromISO, toISO);
+  return bookings.map((b) => ({ start: new Date(b.startTime).toISOString(), end: new Date(b.endTime).toISOString() }));
 }
 
 function eventDetails(calendar, booking) {

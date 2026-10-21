@@ -76,6 +76,17 @@ export default async function handler(req, res) {
       ) {
         return res.status(400).json({ error: "Unknown confirmation workflow" });
       }
+      // Other CRM calendars to check for clashes: only ones this user
+      // can access themselves (a client can't link someone else's
+      // calendar and read its busy times through their booking page).
+      if (Array.isArray(patch.clashCrmCalendarIds)) {
+        const allowed = [];
+        for (const otherId of patch.clashCrmCalendarIds.map(Number)) {
+          if (otherId === Number(id)) continue;
+          if (canAccessCalendar(user, await getCalendarById(otherId))) allowed.push(otherId);
+        }
+        patch.clashCrmCalendarIds = allowed;
+      }
       const calendar = await updateCalendar(id, patch);
       if (!calendar) return res.status(404).json({ error: "Calendar not found" });
       return res.status(200).json(calendar);

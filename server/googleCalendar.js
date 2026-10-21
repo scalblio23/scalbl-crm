@@ -187,16 +187,25 @@ export async function getValidAccessToken(calendar, env = process.env) {
 // mapping, so no extra/broader scope is needed just to enumerate
 // calendars. Sorted primary-first, then alphabetically, since that's
 // the calendar someone's most likely to want.
-export async function listGoogleCalendars({ accessToken }) {
+export async function listGoogleCalendars({ accessToken, includeReadOnly = false }) {
   const body = await googleFetch(`${GOOGLE_CALENDAR_API}/users/me/calendarList`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   // Only calendars the account can add events to — picking one that's
   // merely shared read-only with it (accessRole "reader" /
   // "freeBusyReader") made every booking's event insert fail with 403.
-  const items = (body.items || []).filter((c) => c.accessRole === "owner" || c.accessRole === "writer");
+  // includeReadOnly is for the "also check for clashes" list, where a
+  // read-only calendar's busy times are exactly what's wanted.
+  const items = (body.items || []).filter(
+    (c) => includeReadOnly || c.accessRole === "owner" || c.accessRole === "writer"
+  );
   return items
-    .map((c) => ({ id: c.id, summary: c.summary || c.id, primary: Boolean(c.primary) }))
+    .map((c) => ({
+      id: c.id,
+      summary: c.summary || c.id,
+      primary: Boolean(c.primary),
+      writable: c.accessRole === "owner" || c.accessRole === "writer",
+    }))
     .sort((a, b) => (a.primary === b.primary ? a.summary.localeCompare(b.summary) : a.primary ? -1 : 1));
 }
 
@@ -206,13 +215,17 @@ export async function listGoogleCalendars({ accessToken }) {
 // `calendarId` is whichever calendar was picked in Calendar settings
 // (defaults to "primary" — see server/db.js's google_calendar_id
 // column default).
-export async function getFreeBusy({ accessToken, calendarId = "primary", timeMinISO, timeMaxISO }) {
+// extraCalendarIds: more calendars on the same account to check for
+// clashes ("Also check for clashes" in Calendar settings) — one
+// freeBusy request covers them all.
+export async function getFreeBusy({ accessToken, calendarId = "primary", extraCalendarIds = [], timeMinISO, timeMaxISO }) {
+  const ids = [...new Set([calendarId, ...extraCalendarIds].filter(Boolean))].slice(0, 50);
   const body = await googleFetch(`${GOOGLE_CALENDAR_API}/freeBusy`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ timeMin: timeMinISO, timeMax: timeMaxISO, items: [{ id: calendarId }] }),
+    body: JSON.stringify({ timeMin: timeMinISO, timeMax: timeMaxISO, items: ids.map((id) => ({ id })) }),
   });
-  return body.calendars?.[calendarId]?.busy || [];
+  return ids.flatMap((id) => body.calendars?.[id]?.busy || []);
 }
 
 // Creates the event on the booker's behalf as an attendee.

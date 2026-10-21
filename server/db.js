@@ -856,6 +856,13 @@ export async function ensureSchema() {
     // which a fully set-up production database skips — so saving a user
     // failed with "column phone does not exist".
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT`);
+    // Extra calendars a booking calendar checks for clashes, on top of
+    // the Google/Outlook calendar it writes bookings to: more calendars
+    // on the connected accounts (ids), and other CRM booking calendars
+    // whose bookings should block its slots too.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_google_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_outlook_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_crm_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     // Emails received through Resend (see api/email-inbound.js), shown
     // in Conversations → Email. tags = the tags of every contact whose
     // email matched the sender, so a client role sees only emails from
@@ -2891,6 +2898,9 @@ export function calendarFromRow(r, { includeSecrets = false } = {}) {
     outlookConnected: Boolean(r.outlook_connected),
     outlookEmail: r.outlook_email || null,
     outlookCalendarId: r.outlook_calendar_id || null,
+    clashGoogleCalendarIds: Array.isArray(r.clash_google_calendar_ids) ? r.clash_google_calendar_ids : [],
+    clashOutlookCalendarIds: Array.isArray(r.clash_outlook_calendar_ids) ? r.clash_outlook_calendar_ids : [],
+    clashCrmCalendarIds: Array.isArray(r.clash_crm_calendar_ids) ? r.clash_crm_calendar_ids.map(Number) : [],
     assignedUserIds: (r.assigned_user_ids || []).map(Number),
     syncError: r.sync_error || null,
     syncErrorAt: r.sync_error_at || null,
@@ -2997,7 +3007,10 @@ export async function updateCalendar(id, patch) {
        assigned_user_ids = COALESCE($18::jsonb, assigned_user_ids),
        -- outlook_calendar_id is nullable by design (null = the
        -- account's default calendar), same reasoning as $9 above.
-       outlook_calendar_id = CASE WHEN $19 THEN $20 ELSE outlook_calendar_id END
+       outlook_calendar_id = CASE WHEN $19 THEN $20 ELSE outlook_calendar_id END,
+       clash_google_calendar_ids = COALESCE($21::jsonb, clash_google_calendar_ids),
+       clash_outlook_calendar_ids = COALESCE($22::jsonb, clash_outlook_calendar_ids),
+       clash_crm_calendar_ids = COALESCE($23::jsonb, clash_crm_calendar_ids)
      WHERE id = $1
      RETURNING *`,
     [
@@ -3021,6 +3034,11 @@ export async function updateCalendar(id, patch) {
       Array.isArray(patch.assignedUserIds) ? JSON.stringify(patch.assignedUserIds.map(Number)) : null,
       Object.prototype.hasOwnProperty.call(patch, "outlookCalendarId"),
       patch.outlookCalendarId || null,
+      Array.isArray(patch.clashGoogleCalendarIds) ? JSON.stringify(patch.clashGoogleCalendarIds.map(String).slice(0, 50)) : null,
+      Array.isArray(patch.clashOutlookCalendarIds) ? JSON.stringify(patch.clashOutlookCalendarIds.map(String).slice(0, 50)) : null,
+      Array.isArray(patch.clashCrmCalendarIds)
+        ? JSON.stringify(patch.clashCrmCalendarIds.map(Number).filter((n) => Number.isInteger(n) && n > 0 && n !== Number(id)).slice(0, 50))
+        : null,
     ]
   );
   return rows[0] ? calendarFromRow(rows[0]) : null;
@@ -3280,6 +3298,20 @@ export async function getCalendarBookings(calendarId) {
 // time when computing available slots, on top of whatever Google's
 // freebusy API reports (keeps a calendar's own bookings authoritative
 // even the moment before Google's copy of the event exists).
+// Confirmed bookings across several calendars (a calendar plus the
+// other CRM calendars it checks for clashes).
+export async function getConfirmedBookingsForCalendars(calendarIds, fromISO, toISO) {
+  const ids = [...new Set(calendarIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return [];
+  const rows = await query(
+    `SELECT * FROM calendar_bookings
+     WHERE calendar_id = ANY($1::int[]) AND status = 'confirmed' AND start_time < $3 AND end_time > $2
+     ORDER BY start_time ASC`,
+    [ids, fromISO, toISO]
+  );
+  return rows.map(calendarBookingFromRow);
+}
+
 export async function getConfirmedBookingsInRange(calendarId, fromISO, toISO) {
   const rows = await query(
     `SELECT * FROM calendar_bookings

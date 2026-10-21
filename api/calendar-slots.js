@@ -3,7 +3,7 @@
 // that range: availability rules minus Google/Outlook busy time (if connected)
 // minus the calendar's own existing confirmed bookings.
 import { ensureSchema, getCalendarBySlug, getConfirmedBookingsInRange } from "../server/db.js";
-import { getExternalBusy } from "../server/calendarSync.js";
+import { getCrmClashBusy, getExternalBusy } from "../server/calendarSync.js";
 import { computeAvailableSlots } from "../server/calendarAvailability.js";
 
 export default async function handler(req, res) {
@@ -20,7 +20,10 @@ export default async function handler(req, res) {
 
     // Fails open per provider (no busy time applied) — safer for a
     // booking widget than failing the whole page over a token hiccup.
-    const externalBusy = await getExternalBusy(calendar, fromISO, toISO, "[api/calendar-slots]");
+    const externalBusy = [
+      ...(await getExternalBusy(calendar, fromISO, toISO, "[api/calendar-slots]")),
+      ...(await getCrmClashBusy(calendar, fromISO, toISO)),
+    ];
     const existingBookings = await getConfirmedBookingsInRange(calendar.id, fromISO, toISO);
 
     const slots = computeAvailableSlots({ calendar, fromDate: from, toDate: to, googleBusy: externalBusy, existingBookings });

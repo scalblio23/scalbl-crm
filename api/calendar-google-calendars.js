@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     if (!calendar.googleConnected) return res.status(409).json({ error: "Connect Google first" });
 
     const accessToken = await getValidAccessToken(calendar);
-    const googleCalendars = await listGoogleCalendars({ accessToken });
+    const googleCalendars = await listGoogleCalendars({ accessToken, includeReadOnly: req.query.all === "1" });
     return res.status(200).json(googleCalendars);
   } catch (err) {
     console.error("[api/calendar-google-calendars]", err);

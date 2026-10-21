@@ -13,7 +13,7 @@ import {
   markContactsBookedForBooking,
   setCalendarBookingContactsSynced,
 } from "../server/db.js";
-import { getExternalBusy, pushBookingToCalendars } from "../server/calendarSync.js";
+import { getCrmClashBusy, getExternalBusy, pushBookingToCalendars } from "../server/calendarSync.js";
 import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAvailability.js";
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "../server/email.js";
 import { sendSms, missingTwilioEnv, publicBaseUrl } from "../server/twilioCore.js";
@@ -69,7 +69,10 @@ export default async function handler(req, res) {
     nextDateStr.setUTCDate(nextDateStr.getUTCDate() + 1);
     const dayStartISO = `${prevDateStr.toISOString().slice(0, 10)}T00:00:00.000Z`;
     const dayEndISO = `${nextDateStr.toISOString().slice(0, 10)}T23:59:59.999Z`;
-    const externalBusy = await getExternalBusy(calendar, dayStartISO, dayEndISO, "[api/calendar-book]");
+    const externalBusy = [
+      ...(await getExternalBusy(calendar, dayStartISO, dayEndISO, "[api/calendar-book]")),
+      ...(await getCrmClashBusy(calendar, dayStartISO, dayEndISO)),
+    ];
     const existingBookings = await getConfirmedBookingsInRange(calendar.id, dayStartISO, dayEndISO);
     const daySlots = computeAvailableSlots({ calendar, fromDate: dateStr, toDate: dateStr, googleBusy: externalBusy, existingBookings });
     const stillFree = daySlots.some((s) => s.startUTC === startUTC && s.endUTC === endUTC);
