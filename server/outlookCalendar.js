@@ -118,13 +118,13 @@ function calendarPath(calendarId) {
 }
 
 // Calendars on the account that events can be added to, default first.
-export async function listOutlookCalendars({ accessToken }) {
+export async function listOutlookCalendars({ accessToken, includeReadOnly = false }) {
   const body = await msFetch(`${GRAPH_API}/me/calendars?$select=id,name,isDefaultCalendar,canEdit&$top=100`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   return (body.value || [])
-    .filter((c) => c.canEdit !== false)
-    .map((c) => ({ id: c.id, summary: c.name || c.id, primary: Boolean(c.isDefaultCalendar) }))
+    .filter((c) => includeReadOnly || c.canEdit !== false)
+    .map((c) => ({ id: c.id, summary: c.name || c.id, primary: Boolean(c.isDefaultCalendar), writable: c.canEdit !== false }))
     .sort((a, b) => (a.primary === b.primary ? a.summary.localeCompare(b.summary) : a.primary ? -1 : 1));
 }
 
