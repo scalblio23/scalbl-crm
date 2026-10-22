@@ -2,10 +2,10 @@ import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
 
-import SimpleCRM from "./SimpleCRM.jsx";
-
-// The public booking page never needs the CRM's tabs, and the CRM never
-// needs the booking widget — the widget loads only on its own page.
+// Everything is loaded on demand: the public booking page downloads only
+// the widget (a few KB), never the CRM's tabs, charts or phone code —
+// and the CRM never needs the booking widget.
+const SimpleCRM = lazy(() => import("./SimpleCRM.jsx"));
 const BookingWidget = lazy(() => import("./BookingWidget.jsx"));
 const PrivacyPolicy = lazy(() => import("./LegalPages.jsx").then((m) => ({ default: m.PrivacyPolicy })));
 const TermsOfService = lazy(() => import("./LegalPages.jsx").then((m) => ({ default: m.TermsOfService })));

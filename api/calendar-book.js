@@ -69,11 +69,12 @@ export default async function handler(req, res) {
     nextDateStr.setUTCDate(nextDateStr.getUTCDate() + 1);
     const dayStartISO = `${prevDateStr.toISOString().slice(0, 10)}T00:00:00.000Z`;
     const dayEndISO = `${nextDateStr.toISOString().slice(0, 10)}T23:59:59.999Z`;
-    const externalBusy = [
-      ...(await getExternalBusy(calendar, dayStartISO, dayEndISO, "[api/calendar-book]")),
-      ...(await getCrmClashBusy(calendar, dayStartISO, dayEndISO)),
-    ];
-    const existingBookings = await getConfirmedBookingsInRange(calendar.id, dayStartISO, dayEndISO);
+    const [providerBusy, crmBusy, existingBookings] = await Promise.all([
+      getExternalBusy(calendar, dayStartISO, dayEndISO, "[api/calendar-book]"),
+      getCrmClashBusy(calendar, dayStartISO, dayEndISO),
+      getConfirmedBookingsInRange(calendar.id, dayStartISO, dayEndISO),
+    ]);
+    const externalBusy = [...providerBusy, ...crmBusy];
     const daySlots = computeAvailableSlots({ calendar, fromDate: dateStr, toDate: dateStr, googleBusy: externalBusy, existingBookings });
     const stillFree = daySlots.some((s) => s.startUTC === startUTC && s.endUTC === endUTC);
     if (!stillFree) {

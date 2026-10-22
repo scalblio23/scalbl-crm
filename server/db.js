@@ -138,6 +138,21 @@ export async function mapWithConcurrency(items, limit, fn) {
 
 // Idempotent — safe to call on every request. Creates the schema on
 // first use so there's no separate manual migration step.
+// For the public booking endpoints, which only read tables that exist
+// on any set-up database: run straight away, skipping ensureSchema's
+// ~30 sequential round trips on every cold start. If a table or column
+// really is missing (a brand-new database, or a migration this process
+// hasn't run yet), run ensureSchema once and retry.
+export async function withSchemaRetry(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err?.code !== "42P01" && err?.code !== "42703") throw err;
+    await ensureSchema();
+    return fn();
+  }
+}
+
 let schemaReady = null;
 export async function ensureSchema() {
   if (schemaReady) return schemaReady;
