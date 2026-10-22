@@ -28,6 +28,9 @@ import {
   appendAutomationRunStep,
   getUserById,
   getPool,
+  saveOutgoingEmail,
+  getRunsWithSentEmails,
+  claimOneTimeJob,
 } from "./db.js";
 import { sendCalendarEmail, missingEmailEnv } from "./email.js";
 import { sendCrazytelSms } from "./crazytelSms.js";
@@ -129,8 +132,9 @@ function computeWaitRunAt(step, context) {
 // records lastError, then carries on with the next step.
 // `log` is filled in as the step goes (to, text, skipped) so the run's
 // step log can say exactly what was sent, even when the send throws.
-async function runStep(step, automation, context, stepKey, log = {}) {
-  const data = {
+// The merge fields every step's text is filled from.
+function templateData(context) {
+  return {
     name: context.contact?.name || "",
     email: context.contact?.email || "",
     phone: context.contact?.phone || "",
@@ -144,15 +148,47 @@ async function runStep(step, automation, context, stepKey, log = {}) {
     when: context.whenText || "",
     timezone: context.timezone || "",
   };
+}
+
+// Puts an automation email into Conversations → Email (marked Sent),
+// next to emails sent by hand. Keyed by run + step, so the backfill
+// below and a live send can never add the same email twice.
+// Best-effort: a failure here never fails the step.
+async function recordAutomationEmail({ stepKey, automationName, to, subject, html, text, sentAt }) {
+  try {
+    await saveOutgoingEmail({
+      resendId: `auto:${stepKey}`,
+      fromEmail: process.env.RESEND_FROM_EMAIL || "",
+      fromName: process.env.RESEND_FROM_NAME || "",
+      to: String(to || "").trim().toLowerCase(),
+      subject,
+      text,
+      html,
+      sentBy: `Automation: ${automationName}`,
+      sentAt,
+    });
+  } catch (err) {
+    console.error("[automations] could not record sent email in Conversations", err);
+  }
+}
+
+async function runStep(step, automation, context, stepKey, log = {}) {
+  const data = templateData(context);
   if (step.type === "email") {
     log.to = context.contact?.email || "";
     log.text = fillTemplate(step.subject, data) || automation.name;
     if (!context.contact?.email) { log.skipped = "Contact has no email address"; return; }
     if (missingEmailEnv().length) { log.skipped = "Email sending is not set up"; return; }
-    await sendCalendarEmail({
+    const body = fillTemplate(step.body, data);
+    const html = body.replace(/\n/g, "<br/>");
+    await sendCalendarEmail({ to: context.contact.email, subject: log.text, html });
+    await recordAutomationEmail({
+      stepKey,
+      automationName: automation.name,
       to: context.contact.email,
       subject: log.text,
-      html: fillTemplate(step.body, data).replace(/\n/g, "<br/>"),
+      html,
+      text: body,
     });
   } else if (step.type === "sms") {
     log.to = context.contact?.phone || "";
@@ -188,6 +224,38 @@ async function runStep(step, automation, context, stepKey, log = {}) {
 }
 
 const LOGGED_STEP_TYPES = new Set(["email", "sms", "sms_user"]);
+
+// One time: emails automations sent before they were recorded in
+// Conversations → Email. The run log kept who and the subject; the body
+// is re-filled from the step's template with the run's own merge data —
+// the same way it was written at the time (unless the template has been
+// edited since).
+export async function backfillAutomationEmails() {
+  if (!(await claimOneTimeJob("backfill-automation-emails-v1"))) return 0;
+  let added = 0;
+  for (const run of await getRunsWithSentEmails()) {
+    const actions = Array.isArray(run.actions) ? run.actions : [];
+    const data = templateData(run.context || {});
+    for (const entry of Array.isArray(run.step_log) ? run.step_log : []) {
+      if (entry?.type !== "email" || entry.status !== "sent" || !entry.to) continue;
+      const index = Number(entry.step) - 1;
+      const step = actions[index];
+      const body = step?.type === "email" ? fillTemplate(step.body, data) : "";
+      await recordAutomationEmail({
+        stepKey: `automation-run-${run.id}-step-${index}`,
+        automationName: run.automation_name,
+        to: entry.to,
+        subject: entry.text || run.automation_name,
+        html: body.replace(/\n/g, "<br/>"),
+        text: body,
+        sentAt: entry.at || null,
+      });
+      added++;
+    }
+  }
+  console.log(`[automations] backfilled ${added} automation email(s) into Conversations`);
+  return added;
+}
 
 // Best-effort: a failure to write the log never changes what the run does.
 async function recordStep(runId, entry) {

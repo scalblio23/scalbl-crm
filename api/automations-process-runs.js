@@ -12,7 +12,7 @@
 // down. Without CRON_SECRET set, this runs unauthenticated — fine for
 // local dev, but set it in Vercel before relying on this in production.
 import { ensureSchema, reapStuckAutomationRuns } from "../server/db.js";
-import { processDueAutomationRuns } from "../server/automations.js";
+import { processDueAutomationRuns, backfillAutomationEmails } from "../server/automations.js";
 import { processDueBookingReminders } from "../server/patientReminders.js";
 import { processPendingBroadcasts } from "../server/broadcasts.js";
 
@@ -30,6 +30,11 @@ export default async function handler(req, res) {
     // see reapStuckAutomationRuns' own comment in server/db.js.
     await reapStuckAutomationRuns();
     const processed = await processDueAutomationRuns();
+    // One time only (claimOneTimeJob): past automation emails into
+    // Conversations → Email. Never allowed to break automation runs.
+    await backfillAutomationEmails().catch((err) =>
+      console.error("[api/automations-process-runs] automation email backfill failed", err)
+    );
     // Patient confirmation workflow reminders ride the same cron. A
     // failure there is logged, never allowed to break automation runs.
     const reminders = await processDueBookingReminders().catch((err) => {
