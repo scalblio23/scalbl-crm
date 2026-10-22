@@ -7,7 +7,15 @@
 // automatically. Assigning people and deleting calendars stays with
 // full-access roles. A plain client keeps managing (creating and
 // deleting) the calendars they own, plus any they're assigned to.
-import { ensureSchema, getCalendars, getCalendarById, createCalendar, updateCalendar, deleteCalendar } from "../server/db.js";
+import {
+  ensureSchema,
+  getCalendars,
+  getCalendarById,
+  createCalendar,
+  updateCalendar,
+  deleteCalendar,
+  setCalendarConnectionClashIds,
+} from "../server/db.js";
 import { requireAuth, forbidNonCalendarRole, hasFullAccess, canAccessCalendar } from "../server/auth.js";
 import { WORKFLOWS, workflowReadiness } from "../server/patientReminders.js";
 
@@ -86,6 +94,24 @@ export default async function handler(req, res) {
           if (canAccessCalendar(user, await getCalendarById(otherId))) allowed.push(otherId);
         }
         patch.clashCrmCalendarIds = allowed;
+      }
+      // "Add calls to calendar": one signed-in account (of this
+      // calendar) + one calendar on it, or null for nowhere.
+      if (Object.prototype.hasOwnProperty.call(patch, "bookingConnectionId")) {
+        if (patch.bookingConnectionId !== null && !existing.connections.some((c) => c.id === Number(patch.bookingConnectionId))) {
+          return res.status(400).json({ error: "That account isn't signed in on this calendar any more — reload and pick again." });
+        }
+        patch.bookingCalendarId = patch.bookingCalendarId ? String(patch.bookingCalendarId) : null;
+      }
+      // One account's "check these calendars for clashes" list.
+      const { connectionClash } = patch;
+      delete patch.connectionClash;
+      if (connectionClash) {
+        if (!existing.connections.some((c) => c.id === Number(connectionClash.connectionId))) {
+          return res.status(400).json({ error: "That account isn't signed in on this calendar any more — reload and try again." });
+        }
+        if (!Array.isArray(connectionClash.calendarIds)) return res.status(400).json({ error: "Missing calendarIds" });
+        await setCalendarConnectionClashIds(existing.id, connectionClash.connectionId, connectionClash.calendarIds);
       }
       const calendar = await updateCalendar(id, patch);
       if (!calendar) return res.status(404).json({ error: "Calendar not found" });

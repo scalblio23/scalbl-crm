@@ -554,8 +554,8 @@ Content-Type: application/json
 ## Calendars (Google / Outlook + booking widget)
 
 Sidebar → **Calendars** → **Add Calendar** → name it → lands in that
-calendar's settings, with these sections: **Integrate** (connect a Google
-and/or Outlook account), **Timezone**, **Availability** (weekly hours), **Booking rules**
+calendar's settings, with these sections: **Integrate** (sign in to any
+number of Google and Outlook accounts, and pick where calls go), **Timezone**, **Availability** (weekly hours), **Booking rules**
 (call length, buffer, minimum notice, booking window, max per day), and
 **Share & embed** (the public booking link, an iframe embed snippet, and
 the list of bookings on that calendar), and **Team access** (which Client
@@ -581,9 +581,10 @@ app itself with Google (every app that offers Google sign-in needs this):
 5. Put the resulting Client ID/Secret in `GOOGLE_CLIENT_ID` /
    `GOOGLE_CLIENT_SECRET` (see `.env.example`) — locally and in Vercel.
 
-Once connected, a calendar's bookings are created as real Google Calendar
-events (with the booker as an attendee), and existing events on that
-Google Calendar automatically block off time in the booking widget.
+When bookings go to a Google calendar (see "Multiple accounts" below),
+they're created as real Google Calendar events (with the booker as an
+attendee), and existing events on the ticked Google calendars
+automatically block off time in the booking widget.
 
 If Google rejects an event, the booking still stands. The error is shown
 in red in Calendar settings → Integrate, and next to the booking under
@@ -611,10 +612,32 @@ Same idea as Google, through Microsoft Entra (Azure):
 5. Put the Application (client) ID and secret in `MICROSOFT_CLIENT_ID` /
    `MICROSOFT_CLIENT_SECRET`, locally and in Vercel.
 
-Busy time on the connected Outlook calendar blocks off slots, and each
-booking is added to it. The booker goes in the event description rather
-than as an attendee, because Outlook always emails an invite to attendees
-and the booker already gets the app's own confirmation.
+Busy time on the ticked Outlook calendars blocks off slots, and when
+bookings go to an Outlook calendar each one is added to it. The booker
+goes in the event description rather than as an attendee, because Outlook
+always emails an invite to attendees and the booker already gets the
+app's own confirmation.
+
+### 1c. Multiple accounts, one place for calls
+
+A calendar can have any number of Google and Outlook accounts signed in
+(**Add another Google/Outlook account** in Integrate — signing in to one
+that's already there just refreshes it). Each account lists its
+calendars with **Check these calendars for clashes**: busy time on every
+ticked calendar, across all accounts, blocks off slots. A newly added
+account starts with its main calendar ticked.
+
+Booked calls go to exactly one calendar, chosen under **Add calls to
+calendar** → Google or Outlook → account → calendar. The first account
+signed in becomes that target automatically. Disconnecting the target
+account leaves the calendar with nowhere to add calls (shown in amber)
+until another is picked. Cancelling a booking removes its event from the
+account it was actually put on, even after the target changes.
+
+Calendars set up before this existed are moved over automatically on the
+first deploy: the Google account (or the Outlook one, if that's all there
+was) becomes where calls go, and an Outlook account that sat alongside
+Google keeps blocking time.
 
 ### 2. Set up Resend (confirmation emails)
 
