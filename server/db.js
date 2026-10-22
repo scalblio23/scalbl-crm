@@ -1973,8 +1973,9 @@ export async function saveOutgoingEmail(e) {
   const rows = await query(
     `INSERT INTO inbound_emails
        (resend_id, from_email, from_name, to_emails, subject, text_body, html_body, contact_id, contact_name, tags,
-        outgoing, unread, sent_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,false,$11)
+        outgoing, unread, sent_by, received_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,false,$11,COALESCE($12::timestamptz, now()))
+     ON CONFLICT (resend_id) DO NOTHING
      RETURNING *`,
     [
       e.resendId,
@@ -1988,9 +1989,29 @@ export async function saveOutgoingEmail(e) {
       matches[0]?.name || "",
       JSON.stringify(tags),
       e.sentBy || "",
+      e.sentAt || null,
     ]
   );
-  return inboundEmailFromRow(rows[0]);
+  return rows[0] ? inboundEmailFromRow(rows[0]) : null;
+}
+
+// Every automation run that logged a sent email step, for the one-time
+// backfill into Conversations → Email (see server/automations.js).
+export async function getRunsWithSentEmails() {
+  return query(
+    `SELECT r.id, r.context, r.step_log, a.name AS automation_name, a.actions
+     FROM automation_runs r JOIN automations a ON a.id = r.automation_id
+     WHERE r.step_log @> '[{"type":"email","status":"sent"}]'::jsonb
+     ORDER BY r.id`
+  );
+}
+
+// One-time jobs keyed by name (e.g. a backfill) — true the first time
+// it's claimed, false ever after.
+export async function claimOneTimeJob(key) {
+  await query(`CREATE TABLE IF NOT EXISTS app_one_time_jobs (key TEXT PRIMARY KEY, done_at TIMESTAMPTZ DEFAULT now())`);
+  const rows = await query("INSERT INTO app_one_time_jobs (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key", [key]);
+  return rows.length > 0;
 }
 
 // Whether a tag-scoped user may email this address: only if it belongs
