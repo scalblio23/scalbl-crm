@@ -23,7 +23,7 @@
 // tick can't send the same row twice.
 import crypto from "crypto";
 import twilio from "twilio";
-import { getPool, calendarFromRow, calendarBookingFromRow } from "./db.js";
+import { getPool, calendarFromRow, calendarBookingFromRow, CALENDAR_CONNECTIONS_SQL } from "./db.js";
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "./email.js";
 import { sendSms, missingTwilioEnv, publicBaseUrl } from "./twilioCore.js";
 import {
@@ -35,6 +35,7 @@ import {
 } from "./googleCalendar.js";
 import { computeAvailableSlots, localDateStrInZone } from "./calendarAvailability.js";
 import { getValidOutlookAccessToken, deleteOutlookEvent } from "./outlookCalendar.js";
+import { calendarForBookingEvent } from "./calendarSync.js";
 
 export const WORKFLOWS = {
   keevo_health: { brand: "Keevo Health", callName: "Keevo Health discovery call" },
@@ -123,7 +124,7 @@ async function logEvent(db, bookingId, type, detail = {}) {
 
 async function lockBooking(db, bookingId) {
   const { rows } = await db.query(
-    `SELECT b.*, row_to_json(c.*) AS calendar_row
+    `SELECT b.*, row_to_json(c.*) AS calendar_row, ${CALENDAR_CONNECTIONS_SQL} AS calendar_connections
      FROM calendar_bookings b JOIN calendars c ON c.id = b.calendar_id
      WHERE b.id = $1 FOR UPDATE OF b`,
     [bookingId]
@@ -131,7 +132,7 @@ async function lockBooking(db, bookingId) {
   if (!rows[0]) return null;
   return {
     booking: calendarBookingFromRow(rows[0]),
-    calendar: calendarFromRow(rows[0].calendar_row, { includeSecrets: true }),
+    calendar: calendarFromRow({ ...rows[0].calendar_row, connections: rows[0].calendar_connections }, { includeSecrets: true }),
   };
 }
 
@@ -631,11 +632,12 @@ export async function createWorkflowGoogleEvent(booking, calendar) {
       attendeeEmail: booking.contactEmail || undefined,
       requestId: `booking-${booking.id}-${crypto.randomBytes(4).toString("hex")}`,
     });
-    await q("UPDATE calendar_bookings SET google_event_id = $2, meet_link = COALESCE($3, meet_link) WHERE id = $1", [
-      booking.id,
-      id,
-      meetLink,
-    ]);
+    await q(
+      `UPDATE calendar_bookings SET google_event_id = $2, meet_link = COALESCE($3, meet_link),
+         google_event_connection_id = $4, google_event_calendar_id = $5
+       WHERE id = $1`,
+      [booking.id, id, meetLink, calendar.googleConnectionId || null, calendar.googleCalendarId]
+    );
     if (!meetLink) await logEvent(getPool(), booking.id, "meet_generation_failed", { reason: "no_conference_returned" });
     return { id, meetLink };
   } catch (err) {
@@ -646,20 +648,24 @@ export async function createWorkflowGoogleEvent(booking, calendar) {
 }
 
 async function removeGoogleEvent(booking, calendar) {
-  // An Outlook copy of the booking (server/calendarSync.js puts one on
-  // a calendar with Outlook connected) goes too.
-  if (booking.outlookEventId && calendar.outlookConnected) {
+  // An Outlook copy of the booking (server/calendarSync.js puts it
+  // there when bookings go to an Outlook account) goes too. Both are
+  // removed from the account the event was put on, even if bookings
+  // now go somewhere else.
+  const onOutlook = booking.outlookEventId && calendarForBookingEvent(calendar, booking, "outlook");
+  if (onOutlook) {
     try {
-      const accessToken = await getValidOutlookAccessToken(calendar);
+      const accessToken = await getValidOutlookAccessToken(onOutlook);
       await deleteOutlookEvent({ accessToken, eventId: booking.outlookEventId });
     } catch (err) {
       console.error(`[patientReminders] failed to delete Outlook event for booking ${booking.id}`, err?.message || err);
     }
   }
-  if (!booking.googleEventId || !calendar.googleConnected) return;
+  const onGoogle = booking.googleEventId && calendarForBookingEvent(calendar, booking, "google");
+  if (!onGoogle) return;
   try {
-    const accessToken = await deps.google.getValidAccessToken(calendar);
-    await deps.google.deleteGoogleEvent({ accessToken, calendarId: calendar.googleCalendarId, eventId: booking.googleEventId });
+    const accessToken = await deps.google.getValidAccessToken(onGoogle);
+    await deps.google.deleteGoogleEvent({ accessToken, calendarId: onGoogle.googleCalendarId, eventId: booking.googleEventId });
   } catch (err) {
     console.error(`[patientReminders] failed to delete Google event for booking ${booking.id}`, err?.message || err);
     await logEvent(getPool(), booking.id, "google_event_delete_failed", {}).catch(() => {});
@@ -737,12 +743,15 @@ export async function confirmWorkflowAttendance(bookingId, { source }) {
 export async function getBookingByToken(token) {
   if (typeof token !== "string" || !/^[a-f0-9]{32}$/.test(token)) return null;
   const rows = await q(
-    `SELECT b.*, row_to_json(c.*) AS calendar_row FROM calendar_bookings b
+    `SELECT b.*, row_to_json(c.*) AS calendar_row, ${CALENDAR_CONNECTIONS_SQL} AS calendar_connections FROM calendar_bookings b
      JOIN calendars c ON c.id = b.calendar_id WHERE b.cancel_token = $1`,
     [token]
   );
   if (!rows[0]) return null;
-  return { booking: calendarBookingFromRow(rows[0]), calendar: calendarFromRow(rows[0].calendar_row, { includeSecrets: true }) };
+  return {
+    booking: calendarBookingFromRow(rows[0]),
+    calendar: calendarFromRow({ ...rows[0].calendar_row, connections: rows[0].calendar_connections }, { includeSecrets: true }),
+  };
 }
 
 // What the manage page may show: no email/phone, only what the patient
@@ -857,13 +866,14 @@ export async function rescheduleWorkflowBooking({ token, startUTC, endUTC, timez
 
   // Move the Google event (its Meet link carries over); create one if
   // the original never got one.
-  if (calendar.googleConnected) {
-    if (result.updated.googleEventId) {
+  const onGoogle = result.updated.googleEventId && calendarForBookingEvent(calendar, result.updated, "google");
+  if (onGoogle || (calendar.googleConnected && !result.updated.outlookEventId)) {
+    if (onGoogle) {
       try {
-        const accessToken = await deps.google.getValidAccessToken(calendar);
+        const accessToken = await deps.google.getValidAccessToken(onGoogle);
         await deps.google.patchGoogleEventTimes({
           accessToken,
-          calendarId: calendar.googleCalendarId,
+          calendarId: onGoogle.googleCalendarId,
           eventId: result.updated.googleEventId,
           startISO: startUTC,
           endISO: endUTC,

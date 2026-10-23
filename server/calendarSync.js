@@ -1,8 +1,13 @@
-// Everything that talks to a calendar's connected external calendars
-// (Google and/or Outlook — a calendar can have either or both) goes
-// through here, so the booking, availability, cancel and "retry sync"
-// endpoints all behave the same way. `calendar` is always a row from
-// getCalendarById/getCalendarBySlug(…, { includeSecrets: true }).
+// Everything that talks to a calendar's signed-in Google/Outlook
+// accounts goes through here, so the booking, availability, cancel and
+// "retry sync" endpoints all behave the same way. `calendar` is always a
+// row from getCalendarById/getCalendarBySlug(…, { includeSecrets: true }).
+//
+// A calendar can have any number of accounts signed in (both
+// providers). Busy time on every account's ticked calendars blocks
+// slots; each booking is added to exactly one place — the account +
+// calendar chosen under "Add calls to calendar" (calendar.googleConnected
+// / outlookConnected describe only that target; see calendarFromRow).
 //
 // A sync failure never undoes a booking (the CRM's own record is the
 // source of truth), but it's no longer only console.error'd: it's
@@ -15,61 +20,90 @@ import {
   setCalendarBookingSyncError,
   setCalendarSyncError,
 } from "./db.js";
-import { getValidAccessToken, getFreeBusy, createGoogleEvent, deleteGoogleEvent } from "./googleCalendar.js";
+import {
+  getValidAccessToken,
+  getValidConnectionAccessToken,
+  getFreeBusy,
+  createGoogleEvent,
+  deleteGoogleEvent,
+} from "./googleCalendar.js";
 import {
   getValidOutlookAccessToken,
+  getValidOutlookConnectionAccessToken,
   getOutlookBusy,
   createOutlookEvent,
   deleteOutlookEvent,
 } from "./outlookCalendar.js";
 
-// Busy blocks from every connected calendar between two ISO
-// timestamps. Fails open per provider (logged, nothing added) — a
-// token hiccup shouldn't take the booking widget down.
+// The calendars on one account whose busy time counts: its ticked
+// clash calendars, plus the booking calendar when this is the account
+// bookings go to. "primary" = the account's main calendar.
+function busyCalendarIds(calendar, connection) {
+  const ids = [...connection.clashCalendarIds];
+  if (connection.id === calendar.bookingConnectionId) ids.unshift(calendar.bookingCalendarId || "primary");
+  return [...new Set(ids)];
+}
+
+// Busy blocks from every signed-in account between two ISO timestamps.
+// Fails open per account (logged, nothing added) — a token hiccup
+// shouldn't take the booking widget down.
 export async function getExternalBusy(calendar, timeMinISO, timeMaxISO, logTag = "[calendarSync]") {
-  const lookups = [];
-  if (calendar.googleConnected) {
-    lookups.push(
-      getValidAccessToken(calendar)
+  const lookups = (calendar.connections || []).map((connection) => {
+    const ids = busyCalendarIds(calendar, connection);
+    if (!ids.length) return [];
+    if (connection.provider === "google") {
+      return getValidConnectionAccessToken(connection)
         .then((accessToken) =>
-          getFreeBusy({
-            accessToken,
-            calendarId: calendar.googleCalendarId,
-            extraCalendarIds: calendar.clashGoogleCalendarIds || [],
-            timeMinISO,
-            timeMaxISO,
-          })
+          getFreeBusy({ accessToken, calendarId: ids[0], extraCalendarIds: ids.slice(1), timeMinISO, timeMaxISO })
         )
         .catch((err) => {
-          console.error(`${logTag} Google freebusy lookup failed`, err);
+          console.error(`${logTag} Google freebusy lookup failed for ${connection.email}`, err);
           return [];
-        })
-    );
-  }
-  if (calendar.outlookConnected) {
-    lookups.push(
-      getValidOutlookAccessToken(calendar)
-        .then(async (accessToken) => {
-          // The booking calendar (null = the account's default) plus any
-          // extra ones ticked under "Also check for clashes".
-          const ids = [...new Set([calendar.outlookCalendarId || null, ...(calendar.clashOutlookCalendarIds || [])])].slice(0, 20);
-          const results = await Promise.all(
-            ids.map((calendarId) =>
-              getOutlookBusy({ accessToken, calendarId, timeMinISO, timeMaxISO }).catch((err) => {
-                console.error(`${logTag} Outlook busy lookup failed for one calendar`, err);
-                return [];
-              })
-            )
-          );
-          return results.flat();
-        })
-        .catch((err) => {
-          console.error(`${logTag} Outlook busy lookup failed`, err);
-          return [];
-        })
-    );
-  }
+        });
+    }
+    return getValidOutlookConnectionAccessToken(connection)
+      .then(async (accessToken) => {
+        const results = await Promise.all(
+          ids.slice(0, 20).map((calendarId) =>
+            getOutlookBusy({ accessToken, calendarId, timeMinISO, timeMaxISO }).catch((err) => {
+              console.error(`${logTag} Outlook busy lookup failed for one calendar of ${connection.email}`, err);
+              return [];
+            })
+          )
+        );
+        return results.flat();
+      })
+      .catch((err) => {
+        console.error(`${logTag} Outlook busy lookup failed for ${connection.email}`, err);
+        return [];
+      });
+  });
   return (await Promise.all(lookups)).flat();
+}
+
+// The calendar as seen from where one booking's event actually lives —
+// the account/calendar it was put on, which may no longer be the
+// booking target. Returns a copy whose googleConnected/googleCalendarId
+// (or outlook*) point there, so the usual token/event helpers can be
+// used as-is; null when that account isn't signed in any more.
+// Bookings from before multiple accounts existed have no connection
+// recorded and fall back to the current target.
+export function calendarForBookingEvent(calendar, booking, provider) {
+  if (!calendar) return null;
+  if (provider === "google") {
+    const id = booking.googleEventConnectionId || calendar.googleConnectionId;
+    if (!id || !(calendar.connections || []).some((c) => c.provider === "google" && c.id === Number(id))) return null;
+    return {
+      ...calendar,
+      googleConnected: true,
+      googleConnectionId: Number(id),
+      googleCalendarId:
+        booking.googleEventCalendarId || (Number(id) === calendar.googleConnectionId ? calendar.googleCalendarId : "primary"),
+    };
+  }
+  const id = booking.outlookEventConnectionId || calendar.outlookConnectionId;
+  if (!id || !(calendar.connections || []).some((c) => c.provider === "outlook" && c.id === Number(id))) return null;
+  return { ...calendar, outlookConnected: true, outlookConnectionId: Number(id) };
 }
 
 // Bookings on the OTHER CRM calendars this one checks for clashes (so
@@ -103,15 +137,16 @@ function eventDetails(calendar, booking) {
   return { summary, description, location: calendar.videoConferenceLink || undefined };
 }
 
-// Creates the booking's event on every connected calendar that
-// doesn't already have it (so it's also the retry). Returns
-// { ok, errors: [string] } and records the outcome on the booking and
-// the calendar.
+// Adds the booking's event to the calendar chosen under "Add calls to
+// calendar", unless it's already on one (so it's also the retry).
+// Returns { ok, errors: [string] } and records the outcome on the
+// booking and the calendar.
 export async function pushBookingToCalendars(calendar, booking) {
   const { summary, description, location } = eventDetails(calendar, booking);
   const errors = [];
+  const alreadyOnACalendar = Boolean(booking.googleEventId || booking.outlookEventId);
 
-  if (calendar.googleConnected && !booking.googleEventId) {
+  if (!alreadyOnACalendar && calendar.googleConnected) {
     try {
       const accessToken = await getValidAccessToken(calendar);
       const eventId = await createGoogleEvent({
@@ -125,15 +160,20 @@ export async function pushBookingToCalendars(calendar, booking) {
         timezone: calendar.timezone,
         attendeeEmail: booking.contactEmail || undefined,
       });
-      await setCalendarBookingGoogleEventId(booking.id, eventId);
+      await setCalendarBookingGoogleEventId(booking.id, eventId, {
+        connectionId: calendar.googleConnectionId,
+        calendarId: calendar.googleCalendarId,
+      });
       booking.googleEventId = eventId;
+      booking.googleEventConnectionId = calendar.googleConnectionId;
+      booking.googleEventCalendarId = calendar.googleCalendarId;
     } catch (err) {
       console.error("[calendarSync] failed to create Google event", err);
-      errors.push(`Google: ${err.message}`);
+      errors.push(`Google (${calendar.googleEmail || "account"}): ${err.message}`);
     }
   }
 
-  if (calendar.outlookConnected && !booking.outlookEventId) {
+  if (!alreadyOnACalendar && calendar.outlookConnected) {
     try {
       const accessToken = await getValidOutlookAccessToken(calendar);
       const eventId = await createOutlookEvent({
@@ -145,11 +185,12 @@ export async function pushBookingToCalendars(calendar, booking) {
         startISO: booking.startTime,
         endISO: booking.endTime,
       });
-      await setCalendarBookingOutlookEventId(booking.id, eventId);
+      await setCalendarBookingOutlookEventId(booking.id, eventId, { connectionId: calendar.outlookConnectionId });
       booking.outlookEventId = eventId;
+      booking.outlookEventConnectionId = calendar.outlookConnectionId;
     } catch (err) {
       console.error("[calendarSync] failed to create Outlook event", err);
-      errors.push(`Outlook: ${err.message}`);
+      errors.push(`Outlook (${calendar.outlookEmail || "account"}): ${err.message}`);
     }
   }
 
@@ -158,30 +199,32 @@ export async function pushBookingToCalendars(calendar, booking) {
   await Promise.all([
     setCalendarBookingSyncError(booking.id, message).catch(() => {}),
     // Only touch the calendar-level banner when something was
-    // actually attempted — a calendar with nothing connected keeps
+    // actually attempted — a calendar with no booking target keeps
     // whatever it had.
-    calendar.googleConnected || calendar.outlookConnected
+    !alreadyOnACalendar && (calendar.googleConnected || calendar.outlookConnected)
       ? setCalendarSyncError(calendar.id, message).catch(() => {})
       : null,
   ]);
   return { ok: !errors.length, errors };
 }
 
-// Removes the booking's event from every calendar it was put on.
-// Failures are logged only — cancelling in the CRM always wins.
+// Removes the booking's event from wherever it was put. Failures are
+// logged only — cancelling in the CRM always wins.
 export async function removeBookingFromCalendars(calendar, booking, logTag = "[calendarSync]") {
   if (!calendar) return;
-  if (booking.googleEventId && calendar.googleConnected) {
+  const onGoogle = booking.googleEventId && calendarForBookingEvent(calendar, booking, "google");
+  if (onGoogle) {
     try {
-      const accessToken = await getValidAccessToken(calendar);
-      await deleteGoogleEvent({ accessToken, calendarId: calendar.googleCalendarId, eventId: booking.googleEventId });
+      const accessToken = await getValidAccessToken(onGoogle);
+      await deleteGoogleEvent({ accessToken, calendarId: onGoogle.googleCalendarId, eventId: booking.googleEventId });
     } catch (err) {
       console.error(`${logTag} failed to delete Google event`, err);
     }
   }
-  if (booking.outlookEventId && calendar.outlookConnected) {
+  const onOutlook = booking.outlookEventId && calendarForBookingEvent(calendar, booking, "outlook");
+  if (onOutlook) {
     try {
-      const accessToken = await getValidOutlookAccessToken(calendar);
+      const accessToken = await getValidOutlookAccessToken(onOutlook);
       await deleteOutlookEvent({ accessToken, eventId: booking.outlookEventId });
     } catch (err) {
       console.error(`${logTag} failed to delete Outlook event`, err);

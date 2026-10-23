@@ -6,7 +6,7 @@
 // server/index.js and registered as the app's OAuth redirect URI in
 // Google Cloud Console.
 import jwt from "jsonwebtoken";
-import { ensureSchema, getCalendarById, setCalendarGoogleTokens } from "../server/db.js";
+import { ensureSchema, getCalendarById, upsertCalendarConnection } from "../server/db.js";
 import { exchangeCodeForTokens, fetchGoogleEmail, requestBaseUrl, hasGoogleEventsScope } from "../server/googleCalendar.js";
 
 export default async function handler(req, res) {
@@ -41,7 +41,16 @@ export default async function handler(req, res) {
       return redirectToCrm({ calendar: calendarId, google: "error", reason: "missing_events_permission" });
     }
     const googleEmail = await fetchGoogleEmail(accessToken);
-    await setCalendarGoogleTokens(calendarId, { googleEmail, accessToken, refreshToken, expiry: expiresAt });
+    // Adds this account alongside any already signed in (or refreshes
+    // it, if it's one of them) — its primary calendar starts out
+    // blocking time.
+    await upsertCalendarConnection(calendarId, {
+      provider: "google",
+      email: googleEmail,
+      accessToken,
+      refreshToken,
+      expiry: expiresAt,
+    });
 
     return redirectToCrm({ calendar: calendarId, google: "connected" });
   } catch (err) {

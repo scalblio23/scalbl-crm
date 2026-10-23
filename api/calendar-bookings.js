@@ -53,7 +53,7 @@ export default async function handler(req, res) {
         if (req.query.action !== "resync") return res.status(400).json({ error: "Unknown action" });
         if (booking.status !== "confirmed") return res.status(409).json({ error: "This booking was cancelled." });
         if (!calendar.googleConnected && !calendar.outlookConnected) {
-          return res.status(409).json({ error: "Connect Google or Outlook on this calendar first." });
+          return res.status(409).json({ error: "Choose where calls go under Integrate → Add calls to calendar first." });
         }
         const result = await pushBookingToCalendars(calendar, booking);
         return res.status(result.ok ? 200 : 502).json(result.ok ? booking : { error: result.errors.join(" · "), booking });

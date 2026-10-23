@@ -99,6 +99,7 @@ import CrazytelSmsInbox from "./components/CrazytelSmsInbox";
 import EmailInbox from "./components/EmailInbox";
 import BroadcastPanel from "./components/BroadcastPanel";
 import Dropdown from "./components/Dropdown";
+import CalendarAccounts, { ClashCalendarChecklist } from "./components/CalendarAccounts";
 import AddStepMenu from "./components/AddStepMenu";
 // Tabs with their own code load when first opened (and in the
 // background shortly after the app starts), not as part of the first
@@ -1028,41 +1029,6 @@ function formatTimeWithZone(value) {
   });
 }
 
-// "Also check these calendars for clashes" — ticked calendars' busy
-// time blocks off slots on the booking calendar being edited.
-function ClashCalendarChecklist({ title, options, selected, onChange, empty = "No other calendars on this account." }) {
-  const sel = new Set(selected.map(String));
-  return (
-    <div>
-      {title && <div className="text-xs font-medium mb-1.5 text-gray-500">{title}</div>}
-      {options.length === 0 ? (
-        <p className="text-xs text-gray-400">{empty}</p>
-      ) : (
-        <div className="border border-gray-100 rounded-lg divide-y divide-gray-100 max-h-56 overflow-y-auto">
-          {options.map((o) => (
-            <label key={o.value} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
-                checked={sel.has(String(o.value))}
-                onChange={(e) =>
-                  onChange(
-                    e.target.checked
-                      ? [...selected.filter((v) => String(v) !== String(o.value)), o.value]
-                      : selected.filter((v) => String(v) !== String(o.value))
-                  )
-                }
-                className="w-4 h-4 rounded border-gray-300"
-              />
-              <span className="truncate">{o.label}</span>
-              {o.writable === false && <span className="text-[11px] text-gray-400 shrink-0">view only</span>}
-            </label>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function SimpleCRM() {
   const [page, setPage] = useState("conversation");
   // Phone-width layout: the sidebars become slide-in drawers opened
@@ -1440,7 +1406,7 @@ export default function SimpleCRM() {
     const providerName = provider === "google" ? "Google" : "Outlook";
     const reason = params.get("reason");
     if (params.get(provider) === "connected") {
-      setCalendarConnectNotice({ ok: true, text: `${providerName} connected.` });
+      setCalendarConnectNotice({ ok: true, text: `${providerName} account connected.` });
     } else if (reason === "missing_events_permission") {
       setCalendarConnectNotice({
         ok: false,
@@ -1448,6 +1414,11 @@ export default function SimpleCRM() {
       });
     } else if (reason === "access_denied") {
       setCalendarConnectNotice({ ok: false, text: `${providerName} connection was cancelled.` });
+    } else if (reason === "not_configured") {
+      setCalendarConnectNotice({
+        ok: false,
+        text: `${providerName} sign-in isn't set up on this CRM yet — its app credentials are missing from the server's environment variables (see the Calendars section of the README).`,
+      });
     } else {
       setCalendarConnectNotice({
         ok: false,
@@ -1485,55 +1456,6 @@ export default function SimpleCRM() {
       .then(setCalendarBookings)
       .catch(() => setCalendarBookings([]));
   }, [openCalendarId]);
-
-  // Which Google calendar (on the connected account) to sync to —
-  // fetched once a calendar's Google connection is live, so the
-  // Integrate section can offer a picker instead of always using
-  // "primary".
-  const [googleCalendarOptions, setGoogleCalendarOptions] = useState([]);
-  const [googleCalendarsLoading, setGoogleCalendarsLoading] = useState(false);
-  const [googleCalendarsError, setGoogleCalendarsError] = useState("");
-  useEffect(() => {
-    setGoogleCalendarsError("");
-    if (!openCalendarId || !openCalendar?.googleConnected) {
-      setGoogleCalendarOptions([]);
-      return;
-    }
-    setGoogleCalendarsLoading(true);
-    api
-      .get(`/api/calendar-google-calendars?calendarId=${openCalendarId}&all=1`)
-      .then((list) => setGoogleCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary, writable: c.writable !== false }))))
-      .catch((err) => {
-        setGoogleCalendarOptions([]);
-        setGoogleCalendarsError(err.message || "Could not load your Google calendars.");
-      })
-      .finally(() => setGoogleCalendarsLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openCalendarId, openCalendar?.googleConnected]);
-
-  // Same picker for the connected Outlook account.
-  const [outlookCalendarOptions, setOutlookCalendarOptions] = useState([]);
-  const [outlookCalendarsLoading, setOutlookCalendarsLoading] = useState(false);
-  const [outlookCalendarsError, setOutlookCalendarsError] = useState("");
-  useEffect(() => {
-    setOutlookCalendarsError("");
-    if (!openCalendarId || !openCalendar?.outlookConnected) {
-      setOutlookCalendarOptions([]);
-      return;
-    }
-    setOutlookCalendarsLoading(true);
-    api
-      .get(`/api/calendar-outlook-calendars?calendarId=${openCalendarId}&all=1`)
-      .then((list) =>
-        setOutlookCalendarOptions(list.map((c) => ({ value: c.id, label: c.summary, primary: c.primary, writable: c.writable !== false })))
-      )
-      .catch((err) => {
-        setOutlookCalendarOptions([]);
-        setOutlookCalendarsError(err.message || "Could not load your Outlook calendars.");
-      })
-      .finally(() => setOutlookCalendarsLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openCalendarId, openCalendar?.outlookConnected]);
 
   // Availability and booking-rules edits are drafted locally and saved
   // with an explicit button (like the rest of Settings) rather than
@@ -1625,29 +1547,27 @@ export default function SimpleCRM() {
     }
   };
 
-  const connectGoogleCalendar = (id) => {
-    window.location.href = `/api/calendar-google-connect?calendarId=${id}`;
-  };
-
-  const disconnectGoogleCalendar = async (id) => {
-    try {
-      const updated = await api.post("/api/calendar-google-disconnect", { calendarId: id });
-      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
-    } catch (err) {
-      alert(err.message || "Could not disconnect Google");
+  // Signs one Google/Outlook account out of a calendar (see
+  // src/components/CalendarAccounts.jsx for the rest of Integrate).
+  const disconnectCalendarAccount = async (calendarId, connection) => {
+    const name = connection.provider === "google" ? "Google" : "Outlook";
+    const isTarget = calendars.find((c) => c.id === calendarId)?.bookingConnectionId === connection.id;
+    if (
+      isTarget &&
+      !window.confirm(
+        `Calls are added to ${connection.email || `this ${name} account`}. Disconnect it anyway? New calls won't be added to any calendar until you pick another one.`
+      )
+    ) {
+      return;
     }
-  };
-
-  const connectOutlookCalendar = (id) => {
-    window.location.href = `/api/calendar-outlook-connect?calendarId=${id}`;
-  };
-
-  const disconnectOutlookCalendar = async (id) => {
     try {
-      const updated = await api.post("/api/calendar-outlook-disconnect", { calendarId: id });
-      setCalendars((cs) => cs.map((c) => (c.id === id ? updated : c)));
+      const updated = await api.post(`/api/calendar-${connection.provider}-disconnect`, {
+        calendarId,
+        connectionId: connection.id,
+      });
+      setCalendars((cs) => cs.map((c) => (c.id === calendarId ? updated : c)));
     } catch (err) {
-      alert(err.message || "Could not disconnect Outlook");
+      alert(err.message || `Could not disconnect ${name}`);
     }
   };
 
@@ -10060,12 +9980,11 @@ export default function SimpleCRM() {
                           <p className="text-xs mb-4">
                             {cal.googleConnected || cal.outlookConnected ? (
                               <span className="text-emerald-600 flex items-center gap-1">
-                                <CheckCircle2 size={12} />{" "}
-                                {[cal.googleConnected && "Google", cal.outlookConnected && "Outlook"]
-                                  .filter(Boolean)
-                                  .join(" + ")}{" "}
-                                connected
+                                <CheckCircle2 size={12} /> Calls go to {cal.googleConnected ? "Google" : "Outlook"} ·{" "}
+                                {cal.googleEmail || cal.outlookEmail}
                               </span>
+                            ) : (cal.connections || []).length ? (
+                              <span className="text-amber-600">No calendar chosen for calls</span>
                             ) : (
                               <span className="text-gray-400">No calendar connected</span>
                             )}
@@ -10232,133 +10151,11 @@ export default function SimpleCRM() {
                             </div>
                           </div>
                         )}
-                        <h2 className="text-base font-bold">Integrate with Google</h2>
-                        <p className="text-sm text-gray-500">
-                          Connect a Google account so booked calls are added straight to that calendar, and existing
-                          events on it block off time here automatically.
-                        </p>
-                        {openCalendar.googleConnected ? (
-                          <>
-                            <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
-                              <div>
-                                <p className="text-sm font-medium">Connected</p>
-                                <p className="text-xs text-gray-500">{openCalendar.googleEmail}</p>
-                              </div>
-                              <button
-                                onClick={() => disconnectGoogleCalendar(openCalendar.id)}
-                                className="text-sm text-red-600 hover:text-red-700 font-medium"
-                              >
-                                Disconnect
-                              </button>
-                            </div>
-                            <div>
-                              <label className="text-xs font-medium block mb-1.5 text-gray-500">
-                                Which calendar should bookings use?
-                              </label>
-                              <Dropdown
-                                value={openCalendar.googleCalendarId}
-                                onChange={(googleCalendarId) => patchCalendar(openCalendar.id, { googleCalendarId })}
-                                options={
-                                  googleCalendarOptions.some((o) => o.writable)
-                                    ? googleCalendarOptions.filter((o) => o.writable)
-                                    : [{ value: openCalendar.googleCalendarId, label: openCalendar.googleCalendarId }]
-                                }
-                                disabled={googleCalendarsLoading}
-                                searchable
-                              />
-                              {googleCalendarsError ? (
-                                <p className="text-xs text-red-600 mt-1.5">
-                                  {googleCalendarsError} If this was connected before other calendars were shared
-                                  with it, disconnect and reconnect Google to refresh access.
-                                </p>
-                              ) : (
-                                <p className="text-xs text-gray-400 mt-1.5">
-                                  Events are created here, and existing events on it block off time in the booking
-                                  widget.
-                                </p>
-                              )}
-                            </div>
-                            <ClashCalendarChecklist
-                              title="Also check these Google calendars for clashes"
-                              options={googleCalendarOptions.filter((o) => o.value !== openCalendar.googleCalendarId)}
-                              selected={openCalendar.clashGoogleCalendarIds || []}
-                              onChange={(clashGoogleCalendarIds) => patchCalendar(openCalendar.id, { clashGoogleCalendarIds })}
-                            />
-                          </>
-                        ) : (
-                          <button
-                            onClick={() => connectGoogleCalendar(openCalendar.id)}
-                            className="flex items-center gap-2 border border-gray-200 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
-                          >
-                            <Globe size={15} /> Connect with Google
-                          </button>
-                        )}
-
-                        <h2 className="text-base font-bold pt-4">Integrate with Outlook</h2>
-                        <p className="text-sm text-gray-500">
-                          Connect a Microsoft 365 or Outlook.com account the same way — busy time on it blocks off slots
-                          here, and booked calls are added to it.
-                        </p>
-                        {openCalendar.outlookConnected ? (
-                          <>
-                            <div className="border border-gray-200 rounded-lg p-4 flex items-center justify-between">
-                              <div>
-                                <p className="text-sm font-medium">Connected</p>
-                                <p className="text-xs text-gray-500">{openCalendar.outlookEmail}</p>
-                              </div>
-                              <button
-                                onClick={() => disconnectOutlookCalendar(openCalendar.id)}
-                                className="text-sm text-red-600 hover:text-red-700 font-medium"
-                              >
-                                Disconnect
-                              </button>
-                            </div>
-                            <div>
-                              <label className="text-xs font-medium block mb-1.5 text-gray-500">
-                                Which Outlook calendar should bookings use?
-                              </label>
-                              <Dropdown
-                                value={
-                                  openCalendar.outlookCalendarId ||
-                                  outlookCalendarOptions.find((o) => o.primary)?.value ||
-                                  ""
-                                }
-                                onChange={(outlookCalendarId) => patchCalendar(openCalendar.id, { outlookCalendarId })}
-                                options={
-                                  outlookCalendarOptions.some((o) => o.writable)
-                                    ? outlookCalendarOptions.filter((o) => o.writable)
-                                    : [{ value: openCalendar.outlookCalendarId || "", label: "Default calendar" }]
-                                }
-                                disabled={outlookCalendarsLoading}
-                                searchable
-                              />
-                              {outlookCalendarsError ? (
-                                <p className="text-xs text-red-600 mt-1.5">{outlookCalendarsError}</p>
-                              ) : (
-                                <p className="text-xs text-gray-400 mt-1.5">
-                                  Events are created here, and busy time on it blocks off slots in the booking widget.
-                                </p>
-                              )}
-                            </div>
-                            <ClashCalendarChecklist
-                              title="Also check these Outlook calendars for clashes"
-                              options={outlookCalendarOptions.filter(
-                                (o) =>
-                                  o.value !==
-                                  (openCalendar.outlookCalendarId || outlookCalendarOptions.find((x) => x.primary)?.value)
-                              )}
-                              selected={openCalendar.clashOutlookCalendarIds || []}
-                              onChange={(clashOutlookCalendarIds) => patchCalendar(openCalendar.id, { clashOutlookCalendarIds })}
-                            />
-                          </>
-                        ) : (
-                          <button
-                            onClick={() => connectOutlookCalendar(openCalendar.id)}
-                            className="flex items-center gap-2 border border-gray-200 hover:bg-gray-50 text-sm px-4 py-2.5 rounded-lg font-medium"
-                          >
-                            <Mail size={15} /> Connect with Outlook
-                          </button>
-                        )}
+                        <CalendarAccounts
+                          calendar={openCalendar}
+                          onSave={(patch) => patchCalendar(openCalendar.id, patch)}
+                          onDisconnect={(connection) => disconnectCalendarAccount(openCalendar.id, connection)}
+                        />
 
                         <h2 className="text-base font-bold pt-4">Other booking calendars</h2>
                         <p className="text-sm text-gray-500">

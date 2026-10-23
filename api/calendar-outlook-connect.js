@@ -17,7 +17,13 @@ export default async function handler(req, res) {
     await ensureSchema();
     const missing = missingOutlookEnv();
     if (missing.length) {
-      return res.status(500).json({ error: `Outlook integration is not configured. Missing: ${missing.join(", ")}` });
+      // This is a full-page navigation from Calendar settings, so send
+      // the user back there with the reason rather than a bare JSON page.
+      console.error(`[api/calendar-outlook-connect] not configured — missing ${missing.join(", ")}`);
+      const back = new URLSearchParams({ outlook: "error", reason: "not_configured" });
+      if (req.query.calendarId) back.set("calendar", String(req.query.calendarId));
+      res.writeHead(302, { Location: `${requestBaseUrl(req)}/?${back.toString()}` });
+      return res.end();
     }
     const calendarId = req.query.calendarId;
     if (!calendarId) return res.status(400).json({ error: "Missing calendarId" });
