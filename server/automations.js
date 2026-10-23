@@ -356,43 +356,49 @@ export async function advanceAutomationRun(run) {
 //   contact_tag_added: { tag, contact: { name, email, phone } }
 //   booking_created: { bookingId, calendarId, calendarName, contact,
 //     whenText, timezone, appointmentStartUTC }
-export async function runAutomationsForTrigger(triggerType, context) {
+// Creates a pending run for every active automation matching this
+// trigger and returns them, without running anything yet. Once a run
+// row exists it's durable: if nothing else advances it, the every-
+// minute cron (claimDueAutomationRuns) will.
+export async function queueAutomationsForTrigger(triggerType, context) {
   let automations;
   try {
     automations = await getActiveAutomationsByTrigger(triggerType);
   } catch (err) {
     console.error("[automations] failed to load automations", err);
-    return;
+    return [];
   }
+  const runs = [];
   for (const automation of automations) {
     if (!triggerMatches(triggerType, automation.triggerConfig, context)) continue;
     try {
-      const run = await createAutomationRun({ automationId: automation.id, context, runAt: new Date() });
-      // Claim it before advancing — without this, the row sits at
-      // status 'pending' for the whole duration of the advance below
-      // (which can include real email/SMS sends), and the cron
-      // poller's claimDueAutomationRuns() firing in that window would
-      // match the same row and process it a second time. The atomic
-      // 'pending' -> 'processing' guard means whichever of the two
-      // gets here first wins; the loser (0 rows affected) does
-      // nothing instead of double-sending.
-      const claimed = await claimAutomationRunById(run.id);
-      if (!claimed) continue; // lost the race — the poller already has it
-      // Actually awaited — this used to be fire-and-forget ("advance
-      // immediately so an automation with no wait steps still fires
-      // right away"), but that meant this whole function returned the
-      // instant the row was claimed, before advanceAutomationRun had
-      // done any of the real work (the SMS/email send). Callers now
-      // reliably await runAutomationsForTrigger() itself (see
-      // api/calendar-book.js / api/contacts.js), so the "fire right
-      // away" behavior this was going for still holds — it's just
-      // synchronous instead of detached, which is what makes it
-      // actually reliable under waitUntil()'s caveats there.
-      await advanceAutomationRun(claimed).catch((err) => console.error(`[automations] "${automation.name}" failed`, err));
+      runs.push({ run: await createAutomationRun({ automationId: automation.id, context, runAt: new Date() }), automation });
     } catch (err) {
       console.error(`[automations] failed to start run for "${automation.name}"`, err);
     }
   }
+  return runs;
+}
+
+// Runs queued runs straight away. Each is claimed first — the atomic
+// 'pending' -> 'processing' guard means if the cron poller got to one
+// first, this skips it instead of sending twice.
+export async function startQueuedRuns(queued) {
+  for (const { run, automation } of queued) {
+    try {
+      const claimed = await claimAutomationRunById(run.id);
+      if (!claimed) continue; // the poller already has it
+      await advanceAutomationRun(claimed).catch((err) => console.error(`[automations] "${automation.name}" failed`, err));
+    } catch (err) {
+      console.error(`[automations] failed to run "${automation.name}"`, err);
+    }
+  }
+}
+
+// Queue and run in one go (awaited end to end) — for callers that don't
+// need to answer before the sends finish.
+export async function runAutomationsForTrigger(triggerType, context) {
+  await startQueuedRuns(await queueAutomationsForTrigger(triggerType, context));
 }
 
 // Whether an active automation exists for this trigger that would
