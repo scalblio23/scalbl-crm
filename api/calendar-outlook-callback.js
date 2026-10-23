@@ -5,7 +5,7 @@
 // server/index.js and registered as a Web redirect URI on the app in
 // Microsoft Entra (Azure) → App registrations.
 import jwt from "jsonwebtoken";
-import { ensureSchema, getCalendarById, setCalendarOutlookTokens } from "../server/db.js";
+import { ensureSchema, getCalendarById, upsertCalendarConnection } from "../server/db.js";
 import { requestBaseUrl } from "../server/googleCalendar.js";
 import { exchangeOutlookCode, fetchOutlookEmail, hasOutlookWriteScope } from "../server/outlookCalendar.js";
 
@@ -40,7 +40,13 @@ export default async function handler(req, res) {
       return redirectToCrm({ calendar: calendarId, outlook: "error", reason: "missing_events_permission" });
     }
     const outlookEmail = await fetchOutlookEmail(accessToken);
-    await setCalendarOutlookTokens(calendarId, { outlookEmail, accessToken, refreshToken, expiry: expiresAt });
+    await upsertCalendarConnection(calendarId, {
+      provider: "outlook",
+      email: outlookEmail,
+      accessToken,
+      refreshToken,
+      expiry: expiresAt,
+    });
 
     return redirectToCrm({ calendar: calendarId, outlook: "connected" });
   } catch (err) {

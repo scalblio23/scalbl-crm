@@ -7,7 +7,7 @@
 // (Microsoft 365) and personal (outlook.com / hotmail) accounts —
 // the "common" tenant accepts either. Plain REST calls over the
 // runtime's fetch, no Graph SDK dependency.
-import { updateCalendarOutlookAccessToken } from "./db.js";
+import { updateCalendarConnectionTokens } from "./db.js";
 
 const MS_AUTHORITY = "https://login.microsoftonline.com/common/oauth2/v2.0";
 const GRAPH_API = "https://graph.microsoft.com/v1.0";
@@ -90,31 +90,40 @@ export async function fetchOutlookEmail(accessToken) {
   return body.mail || body.userPrincipalName || null;
 }
 
-// Same contract as googleCalendar.js's getValidAccessToken. Microsoft
-// rotates refresh tokens, so a refresh also persists the new one.
-export async function getValidOutlookAccessToken(calendar, env = process.env) {
-  const expiresAt = calendar.outlookTokenExpiry ? new Date(calendar.outlookTokenExpiry).getTime() : 0;
+// Same contract as googleCalendar.js's getValidConnectionAccessToken.
+// Microsoft rotates refresh tokens, so a refresh also persists the new one.
+export async function getValidOutlookConnectionAccessToken(connection, env = process.env) {
+  const expiresAt = connection.tokenExpiry ? new Date(connection.tokenExpiry).getTime() : 0;
   if (expiresAt - Date.now() > 5 * 60 * 1000) {
-    return calendar.outlookAccessToken;
+    return connection.accessToken;
   }
-  if (!calendar.outlookRefreshToken) {
-    throw new Error("Outlook is connected but has no refresh token on file — reconnect it.");
+  if (!connection.refreshToken) {
+    throw new Error(`Outlook account ${connection.email || ""} has no refresh token on file — reconnect it.`);
   }
   const { accessToken, refreshToken, expiresAt: newExpiresAt } = await tokenRequest(
-    { refresh_token: calendar.outlookRefreshToken, grant_type: "refresh_token" },
+    { refresh_token: connection.refreshToken, grant_type: "refresh_token" },
     env
   );
-  await updateCalendarOutlookAccessToken(calendar.id, { accessToken, refreshToken, expiry: newExpiresAt });
-  calendar.outlookAccessToken = accessToken;
-  calendar.outlookTokenExpiry = newExpiresAt;
-  if (refreshToken) calendar.outlookRefreshToken = refreshToken;
+  await updateCalendarConnectionTokens(connection.id, { accessToken, refreshToken, expiry: newExpiresAt });
+  connection.accessToken = accessToken;
+  connection.tokenExpiry = newExpiresAt;
+  if (refreshToken) connection.refreshToken = refreshToken;
   return accessToken;
 }
 
-// Path prefix for one calendar on the account — null means the
-// account's default calendar.
+// The token for the Outlook account a calendar's bookings go to.
+export async function getValidOutlookAccessToken(calendar, env = process.env) {
+  const connection = (calendar.connections || []).find(
+    (c) => c.provider === "outlook" && c.id === calendar.outlookConnectionId
+  );
+  if (!connection) throw new Error("No Outlook account is chosen for bookings on this calendar.");
+  return getValidOutlookConnectionAccessToken(connection, env);
+}
+
+// Path prefix for one calendar on the account — null (or "primary",
+// the shared "account's main calendar" id) means the default calendar.
 function calendarPath(calendarId) {
-  return calendarId ? `/me/calendars/${encodeURIComponent(calendarId)}` : "/me/calendar";
+  return calendarId && calendarId !== "primary" ? `/me/calendars/${encodeURIComponent(calendarId)}` : "/me/calendar";
 }
 
 // Calendars on the account that events can be added to, default first.

@@ -6,7 +6,7 @@
 // pattern as server/twilioCore.js — no separate googleapis dependency;
 // this is a handful of plain REST calls, made with the runtime's
 // built-in fetch (Node 18+, same assumption the rest of the app makes).
-import { updateCalendarGoogleAccessToken } from "./db.js";
+import { updateCalendarConnectionTokens } from "./db.js";
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -82,7 +82,9 @@ export function buildGoogleAuthUrl({ baseUrl, state }, env = process.env) {
     response_type: "code",
     scope: SCOPES,
     access_type: "offline",
-    prompt: "consent",
+    // select_account: always show the account chooser, so signing in a
+    // second Google account doesn't silently reuse the first.
+    prompt: "select_account consent",
     state,
   });
   return `${GOOGLE_AUTH_URL}?${params.toString()}`;
@@ -156,28 +158,38 @@ async function refreshAccessToken(refreshToken, env = process.env) {
   };
 }
 
-// Returns a definitely-valid access token for a calendar row (as
-// returned by getCalendarById(id, { includeSecrets: true })),
-// refreshing and persisting a new one first if the current one is
-// within 5 minutes of expiring. Every call site that talks to the
-// Calendar API should go through this rather than reading
-// googleAccessToken off the row directly.
-export async function getValidAccessToken(calendar, env = process.env) {
-  const expiresAt = calendar.googleTokenExpiry ? new Date(calendar.googleTokenExpiry).getTime() : 0;
+// Returns a definitely-valid access token for one signed-in Google
+// account (an entry of a calendar's `connections`, loaded with
+// { includeSecrets: true }), refreshing and persisting a new one first
+// if the current one is within 5 minutes of expiring. Every call site
+// that talks to the Calendar API should go through this (or
+// getValidAccessToken below) rather than reading accessToken directly.
+export async function getValidConnectionAccessToken(connection, env = process.env) {
+  const expiresAt = connection.tokenExpiry ? new Date(connection.tokenExpiry).getTime() : 0;
   if (expiresAt - Date.now() > 5 * 60 * 1000) {
-    return calendar.googleAccessToken;
+    return connection.accessToken;
   }
-  if (!calendar.googleRefreshToken) {
-    throw new Error("Google Calendar is connected but has no refresh token on file — reconnect it.");
+  if (!connection.refreshToken) {
+    throw new Error(`Google account ${connection.email || ""} has no refresh token on file — reconnect it.`);
   }
-  const { accessToken, expiresAt: newExpiresAt } = await refreshAccessToken(calendar.googleRefreshToken, env);
-  await updateCalendarGoogleAccessToken(calendar.id, { accessToken, expiry: newExpiresAt });
-  // Kept on the in-memory row too, so a second call in the same request
-  // (free/busy check, then the event insert) reuses it instead of
-  // refreshing again.
-  calendar.googleAccessToken = accessToken;
-  calendar.googleTokenExpiry = newExpiresAt;
+  const { accessToken, expiresAt: newExpiresAt } = await refreshAccessToken(connection.refreshToken, env);
+  await updateCalendarConnectionTokens(connection.id, { accessToken, expiry: newExpiresAt });
+  // Kept on the in-memory object too, so a second call in the same
+  // request (free/busy check, then the event insert) reuses it instead
+  // of refreshing again.
+  connection.accessToken = accessToken;
+  connection.tokenExpiry = newExpiresAt;
   return accessToken;
+}
+
+// The token for the Google account a calendar's bookings go to
+// (calendar.googleConnectionId — see server/db.js's calendarFromRow).
+export async function getValidAccessToken(calendar, env = process.env) {
+  const connection = (calendar.connections || []).find(
+    (c) => c.provider === "google" && c.id === calendar.googleConnectionId
+  );
+  if (!connection) throw new Error("No Google account is chosen for bookings on this calendar.");
+  return getValidConnectionAccessToken(connection, env);
 }
 
 // Every calendar (not just "primary") the connected account can see —

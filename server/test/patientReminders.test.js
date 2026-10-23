@@ -649,7 +649,11 @@ test("cancel link on a calendar WITHOUT the workflow: GET never cancels, lands o
   const b2 = await book(cal, 60);
   // Booked first so calendar-book doesn't try a real Google call; then
   // pretend the calendar is connected and the bookings have events.
-  await sql("UPDATE calendars SET google_connected = true, google_calendar_id = 'primary' WHERE id = $1", [cal.id]);
+  const [conn] = await sql(
+    "INSERT INTO calendar_connections (calendar_id, provider, email) VALUES ($1, 'google', 'owner@example.com') RETURNING id",
+    [cal.id]
+  );
+  await sql("UPDATE calendars SET booking_connection_id = $2 WHERE id = $1", [cal.id, conn.id]);
   await sql("UPDATE calendar_bookings SET google_event_id = 'evt-plain' WHERE id = $1", [b.id]);
   await sql("UPDATE calendar_bookings SET google_event_id = 'evt-plain-2' WHERE id = $1", [b2.id]);
   const deleted = [];
@@ -712,7 +716,7 @@ test("cancel link on a calendar WITHOUT the workflow: GET never cancels, lands o
     const missing = await call(handlers.cancel, { method: "GET", query: { token: "0".repeat(32) } });
     assert.equal(missing.statusCode, 404);
   } finally {
-    await sql("UPDATE calendars SET google_connected = false WHERE id = $1", [cal.id]);
+    await sql("DELETE FROM calendar_connections WHERE calendar_id = $1", [cal.id]);
     pr.__setDepsForTests({
       sendSms: async (msg) => { if (smsBehavior) return smsBehavior(msg); sent.sms.push(msg); return { sid: `SM${sent.sms.length}${Date.now()}`, status: "queued" }; },
       sendEmail: async (msg) => { sent.email.push(msg); },
