@@ -80,6 +80,14 @@ export default function BookingWidget({ slug }) {
   const [selectedDayKey, setSelectedDayKey] = useState(null);
   const [windowSlots, setWindowSlots] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
+  // Bumped each time a window's slots finish loading — the "jump to the
+  // first available day" effect below waits on it.
+  const [slotsLoadCount, setSlotsLoadCount] = useState(0);
+  // On first load only: if today has no free times, select the first day
+  // that does, moving forward a week at a time if needed. Off as soon as
+  // the visitor picks a day or changes week themselves.
+  const autoPickRef = useRef(true);
+  const autoWeeksRef = useRef(0);
   const [selectedSlot, setSelectedSlot] = useState(null);
   // ?name=&email=&phone= pre-fill the form, e.g. when embedded after a lead-capture survey.
   const [form, setForm] = useState(() => {
@@ -234,7 +242,10 @@ export default function BookingWidget({ slug }) {
       .get(`/api/calendar-slots?slug=${encodeURIComponent(slug)}&from=${fmt(from)}&to=${fmt(to)}`)
       .then(({ slots: allSlots }) => setWindowSlots(allSlots))
       .catch(() => setWindowSlots([]))
-      .finally(() => setLoadingSlots(false));
+      .finally(() => {
+        setLoadingSlots(false);
+        setSlotsLoadCount((n) => n + 1);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowStart, timezone, slug]);
 
@@ -248,6 +259,39 @@ export default function BookingWidget({ slug }) {
   }, [windowSlots, timezone]);
 
   const slots = slotsByDay[selectedDayKey] || [];
+
+  useEffect(() => {
+    if (!autoPickRef.current || !slotsLoadCount || loadingSlots) return;
+    const todayKey = dateKeyInZone(new Date(), timezone);
+    const firstFree = visibleDays
+      .map((d) => dateKeyInZone(d, timezone))
+      .find((k) => k >= todayKey && (slotsByDay[k] || []).length > 0);
+    if (firstFree) {
+      autoPickRef.current = false;
+      setSelectedDayKey(firstFree);
+      return;
+    }
+    // Nothing this week — look at the next one, up to the booking window.
+    const maxWeeks = Math.ceil((calendarInfo?.bookingWindowDays || 60) / 7);
+    if (autoWeeksRef.current >= maxWeeks) {
+      // No availability at all: go back to this week and show today.
+      autoPickRef.current = false;
+      setWindowStart(new Date());
+      setSelectedDayKey(todayKey);
+      return;
+    }
+    autoWeeksRef.current += 1;
+    setWindowStart((d) => {
+      const n = new Date(d);
+      n.setDate(n.getDate() + 7);
+      return n;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slotsLoadCount, loadingSlots]);
+
+  const stopAutoPick = () => {
+    autoPickRef.current = false;
+  };
 
   async function submitBooking(e) {
     e.preventDefault();
@@ -450,7 +494,7 @@ export default function BookingWidget({ slug }) {
           <div className="p-4 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <button
-                onClick={() => setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; })}
+                onClick={() => { stopAutoPick(); setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; }); }}
                 className="text-gray-400 hover:text-gray-700"
               >
                 <ChevronLeft size={18} />
@@ -459,7 +503,7 @@ export default function BookingWidget({ slug }) {
                 {dayLabel(visibleDays[0], timezone)} – {dayLabel(visibleDays[6], timezone)}
               </span>
               <button
-                onClick={() => setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; })}
+                onClick={() => { stopAutoPick(); setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; }); }}
                 className="text-gray-400 hover:text-gray-700"
               >
                 <ChevronRight size={18} />
@@ -474,21 +518,24 @@ export default function BookingWidget({ slug }) {
                 // as unavailable while the fetch is still in flight.
                 const unavailable = !loadingSlots && !active && (slotsByDay[key] || []).length === 0;
                 const { weekday, day } = weekdayAndDay(d, timezone);
-                // Phones get a stacked "Thu / 1" tile with a light blue
-                // glow on bookable days; sm and up keep the bordered
+                // Bookable days get a light blue glow on every screen size.
+                // Phones get a stacked "Thu / 1" tile; sm and up keep the
                 // "Thu, Oct 1" buttons.
                 return (
                   <button
                     key={key}
                     type="button"
-                    onClick={() => setSelectedDayKey(key)}
+                    onClick={() => {
+                      stopAutoPick();
+                      setSelectedDayKey(key);
+                    }}
                     disabled={unavailable}
                     className={`flex flex-col items-center justify-center py-2 sm:py-2.5 rounded-xl sm:rounded-lg text-xs font-medium border ${
                       active
                         ? "bg-gray-900 text-white border-gray-900"
                         : unavailable
                         ? "bg-transparent text-gray-300 border-transparent sm:bg-gray-50 sm:border-gray-100 cursor-not-allowed"
-                        : "bg-sky-50 text-slate-600 border-transparent shadow-[0_0_10px_rgba(56,189,248,0.25)] sm:bg-white sm:text-gray-600 sm:border-gray-200 sm:shadow-none hover:border-gray-400"
+                        : "bg-sky-50 text-slate-700 border-transparent sm:border-sky-100 shadow-[0_0_10px_rgba(56,189,248,0.25)] hover:border-sky-300"
                     }`}
                   >
                     <span className="sm:hidden text-[13px] font-medium leading-tight">{weekday}</span>
