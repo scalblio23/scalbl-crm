@@ -2,6 +2,7 @@ import {
   ensureSchema,
   getContacts,
   getContactById,
+  getContactsByIds,
   createContact,
   updateContact,
   deleteContacts,
@@ -20,6 +21,18 @@ export default async function handler(req, res) {
     const hideInternal = hidesInternalNotes(user);
 
     if (req.method === "GET") {
+      // ?ids=1,2,3 — just those leads, fresh from the database. The
+      // dialler checks the next leads' status right before ringing
+      // them, so one another rep just booked isn't called again.
+      if (req.query?.ids) {
+        const ids = String(req.query.ids)
+          .split(",")
+          .map((id) => Number(id.trim()))
+          .filter(Boolean)
+          .slice(0, 200);
+        const rows = (await getContactsByIds(ids)).filter((c) => !allowedTags || allowedTags.includes(c.tag));
+        return res.status(200).json(hideInternal ? rows.map(contactForClient) : rows);
+      }
       return res.status(200).json(await getContacts(allowedTags, hideInternal));
     }
 

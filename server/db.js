@@ -11,6 +11,7 @@ import { CLIENT_COLUMNS, IMPORTED_CLIENTS } from "./clientImportData.js";
 import { CONTACT_COLUMNS, IMPORTED_CONTACTS } from "./contactImportData.js";
 import {
   LEAD_STATUSES,
+  CLOSED_LEAD_STATUSES,
   LEGACY_STATUS_FIELD_KEYS,
   normalizeLeadStatus,
   resolveLeadStatus,
@@ -1586,9 +1587,21 @@ export async function updateContact(id, patch) {
     }
     dealOutcome = match;
   }
+  // `expectedStatus` is the status the caller's screen showed when the
+  // rep made their choice. If someone else has since closed the lead
+  // (Booked / Not Interested) the stale screen doesn't get to reopen
+  // it — that's how a booked lead kept popping back up as New Lead and
+  // getting called (and booked) twice. The response carries the status
+  // that actually stuck, so the caller can tell.
+  const expectedStatus =
+    patch.expectedStatus !== undefined && patch.expectedStatus !== null ? String(patch.expectedStatus) : null;
   const rows = await query(
     `UPDATE contacts SET
-       status = COALESCE($2, status),
+       status = CASE
+         WHEN $2::text IS NULL THEN status
+         WHEN $11::text IS NOT NULL AND status IS DISTINCT FROM $11::text AND status = ANY($12::text[]) THEN status
+         ELSE $2::text
+       END,
        notes = COALESCE($3, notes),
        last_contact = COALESCE($4, last_contact),
        fields = fields || $5::jsonb,
@@ -1610,6 +1623,8 @@ export async function updateContact(id, patch) {
       patch.phone ?? null,
       patch.closerNotes ?? null,
       dealOutcome,
+      expectedStatus,
+      CLOSED_LEAD_STATUSES,
     ]
   );
   return rows[0] ? contactFromRow(rows[0]) : null;
