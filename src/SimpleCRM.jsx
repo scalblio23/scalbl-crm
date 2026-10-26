@@ -3465,13 +3465,44 @@ export default function SimpleCRM() {
       pendingContactPatchesRef.current -= 1;
     }
   };
+  // The server keeps a Booked / Not Interested someone else set after
+  // this screen last refreshed (see expectedStatus in updateContact),
+  // rather than letting a stale view reopen the lead. Shows the status
+  // that actually stuck and says why. True when that happened.
+  const keptOtherRepsStatus = (lead, status, saved) => {
+    if (!saved || !saved.status || saved.status === status) return false;
+    setContacts((cs) => cs.map((c) => (c.id === lead.id ? { ...c, status: saved.status } : c)));
+    setDbError(`${lead.name || "This lead"} was already marked ${saved.status} by someone else, so it stays ${saved.status}.`);
+    return true;
+  };
+
+  // Latest copy of some leads straight from the database (null if
+  // that fails or takes too long — callers carry on with what they
+  // have). Merged into the contacts list so every screen shows it.
+  const fetchFreshLeads = async (ids) => {
+    if (!ids.length) return null;
+    try {
+      const fresh = await Promise.race([
+        api.get(`/api/contacts?ids=${ids.join(",")}`),
+        new Promise((resolve) => setTimeout(() => resolve(null), 2500)),
+      ]);
+      if (!Array.isArray(fresh)) return null;
+      const byId = new Map(fresh.map((c) => [c.id, c]));
+      setContacts((cs) => cs.map((c) => (byId.has(c.id) ? { ...c, ...byId.get(c.id) } : c)));
+      return byId;
+    } catch {
+      return null;
+    }
+  };
+
   const updateContactStatus = async (contactId, status) => {
     if (!LEAD_STATUSES.includes(status)) return;
     const lead = contacts.find((c) => c.id === contactId);
     if (!lead || lead.status === status) return;
     setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status } : c)));
     try {
-      await patchContact({ id: contactId, status });
+      const saved = await patchContact({ id: contactId, status, expectedStatus: lead.status });
+      if (keptOtherRepsStatus(lead, status, saved)) return;
       logStatusToConversation(lead, status);
     } catch (err) {
       setContacts((cs) => cs.map((c) => (c.id === contactId ? { ...c, status: lead.status } : c)));
@@ -4513,6 +4544,9 @@ export default function SimpleCRM() {
   // render) always see whether a session is *currently* active rather
   // than whichever one was active when the call started.
   const sessionRef = useRef(null);
+  // Bumped by stopSession, so a dial that was waiting on its pre-dial
+  // status check (dialNextInQueue) knows not to ring after a Stop.
+  const sessionGenerationRef = useRef(0);
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
@@ -4573,6 +4607,7 @@ export default function SimpleCRM() {
   };
 
   const stopSession = () => {
+    sessionGenerationRef.current += 1;
     setSession(null);
     setSessionPaused(false);
     setWrapUp(null);
@@ -4706,9 +4741,22 @@ export default function SimpleCRM() {
     // losing what was already typed — everything else about this
     // call's outcome still starts fresh.
     const draft = lead.__wrapUpDraft;
+    const defaultStatus = draft ? draft.status : lead.status || "New Lead";
+    // Someone else may have booked this lead while the call was on —
+    // start the wrap-up from its current status, unless the rep has
+    // already picked one.
+    fetchFreshLeads([lead.id]).then((byId) => {
+      const fresh = byId?.get(lead.id);
+      if (!fresh || fresh.status === lead.status) return;
+      setWrapUp((w) =>
+        w && w.lead.id === lead.id
+          ? { ...w, lead: { ...w.lead, status: fresh.status }, status: w.status === defaultStatus ? fresh.status : w.status }
+          : w
+      );
+    });
     setWrapUp({
       lead,
-      status: draft ? draft.status : lead.status || "New Lead",
+      status: defaultStatus,
       notes: draft ? draft.notes : lead.notes || "",
       durationMs,
       error: error ? error.message || "The call failed." : null,
@@ -4755,7 +4803,8 @@ export default function SimpleCRM() {
     // Persist to the database — fire-and-forget, surfaced as a banner
     // on failure rather than blocking the session from moving on.
     api
-      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", status })
+      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", status, expectedStatus: lead.status })
+      .then((saved) => keptOtherRepsStatus(lead, status, saved))
       .catch((err) => setDbError(err.message || "Could not save the updated lead."));
     api
       .post("/api/call-log", {
@@ -5703,18 +5752,47 @@ export default function SimpleCRM() {
   // in the queue, using multi-line dialling when `lines` > 1 and more
   // than one lead is left to try this round (falls back to a normal
   // single call otherwise, same as lines === 1 always does).
-  const dialNextInQueue = (leadIds, lines = 1) => {
+  //
+  // Right before ringing, the next leads' status is re-checked with
+  // the database: one that another rep has booked (or marked Not
+  // Interested) since this screen loaded comes off the queue instead
+  // of being called — and booked — a second time.
+  const dialNextInQueue = async (leadIds, lines = 1) => {
     if (!leadIds.length) return;
+    const generation = sessionGenerationRef.current;
+    const checked = leadIds.slice(0, Math.max(lines, 1) * 3);
+    const fresh = await fetchFreshLeads(checked);
+    if (generation !== sessionGenerationRef.current) return; // session stopped meanwhile
+    let queue = leadIds;
+    if (fresh) {
+      const closedIds = new Set(checked.filter((id) => isClosedLeadStatus(fresh.get(id)?.status)));
+      if (closedIds.size) {
+        queue = queue.filter((id) => !closedIds.has(id));
+        if (!queue.length) {
+          setSession(null);
+          setSessionPaused(false);
+          return;
+        }
+        setSession((s) => (s ? { ...s, queue: s.queue.filter((id) => !closedIds.has(id)) } : s));
+        // All the checked ones were closed — check the next few.
+        if (closedIds.size === checked.length) return dialNextInQueue(queue, lines);
+      }
+    }
+    const leadFor = (id) => {
+      const l = dialQueueById.get(id);
+      const f = fresh?.get(id);
+      return l && f ? { ...l, ...f } : l || f;
+    };
     if (lines > 1) {
-      const batch = leadIds
+      const batch = queue
         .slice(0, lines)
-        .map((id) => dialQueueById.get(id))
+        .map(leadFor)
         .filter(Boolean);
       if (batch.length > 1) return startMultilineCall(batch);
       if (batch.length === 1) return startCall(batch[0]);
       return;
     }
-    const lead = dialQueueById.get(leadIds[0]);
+    const lead = leadFor(queue[0]);
     if (lead) startCall(lead);
   };
 
