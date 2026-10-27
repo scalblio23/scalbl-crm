@@ -3,6 +3,7 @@ import {
   getContacts,
   getContactById,
   getContactsByIds,
+  getContactStatuses,
   createContact,
   updateContact,
   deleteContacts,
@@ -32,6 +33,10 @@ export default async function handler(req, res) {
           .slice(0, 200);
         const rows = (await getContactsByIds(ids)).filter((c) => !allowedTags || allowedTags.includes(c.tag));
         return res.status(200).json(hideInternal ? rows.map(contactForClient) : rows);
+      }
+      if (req.query?.statuses) {
+        res.setHeader("Cache-Control", "no-store");
+        return res.status(200).json(await getContactStatuses(allowedTags));
       }
       return res.status(200).json(await getContacts(allowedTags, hideInternal));
     }
