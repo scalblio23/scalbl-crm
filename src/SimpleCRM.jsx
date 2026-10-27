@@ -271,6 +271,8 @@ const LEAD_STATUSES = ["New Lead", "No Answer", "Booked", "Not Interested"];
 // Statuses that take a lead out of the dial queue for good.
 const CLOSED_LEAD_STATUSES = ["Booked", "Not Interested"];
 const isClosedLeadStatus = (status) => CLOSED_LEAD_STATUSES.includes(status);
+// Cheap fingerprint of every lead's status, to tell whether it changed.
+const statusKey = (contacts) => (contacts || []).map((c) => `${c.id}:${c.status}`).join(",");
 // Status is the ONE thing in the app drawn as a solid, full-bleed block
 // of colour (monday.com style): the whole table cell is painted, white
 // bold text on top. Nothing else — tags, custom select columns, call
@@ -1298,6 +1300,8 @@ export default function SimpleCRM() {
   // (lib/startupCache.js): it's shown straight away on the next start,
   // then replaced by the fresh copy a moment later.
   const authUserId = authUser?.id;
+  const snapshotBaseRef = useRef(null);
+  const snapshotStatusKeyRef = useRef("");
   useEffect(() => {
     if (!authUserId) return; // wait for login before fetching any CRM data
     let cancelled = false;
@@ -1313,12 +1317,32 @@ export default function SimpleCRM() {
       setCallLog(data.callLog);
       setArchivedTags(data.archivedTags || []);
     };
+    // The saved copy's statuses can be days old — a lead booked since
+    // would show as New Lead until the full load lands. Every lead's
+    // current status is a much smaller download, so it's fetched
+    // alongside and laid over the saved copy as soon as it arrives.
+    let freshStatuses = null;
+    const applyFreshStatuses = () => {
+      if (!freshStatuses || freshArrived || cancelled) return;
+      setContacts((cs) =>
+        cs.map((c) => (freshStatuses.has(c.id) && freshStatuses.get(c.id) !== c.status ? { ...c, status: freshStatuses.get(c.id) } : c))
+      );
+    };
     readSnapshot("bootstrap", authUserId).then((saved) => {
       if (cancelled || freshArrived || !saved?.contacts) return;
       showingSaved = true;
       apply(saved);
+      applyFreshStatuses();
       setDbLoading(false);
     });
+    api
+      .get("/api/contacts?statuses=1")
+      .then((rows) => {
+        if (!Array.isArray(rows)) return;
+        freshStatuses = new Map(rows.map((r) => [r.id, r.status]));
+        if (showingSaved) applyFreshStatuses();
+      })
+      .catch(() => {});
     (async () => {
       try {
         const data = await api.get("/api/bootstrap");
@@ -1326,6 +1350,8 @@ export default function SimpleCRM() {
         if (cancelled) return;
         apply(data);
         setDbError("");
+        snapshotBaseRef.current = data;
+        snapshotStatusKeyRef.current = statusKey(data.contacts);
         writeSnapshot("bootstrap", authUserId, data);
       } catch (err) {
         freshArrived = true;
@@ -1353,6 +1379,22 @@ export default function SimpleCRM() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUserId]);
+
+  // The saved copy is otherwise only written at start-up, so a refresh
+  // would open on statuses from the last page load. Re-saved (a few
+  // seconds after things settle) whenever any lead's status changes —
+  // by this rep or, via the background refresh, anyone else.
+  useEffect(() => {
+    if (!authUserId || !snapshotBaseRef.current) return;
+    const key = statusKey(contacts);
+    if (key === snapshotStatusKeyRef.current) return;
+    const timer = setTimeout(() => {
+      snapshotStatusKeyRef.current = key;
+      snapshotBaseRef.current = { ...snapshotBaseRef.current, contacts };
+      writeSnapshot("bootstrap", authUserId, snapshotBaseRef.current);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [authUserId, contacts]);
 
   // ---------- Calendars ----------
   // Loaded lazily the first time the tab is opened rather than as
@@ -2797,12 +2839,10 @@ export default function SimpleCRM() {
   const [importingContacts, setImportingContacts] = useState(false);
   const [importProgress, setImportProgress] = useState(null); // { inserted, total } or null
   const handleImportContacts = async () => {
-    if (
-      !window.confirm(
-        "Import the real lead list? This replaces every current contact and column with the imported data. This can take a minute for a few thousand leads."
-      )
-    )
-      return;
+    const typed = window.prompt(
+      "This DELETES every lead in the CRM — and every Booked / Not Interested status the team has set — and replaces them with the old imported spreadsheet data. It can't be undone.\n\nType REPLACE to go ahead."
+    );
+    if (typed !== "REPLACE") return;
     setImportingContacts(true);
     setImportProgress(null);
     try {
@@ -4802,8 +4842,7 @@ export default function SimpleCRM() {
 
     // Persist to the database — fire-and-forget, surfaced as a banner
     // on failure rather than blocking the session from moving on.
-    api
-      .patch("/api/contacts", { id: lead.id, notes, lastContact: "Today", status, expectedStatus: lead.status })
+    patchContact({ id: lead.id, notes, lastContact: "Today", status, expectedStatus: lead.status })
       .then((saved) => keptOtherRepsStatus(lead, status, saved))
       .catch((err) => setDbError(err.message || "Could not save the updated lead."));
     api
@@ -6914,7 +6953,7 @@ export default function SimpleCRM() {
                     className="border border-gray-200 rounded-lg pl-9 pr-3 py-2 text-sm outline-none focus:border-gray-400 w-full sm:w-64"
                   />
                 </div>
-                {!isClientRole && (
+                {authUser?.role === "owner" && (
                   <button
                     onClick={handleImportContacts}
                     disabled={importingContacts}

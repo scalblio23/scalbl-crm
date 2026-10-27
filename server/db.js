@@ -1506,6 +1506,15 @@ export async function getContacts(allowedTags, hideInternal = Boolean(allowedTag
   return hideInternal ? contacts.map(contactForClient) : contacts;
 }
 
+// Just id + status for every (visible) lead — tiny next to the full
+// list, so the app can correct a saved copy's statuses within a moment
+// of opening, before the full load finishes.
+export async function getContactStatuses(allowedTags) {
+  return allowedTags
+    ? query("SELECT id, status FROM contacts WHERE tag = ANY($1::text[])", [allowedTags])
+    : query("SELECT id, status FROM contacts");
+}
+
 // Used by the API layer to check a client-role caller's tag access
 // before letting them touch one specific contact (edit/delete).
 export async function getContactById(id) {
@@ -1592,7 +1601,10 @@ export async function updateContact(id, patch) {
   // (Booked / Not Interested) the stale screen doesn't get to reopen
   // it — that's how a booked lead kept popping back up as New Lead and
   // getting called (and booked) twice. The response carries the status
-  // that actually stuck, so the caller can tell.
+  // that actually stuck, so the caller can tell. A request that doesn't
+  // say what it saw (a CRM tab opened before this check existed, an
+  // outside tool) can never move a Booked / Not Interested lead back to
+  // New Lead / No Answer — reopening one takes someone looking at it.
   const expectedStatus =
     patch.expectedStatus !== undefined && patch.expectedStatus !== null ? String(patch.expectedStatus) : null;
   const rows = await query(
@@ -1600,6 +1612,7 @@ export async function updateContact(id, patch) {
        status = CASE
          WHEN $2::text IS NULL THEN status
          WHEN $11::text IS NOT NULL AND status IS DISTINCT FROM $11::text AND status = ANY($12::text[]) THEN status
+         WHEN $11::text IS NULL AND status = ANY($12::text[]) AND NOT ($2::text = ANY($12::text[])) THEN status
          ELSE $2::text
        END,
        notes = COALESCE($3, notes),
@@ -3646,7 +3659,13 @@ export async function setContactStatusByMatch({ id, phone, email, tag, status, n
        AND ($4::text IS NULL OR tag = $4)`,
     [contactId, usablePhone, usableEmail, tag ? String(tag).trim() : null]
   );
-  const targets = matches.filter((m) => m.status !== newStatus);
+  // Outside systems can close a lead, never reopen one: a lead the team
+  // booked or heard "not interested" from stays that way (see
+  // updateContact).
+  const reopening = !CLOSED_LEAD_STATUSES.includes(newStatus);
+  const targets = matches.filter(
+    (m) => m.status !== newStatus && !(reopening && CLOSED_LEAD_STATUSES.includes(m.status))
+  );
   if (!targets.length) return { matched: matches.length, updated: [] };
 
   const cleanNote = String(note || "").trim() || null;

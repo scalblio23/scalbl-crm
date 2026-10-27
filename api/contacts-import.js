@@ -26,6 +26,11 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
     const { reset, offset, limit } = req.body || {};
+    // Deletes every lead (and every status the team has set) and puts
+    // back an old spreadsheet snapshot — the account owner only.
+    if (user.role !== "owner") {
+      return res.status(403).json({ error: "Only the account owner can replace the lead list." });
+    }
     if (reset) {
       return res.status(200).json(await resetContactImport());
     }
