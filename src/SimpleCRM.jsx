@@ -30,6 +30,9 @@ import {
   Pencil,
   LayoutGrid,
   SquareKanban,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
   Table2,
   Upload,
   Loader2,
@@ -532,6 +535,46 @@ function formatBookingTime(iso, timeZone) {
   const tzName = names.find((n) => n && !n.startsWith("GMT")) || names[0];
   return tzName ? `${text} ${tzName}` : text;
 }
+
+// "2:30 pm AEDT" — a booking's start as a clock time in its calendar's
+// timezone, zone name included (same zone-name preference as above).
+function formatBookingClock(iso, timeZone) {
+  const d = new Date(iso);
+  let tz = timeZone || undefined;
+  let text;
+  try {
+    text = d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit", timeZone: tz });
+  } catch {
+    tz = undefined;
+    text = d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" });
+  }
+  const names = ["en-AU", "en-US"].map((locale) => {
+    try {
+      return new Intl.DateTimeFormat(locale, { timeZone: tz, timeZoneName: "short" })
+        .formatToParts(d)
+        .find((p) => p.type === "timeZoneName")?.value || "";
+    } catch {
+      return "";
+    }
+  });
+  const tzName = names.find((n) => n && !n.startsWith("GMT")) || names[0];
+  return tzName ? `${text} ${tzName}` : text;
+}
+
+// YYYY-MM-DD of an instant in a timezone (the viewer's when unknown).
+function dayKeyInZone(iso, timeZone) {
+  const opts = { year: "numeric", month: "2-digit", day: "2-digit" };
+  try {
+    return new Intl.DateTimeFormat("en-CA", { ...opts, timeZone: timeZone || undefined }).format(new Date(iso));
+  } catch {
+    return new Intl.DateTimeFormat("en-CA", opts).format(new Date(iso));
+  }
+}
+const localDayKey = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// Phone digits with the AU 61/0 prefix stripped — the same rule the
+// server uses to tie a booking to its lead (markContactsBookedForBooking).
+const auPhoneDigits = (raw) => String(raw || "").replace(/\D/g, "").replace(/^(61|0)/, "");
 
 function formatCallDuration(ms) {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
@@ -1245,7 +1288,8 @@ export default function SimpleCRM() {
   // Display-only preference, remembered per browser.
   const [contactsView, setContactsView] = useState(() => {
     try {
-      return localStorage.getItem("scalbl:contactsView") === "board" ? "board" : "list";
+      const saved = localStorage.getItem("scalbl:contactsView");
+      return saved === "board" || saved === "calendar" ? saved : "list";
     } catch {
       return "list";
     }
@@ -1257,6 +1301,61 @@ export default function SimpleCRM() {
       // ignore — private browsing / storage disabled
     }
   }, [contactsView]);
+
+  // Contacts → Calendar view: bookings on the CRM's calendars for the
+  // month shown, laid out by day in each calendar's own timezone.
+  const [contactsCalMonth, setContactsCalMonth] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  const [contactsCalBookings, setContactsCalBookings] = useState(null); // null = not loaded yet
+  const [contactsCalError, setContactsCalError] = useState("");
+  const [contactsCalShowCancelled, setContactsCalShowCancelled] = useState(false);
+  const [contactsCalShowUnmatched, setContactsCalShowUnmatched] = useState(false);
+  const [contactsCalOpenId, setContactsCalOpenId] = useState(null);
+  // Monday-first 6-week grid covering the month.
+  const contactsCalDays = useMemo(() => {
+    const first = new Date(contactsCalMonth);
+    const start = new Date(first);
+    start.setDate(first.getDate() - ((first.getDay() + 6) % 7));
+    return Array.from({ length: 42 }, (_, i) => {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      return d;
+    });
+  }, [contactsCalMonth]);
+  useEffect(() => {
+    if (!authUser || page !== "contacts" || contactsView !== "calendar") return;
+    let cancelled = false;
+    // A day either side, so a booking near midnight in another
+    // timezone still lands on its day.
+    const from = new Date(contactsCalDays[0]);
+    from.setDate(from.getDate() - 1);
+    const to = new Date(contactsCalDays[contactsCalDays.length - 1]);
+    to.setDate(to.getDate() + 2);
+    const load = async () => {
+      try {
+        const rows = await api.get(
+          `/api/calendar-bookings?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`
+        );
+        if (cancelled) return;
+        setContactsCalBookings(Array.isArray(rows) ? rows : []);
+        setContactsCalError("");
+      } catch (err) {
+        if (cancelled) return;
+        setContactsCalBookings((b) => b || []);
+        setContactsCalError(
+          err.status === 403 ? "Your login can't see calendar bookings." : err.message || "Could not load bookings."
+        );
+      }
+    };
+    load();
+    const timer = setInterval(load, 60000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [authUser, page, contactsView, contactsCalDays]);
 
   // Which custom Contacts columns the user has chosen to hide from the
   // table — a display-only preference, kept per-browser since it's not
@@ -2345,6 +2444,202 @@ export default function SimpleCRM() {
     setDraggingContactId(null);
     setDragOverStatus(null);
   };
+  // Bookings tied to the leads currently listed (same tag / filters /
+  // search as List and Board), matched on phone or email the way the
+  // server marks leads Booked.
+  const renderContactsCalendar = () => {
+    const byPhone = new Map();
+    const byEmail = new Map();
+    for (const c of sortedContacts) {
+      const digits = auPhoneDigits(c.phone);
+      if (digits.length >= 8 && !byPhone.has(digits)) byPhone.set(digits, c);
+      const email = String(c.email || "").trim().toLowerCase();
+      if (email.includes("@") && !byEmail.has(email)) byEmail.set(email, c);
+    }
+    const leadForBooking = (b) =>
+      byPhone.get(auPhoneDigits(b.contactPhone)) || byEmail.get(String(b.contactEmail || "").trim().toLowerCase()) || null;
+    const all = (contactsCalBookings || []).map((b) => ({ ...b, lead: leadForBooking(b) }));
+    const shown = all.filter(
+      (b) => (contactsCalShowCancelled || b.status !== "cancelled") && (contactsCalShowUnmatched || b.lead)
+    );
+    const byDay = new Map();
+    for (const b of shown) {
+      const key = dayKeyInZone(b.startTime, b.calendarTimezone);
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push(b);
+    }
+    const monthIndex = contactsCalMonth.getMonth();
+    const inMonth = shown.filter((b) => {
+      const k = dayKeyInZone(b.startTime, b.calendarTimezone);
+      return k.slice(0, 7) === localDayKey(contactsCalMonth).slice(0, 7);
+    });
+    const todayKey = localDayKey(new Date());
+    const unmatchedCount = all.filter((b) => !b.lead && (contactsCalShowCancelled || b.status !== "cancelled")).length;
+    const open = shown.find((b) => b.id === contactsCalOpenId) || null;
+    const shiftMonth = (n) => setContactsCalMonth((m) => new Date(m.getFullYear(), m.getMonth() + n, 1));
+    return (
+      <div className="p-4 md:p-6">
+        <div className="flex flex-wrap items-center gap-3 mb-3">
+          <div className="flex items-center gap-1">
+            <button onClick={() => shiftMonth(-1)} className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50" title="Previous month">
+              <ChevronLeft size={16} />
+            </button>
+            <button onClick={() => shiftMonth(1)} className="p-1.5 rounded-lg border border-gray-200 hover:bg-gray-50" title="Next month">
+              <ChevronRight size={16} />
+            </button>
+            <button
+              onClick={() => {
+                const d = new Date();
+                setContactsCalMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+              }}
+              className="ml-1 px-3 py-1.5 rounded-lg border border-gray-200 text-sm hover:bg-gray-50"
+            >
+              Today
+            </button>
+          </div>
+          <h2 className="text-base font-bold">
+            {contactsCalMonth.toLocaleDateString("en-AU", { month: "long", year: "numeric" })}
+          </h2>
+          <span className="text-xs text-gray-400">
+            {contactsCalBookings === null
+              ? "Loading bookings…"
+              : `${inMonth.length} booking${inMonth.length === 1 ? "" : "s"} this month${
+                  contactFilters.length > 0 || search ? " for the leads matching your filters" : ""
+                } · times shown in each calendar's timezone`}
+          </span>
+          <div className="flex flex-wrap items-center gap-4 ml-auto text-xs text-gray-600">
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" checked={contactsCalShowCancelled} onChange={(e) => setContactsCalShowCancelled(e.target.checked)} />
+              Show cancelled
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer" title="Bookings whose phone/email doesn't match any lead in this view">
+              <input type="checkbox" checked={contactsCalShowUnmatched} onChange={(e) => setContactsCalShowUnmatched(e.target.checked)} />
+              Include bookings not matched to a lead{unmatchedCount ? ` (${unmatchedCount})` : ""}
+            </label>
+          </div>
+        </div>
+        {contactsCalError && (
+          <div className="mb-3 text-sm text-red-600 flex items-center gap-1.5">
+            <AlertTriangle size={14} /> {contactsCalError}
+          </div>
+        )}
+        <div className="overflow-x-auto">
+          <div className="min-w-[840px] border border-gray-200 rounded-xl overflow-hidden">
+            <div className="grid grid-cols-7 bg-gray-50 border-b border-gray-200 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+              {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
+                <div key={d} className="px-2 py-2">
+                  {d}
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-7">
+              {contactsCalDays.map((d, i) => {
+                const key = localDayKey(d);
+                const items = byDay.get(key) || [];
+                return (
+                  <div
+                    key={key}
+                    className={`min-h-[110px] border-gray-100 p-1.5 ${i % 7 ? "border-l" : ""} ${i >= 7 ? "border-t" : ""} ${
+                      d.getMonth() === monthIndex ? "bg-white" : "bg-gray-50/70"
+                    }`}
+                  >
+                    <div
+                      className={`text-xs mb-1 w-6 h-6 flex items-center justify-center rounded-full ${
+                        key === todayKey
+                          ? "bg-gray-900 text-white font-bold"
+                          : d.getMonth() === monthIndex
+                          ? "text-gray-700"
+                          : "text-gray-300"
+                      }`}
+                    >
+                      {d.getDate()}
+                    </div>
+                    <div className="space-y-1 max-h-[150px] overflow-y-auto">
+                      {items.map((b) => (
+                        <button
+                          key={b.id}
+                          onClick={() => setContactsCalOpenId(b.id)}
+                          title={`${b.lead?.name || b.contactName} · ${formatBookingTime(b.startTime, b.calendarTimezone)} · ${b.calendarName}`}
+                          className={`w-full text-left rounded-md px-1.5 py-1 text-[11px] leading-tight truncate ${
+                            b.status === "cancelled"
+                              ? "bg-gray-100 text-gray-400 line-through"
+                              : b.lead
+                              ? statusSolidClass(b.lead.status)
+                              : "bg-gray-200 text-gray-700"
+                          }`}
+                        >
+                          <span className="font-semibold">{formatBookingClock(b.startTime, b.calendarTimezone)}</span>{" "}
+                          {b.lead?.name || b.contactName}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        {open && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4" onClick={() => setContactsCalOpenId(null)}>
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-5" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <div className="text-base font-bold">{open.lead?.name || open.contactName}</div>
+                  <div className="text-xs text-gray-500">{open.calendarName}</div>
+                </div>
+                <button onClick={() => setContactsCalOpenId(null)} className="text-gray-400 hover:text-gray-600">
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center gap-2">
+                  <Clock size={14} className="text-gray-400" />
+                  <span>{formatBookingTime(open.startTime, open.calendarTimezone)}</span>
+                  {open.status === "cancelled" && <span className="text-xs text-red-500">(cancelled)</span>}
+                </div>
+                {open.bookerTimezone && open.bookerTimezone !== open.calendarTimezone && (
+                  <div className="text-xs text-gray-500 pl-6">Booker's time: {formatBookingTime(open.startTime, open.bookerTimezone)}</div>
+                )}
+                <div className="flex items-center gap-2 text-gray-600">
+                  <Phone size={14} className="text-gray-400" /> {open.lead?.phone || open.contactPhone || "—"}
+                </div>
+                <div className="flex items-center gap-2 text-gray-600">
+                  <Mail size={14} className="text-gray-400" /> {open.lead?.email || open.contactEmail || "—"}
+                </div>
+                {open.lead?.tag && (
+                  <div className="text-xs text-gray-500 pl-6">Tag: {open.lead.tag}</div>
+                )}
+                {open.notes && <div className="text-xs text-gray-600 bg-gray-50 rounded-lg p-2 whitespace-pre-wrap">{open.notes}</div>}
+              </div>
+              <div className="mt-4">
+                {open.lead ? (
+                  <>
+                    <div className="text-xs font-medium text-gray-500 mb-1.5">Lead status</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {LEAD_STATUSES.map((st) => (
+                        <button
+                          key={st}
+                          onClick={() => updateContactStatus(open.lead.id, st)}
+                          className={`${STATUS_CHIP} ${
+                            open.lead.status === st ? statusSolidClass(st) : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                          }`}
+                        >
+                          {st}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-xs text-gray-500">Not matched to a lead in this view (no lead with this phone or email).</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderContactsBoard = () => (
     <div className="p-6">
       <div className="flex items-center justify-between mb-3 text-xs text-gray-400">
@@ -6890,6 +7185,14 @@ export default function SimpleCRM() {
                   >
                     <SquareKanban size={15} /> Board
                   </button>
+                  <button
+                    onClick={() => setContactsView("calendar")}
+                    className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium ${
+                      contactsView === "calendar" ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-50"
+                    }`}
+                  >
+                    <CalendarDays size={15} /> Calendar
+                  </button>
                 </div>
                 {contactsView === "list" && (
                 <div className="relative">
@@ -6994,6 +7297,7 @@ export default function SimpleCRM() {
               </div>
             </div>
             {contactsView === "board" && renderContactsBoard()}
+            {contactsView === "calendar" && renderContactsCalendar()}
             {contactsView === "list" && (
               <>
             <div className="overflow-x-auto">
