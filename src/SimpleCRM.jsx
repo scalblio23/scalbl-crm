@@ -267,7 +267,7 @@ const initialConversations = [];
 // used to be a second, imported "STAGE" custom column alongside it;
 // the wrap-up wrote that while the dialler filtered on this, which is
 // how leads marked Booked kept getting re-called.)
-const LEAD_STATUSES = ["New Lead", "No Answer", "Booked", "Not Interested"];
+const LEAD_STATUSES = ["New Lead", "No Answer", "Booked", "No Show", "Not Interested"];
 // Statuses that take a lead out of the dial queue for good.
 const CLOSED_LEAD_STATUSES = ["Booked", "Not Interested"];
 const isClosedLeadStatus = (status) => CLOSED_LEAD_STATUSES.includes(status);
@@ -283,6 +283,7 @@ const statusColors = {
   "New Lead": "bg-blue-600 text-white",
   "No Answer": "bg-amber-500 text-white",
   Booked: "bg-green-600 text-white",
+  "No Show": "bg-purple-600 text-white",
   "Not Interested": "bg-red-600 text-white",
 };
 const statusSolidClass = (status) => statusColors[status] || "bg-gray-400 text-white";
@@ -290,7 +291,7 @@ const statusSolidClass = (status) => statusColors[status] || "bg-gray-400 text-w
 // cell (board cards, call log, conversation outcomes, filter menus).
 const STATUS_CHIP = "rounded-md px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide whitespace-nowrap";
 // The closer's verdict on a lead, shown as a tab strip along the bottom
-// of each board card. Separate from `status` (the setter's four-value
+// of each board card. Separate from `status` (the setter's pipeline
 // pipeline): a lead is Booked, then — after the appointment — Won or
 // Lost. Distinct hues from the status blocks so the two never blur.
 const DEAL_OUTCOMES = ["Pending", "Won", "Lost"];
@@ -3644,7 +3645,7 @@ export default function SimpleCRM() {
   // The status control. variant "cell" paints the whole table cell in
   // the status colour (the td must be `p-0 h-px` so the block reaches
   // every edge); variant "chip" is the compact solid chip for board
-  // cards. Clicking either opens the four-option menu, each option
+  // cards. Clicking either opens the status menu, each option
   // drawn as the same solid block so what you pick is what you'll see.
   const renderStatusPicker = (contact, { variant = "cell", align = "left" } = {}) => {
     const isOpen = openStatusCellId === contact.id;
@@ -4576,7 +4577,7 @@ export default function SimpleCRM() {
   const portalActivity = useMemo(() => buildActivityStream(portalCallLog), [portalCallLog]);
 
   // Call log "status"/"outcome" is the lead's status as of wrap-up —
-  // the same four values, coloured the same way, as everywhere else.
+  // the same status values, coloured the same way, as everywhere else.
   const callOutcomeColor = (value) => (value ? statusSolidClass(value) : "");
 
   // Kept in sync with `session` so the long-lived Twilio call event

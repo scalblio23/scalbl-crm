@@ -3,7 +3,7 @@
 // refuses to store anything else), the Express dev server, the Vercel
 // functions and — mirrored as LEAD_STATUSES in src/SimpleCRM.jsx —
 // the UI, so the Contacts table, kanban board, Powerdialler, wrap-up
-// screen and Reports all speak the same four words.
+// screen and Reports all speak the same five words.
 //
 // History: imported leads used to carry their sheet's own "STAGE"
 // custom column (Booked / Not Interested / No Answer Yet / New / …)
@@ -13,18 +13,25 @@
 // re-called. There is exactly one field now — see
 // migrateLegacyStageToStatus in db.js for how the old values were
 // folded in.
-export const LEAD_STATUSES = ["New Lead", "No Answer", "Booked", "Not Interested"];
+export const LEAD_STATUSES = ["New Lead", "No Answer", "Booked", "No Show", "Not Interested"];
 export const DEFAULT_LEAD_STATUS = "New Lead";
 
 // Statuses that mean "do not call this lead again from the dialler".
 export const CLOSED_LEAD_STATUSES = ["Booked", "Not Interested"];
+
+// The "back to square one" statuses. A Booked / Not Interested lead
+// is only ever moved to one of these by someone looking at it in the
+// CRM — never by a stale screen or an outside tool (see updateContact
+// and setContactStatusByMatch in db.js). No Show isn't one: a booking
+// tool reporting a no-show is new information, not a stale overwrite.
+export const REOPENED_LEAD_STATUSES = ["New Lead", "No Answer"];
 
 export function isLeadStatus(value) {
   return LEAD_STATUSES.includes(value);
 }
 
 // Maps whatever a sheet / webhook / old client sent to one of the
-// four canonical statuses, or null when it's blank or means nothing
+// five canonical statuses, or null when it's blank or means nothing
 // we recognise. Deliberately generous on the two "closed" outcomes —
 // mis-reading "BOOKED " or "not interested." as a fresh lead is the
 // exact bug this replaces — and conservative everywhere else:
@@ -40,6 +47,7 @@ export function normalizeLeadStatus(raw) {
   }
   // Order matters: "not interested" must win before anything that
   // could match "interest", and "no show" is not "no answer".
+  if (/\bno[ -]?show|\bdid ?n[o']?t (show|turn up|attend)\b|\bdnsu?\b/.test(s)) return "No Show";
   if (
     /\bnot interested\b|\bnot int\b|\buninterested\b|\bdisqualif|\bdnc\b|\bdo not call\b|\bdead\b|\blost\b|\bcancel|\bdeclin|\bunqualif|\bwrong number\b|\bremove\b|\bopt(ed)? out\b|^ni$|^n\/?i$/.test(
       s

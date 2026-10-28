@@ -9,7 +9,7 @@
 // "Booked" }. See PUBLIC_PATHS in server/index.js.
 //
 // Body (or query params on a GET), one lead or an array of them:
-//   status  required — New Lead / No Answer / Booked / Not Interested
+//   status  required — New Lead / No Answer / Booked / No Show / Not Interested
 //   phone   and/or email (the usual aliases accepted), or id
 //   tag     optional — only update the lead under this Contacts tag
 //   notes   optional — appended to the lead's notes when it changes
