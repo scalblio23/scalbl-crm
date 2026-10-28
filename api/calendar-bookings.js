@@ -11,6 +11,8 @@ import {
   getCalendarBookingById,
   cancelCalendarBooking,
   getCalendarById,
+  getCalendars,
+  getBookingsInRange,
 } from "../server/db.js";
 import { requireAuth, forbidNonCalendarRole, canAccessCalendar } from "../server/auth.js";
 import { pushBookingToCalendars, removeBookingFromCalendars } from "../server/calendarSync.js";
@@ -31,6 +33,20 @@ export default async function handler(req, res) {
         return res.status(404).json({ error: "Booking not found" });
       }
       return res.status(200).json(await getBookingTimeline(req.query.timelineFor));
+    }
+
+    // ?from=ISO&to=ISO (no calendarId) — bookings starting in that range
+    // across every calendar this user can see, for the Contacts page's
+    // Calendar view. Read-only; at most ~3 months per request.
+    if (req.method === "GET" && !req.query.calendarId && req.query.from && req.query.to) {
+      const from = new Date(String(req.query.from));
+      const to = new Date(String(req.query.to));
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to <= from || to - from > 100 * 864e5) {
+        return res.status(400).json({ error: "Invalid date range" });
+      }
+      const ids = (await getCalendars()).filter((c) => canAccessCalendar(user, c)).map((c) => c.id);
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json(await getBookingsInRange(ids, from.toISOString(), to.toISOString()));
     }
 
     if (req.method === "GET") {

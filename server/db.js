@@ -3498,6 +3498,36 @@ export async function getCalendarBookings(calendarId) {
   return rows.map(calendarBookingFromRow);
 }
 
+// Every booking (confirmed or cancelled) starting in [fromISO, toISO)
+// on the given calendars, with the calendar's name and timezone — for
+// the Contacts page's Calendar view, which lays them out by day.
+export async function getBookingsInRange(calendarIds, fromISO, toISO) {
+  const ids = [...new Set(calendarIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return [];
+  const rows = await query(
+    `SELECT b.*, c.name AS calendar_name, c.timezone AS calendar_timezone
+     FROM calendar_bookings b JOIN calendars c ON c.id = b.calendar_id
+     WHERE b.calendar_id = ANY($1::int[]) AND b.start_time >= $2 AND b.start_time < $3
+     ORDER BY b.start_time ASC`,
+    [ids, fromISO, toISO]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    calendarId: r.calendar_id,
+    calendarName: r.calendar_name,
+    calendarTimezone: r.calendar_timezone || null,
+    contactName: r.contact_name,
+    contactEmail: r.contact_email,
+    contactPhone: r.contact_phone,
+    notes: r.notes,
+    startTime: r.start_time,
+    endTime: r.end_time,
+    bookerTimezone: r.booker_timezone,
+    status: r.status,
+    cancelReason: r.cancel_reason || null,
+  }));
+}
+
 // Confirmed bookings overlapping [fromISO, toISO) — treated as busy
 // time when computing available slots, on top of whatever Google's
 // freebusy API reports (keeps a calendar's own bookings authoritative
