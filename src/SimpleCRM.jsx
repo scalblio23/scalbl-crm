@@ -3497,15 +3497,23 @@ export default function SimpleCRM() {
   // can hold off while a save is in flight (otherwise a refresh landing
   // between the optimistic update and the server ack would briefly show
   // the stale value).
+  // patchSeqRef ticks on every save's start and finish: a background
+  // read that was already on its way when a card was moved or a note
+  // saved carries the old values, so it's thrown away rather than
+  // putting the card back where it was.
   const pendingContactPatchesRef = useRef(0);
+  const patchSeqRef = useRef(0);
   const patchContact = async (body) => {
     pendingContactPatchesRef.current += 1;
+    patchSeqRef.current += 1;
     try {
       return await api.patch("/api/contacts", body);
     } finally {
       pendingContactPatchesRef.current -= 1;
+      patchSeqRef.current += 1;
     }
   };
+  const savedSince = (seq) => pendingContactPatchesRef.current > 0 || patchSeqRef.current !== seq;
   // The server keeps a Booked / Not Interested someone else set after
   // this screen last refreshed (see expectedStatus in updateContact),
   // rather than letting a stale view reopen the lead. Shows the status
@@ -3522,6 +3530,7 @@ export default function SimpleCRM() {
   // have). Merged into the contacts list so every screen shows it.
   const fetchFreshLeads = async (ids) => {
     if (!ids.length) return null;
+    const seq = patchSeqRef.current;
     try {
       const fresh = await Promise.race([
         api.get(`/api/contacts?ids=${ids.join(",")}`),
@@ -3529,7 +3538,7 @@ export default function SimpleCRM() {
       ]);
       if (!Array.isArray(fresh)) return null;
       const byId = new Map(fresh.map((c) => [c.id, c]));
-      setContacts((cs) => cs.map((c) => (byId.has(c.id) ? { ...c, ...byId.get(c.id) } : c)));
+      if (!savedSince(seq)) setContacts((cs) => cs.map((c) => (byId.has(c.id) ? { ...c, ...byId.get(c.id) } : c)));
       return byId;
     } catch {
       return null;
@@ -3602,9 +3611,10 @@ export default function SimpleCRM() {
     const refresh = async () => {
       if (inFlight || pendingContactPatchesRef.current > 0 || document.visibilityState === "hidden") return;
       inFlight = true;
+      const seq = patchSeqRef.current;
       try {
         const fresh = await api.get("/api/contacts");
-        if (cancelled || !Array.isArray(fresh)) return;
+        if (cancelled || !Array.isArray(fresh) || savedSince(seq)) return;
         setContacts((cur) => {
           const editingId = editingCloserNotesIdRef.current;
           const byId = new Map(cur.map((c) => [c.id, c]));
