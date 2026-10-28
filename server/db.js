@@ -1470,23 +1470,24 @@ function contactFromRow(r) {
   };
 }
 
-// Internal team comments on a lead — the setter's notes, the closer's
-// notes and the imported NOTE column. A client-role user never gets
-// these, in responses or by writing over them.
+// Internal team comments on a lead — the setter's notes and the
+// imported NOTE column. A client-role user never gets these, in
+// responses or by writing over them. Closer notes and Won/Lost are the
+// closer's own side of the card (the client's, usually), so a client
+// sees and edits those — dropping them silently is how a client's
+// closer notes and Won/Lost kept vanishing on the next refresh.
 export const INTERNAL_CONTACT_FIELD_KEYS = ["note"];
 
 export function contactForClient(c) {
   if (!c) return c;
   const fields = { ...(c.fields || {}) };
   for (const key of INTERNAL_CONTACT_FIELD_KEYS) delete fields[key];
-  return { ...c, notes: "", closerNotes: "", fields };
+  return { ...c, notes: "", fields };
 }
 
 export function sanitizeClientContactPatch(patch) {
   const out = { ...patch };
   delete out.notes;
-  delete out.closerNotes;
-  delete out.dealOutcome;
   if (out.fields && typeof out.fields === "object") {
     out.fields = { ...out.fields };
     for (const key of INTERNAL_CONTACT_FIELD_KEYS) delete out.fields[key];
