@@ -12,6 +12,7 @@ import { CONTACT_COLUMNS, IMPORTED_CONTACTS } from "./contactImportData.js";
 import {
   LEAD_STATUSES,
   CLOSED_LEAD_STATUSES,
+  REOPENED_LEAD_STATUSES,
   LEGACY_STATUS_FIELD_KEYS,
   normalizeLeadStatus,
   resolveLeadStatus,
@@ -1612,7 +1613,7 @@ export async function updateContact(id, patch) {
        status = CASE
          WHEN $2::text IS NULL THEN status
          WHEN $11::text IS NOT NULL AND status IS DISTINCT FROM $11::text AND status = ANY($12::text[]) THEN status
-         WHEN $11::text IS NULL AND status = ANY($12::text[]) AND NOT ($2::text = ANY($12::text[])) THEN status
+         WHEN $11::text IS NULL AND status = ANY($12::text[]) AND $2::text = ANY($13::text[]) THEN status
          ELSE $2::text
        END,
        notes = COALESCE($3, notes),
@@ -1638,6 +1639,7 @@ export async function updateContact(id, patch) {
       dealOutcome,
       expectedStatus,
       CLOSED_LEAD_STATUSES,
+      REOPENED_LEAD_STATUSES,
     ]
   );
   return rows[0] ? contactFromRow(rows[0]) : null;
@@ -3662,7 +3664,7 @@ export async function setContactStatusByMatch({ id, phone, email, tag, status, n
   // Outside systems can close a lead, never reopen one: a lead the team
   // booked or heard "not interested" from stays that way (see
   // updateContact).
-  const reopening = !CLOSED_LEAD_STATUSES.includes(newStatus);
+  const reopening = REOPENED_LEAD_STATUSES.includes(newStatus);
   const targets = matches.filter(
     (m) => m.status !== newStatus && !(reopening && CLOSED_LEAD_STATUSES.includes(m.status))
   );
