@@ -616,8 +616,8 @@ export default function BookingWidget({ slug }) {
             <button type="button" onClick={() => setSelectedSlot(null)} className="text-xs text-gray-400 hover:text-gray-700">
               ← Pick a different time
             </button>
-            <h1 className="text-xl font-bold text-gray-900 leading-snug">
-              Your call is booked for {bookingWhenHeadline(selectedSlot.startUTC, timezone)}. Please confirm by clicking the
+            <h1 className="text-lg font-medium text-gray-900 leading-snug">
+              Your Zoom Call is booked for {bookingWhenHeadline(selectedSlot.startUTC, timezone)}. Please confirm by clicking the
               button below.
             </h1>
             <div>
@@ -659,7 +659,7 @@ export default function BookingWidget({ slug }) {
             <button
               type="submit"
               disabled={submitting || (!form.email && !form.phone)}
-              className="w-full flex items-center justify-center gap-2 bg-gray-900 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting && <Loader2 size={14} className="animate-spin" />}
               Confirm booking
