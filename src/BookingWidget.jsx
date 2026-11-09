@@ -29,6 +29,23 @@ function timeLabel(iso, timeZone) {
   return new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 }
 
+// "Tuesday, 10 November at 2:30 pm AEDT" — the details page's headline.
+// The zone's short name prefers a real abbreviation (en-AU knows AEDT /
+// AWST, en-US knows EST / PDT) over a bare "GMT+11".
+function bookingWhenHeadline(iso, timeZone) {
+  const d = new Date(iso);
+  const part = (opts) => new Intl.DateTimeFormat("en-AU", { timeZone, ...opts }).format(d);
+  const day = `${part({ weekday: "long" })}, ${part({ day: "numeric" })} ${part({ month: "long" })}`;
+  const time = new Intl.DateTimeFormat("en-AU", { timeZone, hour: "numeric", minute: "2-digit" }).format(d);
+  const names = ["en-AU", "en-US"].map(
+    (locale) =>
+      new Intl.DateTimeFormat(locale, { timeZone, timeZoneName: "short" }).formatToParts(d).find((p) => p.type === "timeZoneName")
+        ?.value || ""
+  );
+  const zone = names.find((n) => n && !n.startsWith("GMT")) || names[0];
+  return `${day} at ${time}${zone ? ` ${zone}` : ""}`;
+}
+
 // Meta Pixel base code (the standard snippet, minus the <noscript>
 // image) — injected only when the calendar has a Pixel ID set in
 // Calendar settings → Tracking. Fires PageView on load; the booking
@@ -599,9 +616,10 @@ export default function BookingWidget({ slug }) {
             <button type="button" onClick={() => setSelectedSlot(null)} className="text-xs text-gray-400 hover:text-gray-700">
               ← Pick a different time
             </button>
-            <p className="text-sm font-medium text-gray-900">
-              {dayLabel(new Date(selectedSlot.startUTC), timezone)} at {timeLabel(selectedSlot.startUTC, timezone)}
-            </p>
+            <h1 className="text-xl font-bold text-gray-900 leading-snug">
+              Your call is booked for {bookingWhenHeadline(selectedSlot.startUTC, timezone)}. Please confirm by clicking the
+              button below.
+            </h1>
             <div>
               <label className="text-sm font-medium block mb-1.5">Name</label>
               <input
