@@ -111,6 +111,14 @@ export default function BookingWidget({ slug }) {
     const params = new URLSearchParams(window.location.search);
     return { name: params.get("name") || "", email: params.get("email") || "", phone: params.get("phone") || "", notes: "" };
   });
+  // Opt-in embed options, so other booking links are unaffected:
+  //   ?commit=1  -> require a "will you show up" commitment checkbox before booking
+  //   ?notes=0   -> hide the optional Notes field
+  const embedOptions = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    return { requireCommit: params.get("commit") === "1", hideNotes: params.get("notes") === "0" };
+  }, []);
+  const [committed, setCommitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
   const [confirmation, setConfirmation] = useState(null);
@@ -239,6 +247,11 @@ export default function BookingWidget({ slug }) {
     setShowAllSlots(false);
   }, [selectedDayKey]);
 
+  // A commitment applies to one specific time — reset it whenever the slot changes.
+  useEffect(() => {
+    setCommitted(false);
+  }, [selectedSlot]);
+
   // Fetch slots for the whole visible 7-day window in one call, not just
   // the selected day — the day picker needs every day's slot count up
   // front to grey out days with nothing available.
@@ -313,6 +326,7 @@ export default function BookingWidget({ slug }) {
   async function submitBooking(e) {
     e.preventDefault();
     if (!selectedSlot) return;
+    if (embedOptions.requireCommit && !committed) return;
     setSubmitting(true);
     setBookError("");
     try {
@@ -646,19 +660,42 @@ export default function BookingWidget({ slug }) {
                 className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
               />
             </div>
-            <div>
-              <label className="text-sm font-medium block mb-1.5">Notes (optional)</label>
-              <textarea
-                value={form.notes}
-                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-                rows={2}
-                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-              />
-            </div>
+            {!embedOptions.hideNotes && (
+              <div>
+                <label className="text-sm font-medium block mb-1.5">Notes (optional)</label>
+                <textarea
+                  value={form.notes}
+                  onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
+                  rows={2}
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                />
+              </div>
+            )}
+            {embedOptions.requireCommit && (
+              <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                <p className="text-sm text-gray-800 mb-3">
+                  Do you commit to showing up at your scheduled time at{" "}
+                  <span className="font-semibold">
+                    {timeLabel(selectedSlot.startUTC, timezone)} {dayLabel(new Date(selectedSlot.startUTC), timezone)} ({timezone})
+                  </span>
+                  , missed calls are costly for businesses like ours so we appreciate your consideration?
+                </p>
+                <label className="flex items-start gap-2.5 text-sm font-medium text-gray-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    required
+                    checked={committed}
+                    onChange={(e) => setCommitted(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-blue-600"
+                  />
+                  Yes I keep my word, and will show up on time.
+                </label>
+              </div>
+            )}
             {bookError && <p className="text-sm text-red-600">{bookError}</p>}
             <button
               type="submit"
-              disabled={submitting || (!form.email && !form.phone)}
+              disabled={submitting || (!form.email && !form.phone) || (embedOptions.requireCommit && !committed)}
               className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting && <Loader2 size={14} className="animate-spin" />}
