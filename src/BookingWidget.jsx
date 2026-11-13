@@ -32,7 +32,7 @@ function timeLabel(iso, timeZone) {
 // "Tuesday, 10 November at 2:30 pm AEDT" — the details page's headline.
 // The zone's short name prefers a real abbreviation (en-AU knows AEDT /
 // AWST, en-US knows EST / PDT) over a bare "GMT+11".
-function bookingWhenHeadline(iso, timeZone) {
+function bookingWhenParts(iso, timeZone) {
   const d = new Date(iso);
   const part = (opts) => new Intl.DateTimeFormat("en-AU", { timeZone, ...opts }).format(d);
   const day = `${part({ weekday: "long" })}, ${part({ day: "numeric" })} ${part({ month: "long" })}`;
@@ -43,6 +43,11 @@ function bookingWhenHeadline(iso, timeZone) {
         ?.value || ""
   );
   const zone = names.find((n) => n && !n.startsWith("GMT")) || names[0];
+  return { day, time, zone, year: part({ year: "numeric" }) };
+}
+
+function bookingWhenHeadline(iso, timeZone) {
+  const { day, time, zone } = bookingWhenParts(iso, timeZone);
   return `${day} at ${time}${zone ? ` ${zone}` : ""}`;
 }
 
@@ -488,8 +493,28 @@ export default function BookingWidget({ slug }) {
         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
           <CheckCircle2 size={36} className="text-emerald-500 mx-auto mb-4" />
           <h1 className="text-lg font-bold mb-1">You're booked!</h1>
-          <p className="text-sm text-gray-600 mb-1">{calendarInfo.name}</p>
-          <p className="text-sm font-medium text-gray-900">{confirmation.whenText}</p>
+          <p className="text-sm text-gray-600 mb-5">{calendarInfo.name}</p>
+          {selectedSlot ? (
+            (() => {
+              // The time they booked, big and unmissable, in the timezone they picked.
+              const when = bookingWhenParts(selectedSlot.startUTC, timezone);
+              return (
+                <div className="rounded-xl border-2 border-blue-200 bg-blue-50 px-4 py-5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-700 mb-2">Your appointment</p>
+                  <p className="text-xl font-semibold text-gray-900">
+                    {when.day} {when.year}
+                  </p>
+                  <p className="text-4xl font-bold text-blue-700 my-1 tabular-nums">{when.time}</p>
+                  <p className="text-sm text-gray-600">
+                    {when.zone ? `${when.zone} · ` : ""}
+                    {timezone.replace(/_/g, " ")} time
+                  </p>
+                </div>
+              );
+            })()
+          ) : (
+            <p className="text-lg font-semibold text-gray-900">{confirmation.whenText}</p>
+          )}
           <p className="text-xs text-gray-400 mt-4">A confirmation has been sent to you.</p>
         </div>
       </div>
