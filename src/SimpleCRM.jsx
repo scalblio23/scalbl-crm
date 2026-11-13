@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   AreaChart,
   Area,
@@ -4798,6 +4798,47 @@ export default function SimpleCRM() {
   const reportsBookedList = reportsCallLog
     .filter((e) => e.status === "Booked")
     .sort((a, b) => new Date(b.calledAt) - new Date(a.calledAt));
+
+  // "Leads called" — every lead dialled in the range (same date / tag /
+  // rep filters as the rest of the page), one row per lead, with each of
+  // its calls listed when the row is opened. Staff only.
+  const [reportsLeadSearch, setReportsLeadSearch] = useState("");
+  const [reportsLeadLimit, setReportsLeadLimit] = useState(100);
+  const [reportsOpenLeadKey, setReportsOpenLeadKey] = useState(null);
+  const reportsLeadsCalled = useMemo(() => {
+    if (page !== "reports" || isClientRole) return [];
+    const statusById = new Map(contacts.map((c) => [c.id, c.status]));
+    const byLead = new Map();
+    for (const e of reportsCallLog) {
+      const key = e.leadId != null ? `id:${e.leadId}` : `ph:${e.phone || e.name}`;
+      if (!byLead.has(key)) byLead.set(key, { key, leadId: e.leadId, calls: [] });
+      byLead.get(key).calls.push(e);
+    }
+    return [...byLead.values()]
+      .map((g) => {
+        const calls = g.calls.sort((a, b) => new Date(b.calledAt) - new Date(a.calledAt));
+        const last = calls[0];
+        return {
+          ...g,
+          calls,
+          name: last.name,
+          phone: last.phone,
+          tag: last.tag,
+          lastCalledAt: last.calledAt,
+          lastOutcome: last.status,
+          currentStatus: statusById.get(g.leadId) || null,
+          totalSeconds: calls.reduce((s, e) => s + (e.durationSeconds || 0), 0),
+          reps: [...new Set(calls.map((e) => e.userName || "Unknown"))],
+        };
+      })
+      .sort((a, b) => new Date(b.lastCalledAt) - new Date(a.lastCalledAt));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, isClientRole, callLog, contacts, reportsFrom, reportsTo, reportsUserFilter, reportsTagFilter]);
+  const reportsLeadsShown = reportsLeadSearch.trim()
+    ? reportsLeadsCalled.filter((l) =>
+        `${l.name} ${l.phone} ${l.tag}`.toLowerCase().includes(reportsLeadSearch.trim().toLowerCase())
+      )
+    : reportsLeadsCalled;
 
   // ---------- Working Hours ----------
   // See computeWorkingHours (module scope) for the rules. Rows are
@@ -9671,6 +9712,125 @@ export default function SimpleCRM() {
                   </table>
                 </div>
               </div>
+
+              {!reportsIsClientView && (
+                <div className="border border-gray-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="font-semibold text-sm">
+                      Leads called ({reportsLeadsCalled.length})
+                      <span className="ml-2 font-normal text-xs text-gray-400">
+                        {reportsUserFilter === "All" ? "all reps" : reportsUserFilter} · click a lead to see each call
+                      </span>
+                    </div>
+                    <input
+                      value={reportsLeadSearch}
+                      onChange={(e) => {
+                        setReportsLeadSearch(e.target.value);
+                        setReportsLeadLimit(100);
+                      }}
+                      placeholder="Search name, phone or tag…"
+                      className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-gray-400 w-56"
+                    />
+                  </div>
+                  <div className="max-h-[32rem] overflow-auto">
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0 bg-white">
+                        <tr className="text-left text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                          <th className="px-5 py-2.5 font-medium">Lead</th>
+                          <th className="px-5 py-2.5 font-medium">Phone</th>
+                          <th className="px-5 py-2.5 font-medium">Tag</th>
+                          <th className="px-5 py-2.5 font-medium text-right">Calls</th>
+                          <th className="px-5 py-2.5 font-medium">Last outcome</th>
+                          <th className="px-5 py-2.5 font-medium">Status now</th>
+                          <th className="px-5 py-2.5 font-medium">Called by</th>
+                          <th className="px-5 py-2.5 font-medium text-right">Talk time</th>
+                          <th className="px-5 py-2.5 font-medium">Last called</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reportsLeadsShown.slice(0, reportsLeadLimit).map((lead) => {
+                          const open = reportsOpenLeadKey === lead.key;
+                          return (
+                            <Fragment key={lead.key}>
+                              <tr
+                                onClick={() => setReportsOpenLeadKey(open ? null : lead.key)}
+                                className="border-b border-gray-50 hover:bg-gray-50 cursor-pointer"
+                              >
+                                <td className="px-5 py-2.5 font-medium whitespace-nowrap">
+                                  <ChevronDown
+                                    size={13}
+                                    className={`inline mr-1 text-gray-400 transition-transform ${open ? "" : "-rotate-90"}`}
+                                  />
+                                  {lead.name || "—"}
+                                </td>
+                                <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{lead.phone}</td>
+                                <td className="px-5 py-2.5">
+                                  {lead.tag ? (
+                                    <span className={`text-xs px-2.5 py-1 rounded-full border whitespace-nowrap ${tagColorClasses(lead.tag)}`}>
+                                      {lead.tag}
+                                    </span>
+                                  ) : (
+                                    <span className="text-gray-300 text-xs">—</span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-2.5 text-right tabular-nums">{lead.calls.length}</td>
+                                <td className="px-5 py-2.5 text-gray-600 whitespace-nowrap">{lead.lastOutcome || "—"}</td>
+                                <td className="px-5 py-2.5">
+                                  {lead.currentStatus ? (
+                                    <span className={`${STATUS_CHIP} ${statusSolidClass(lead.currentStatus)}`}>{lead.currentStatus}</span>
+                                  ) : (
+                                    <span className="text-gray-300 text-xs">—</span>
+                                  )}
+                                </td>
+                                <td className="px-5 py-2.5 text-gray-500 whitespace-nowrap">{lead.reps.join(", ")}</td>
+                                <td className="px-5 py-2.5 text-right tabular-nums text-gray-500">
+                                  {formatCallDuration(lead.totalSeconds * 1000)}
+                                </td>
+                                <td className="px-5 py-2.5 text-gray-400 whitespace-nowrap">
+                                  {new Date(lead.lastCalledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                                </td>
+                              </tr>
+                              {open &&
+                                lead.calls.map((c) => (
+                                  <tr key={c.id} className="bg-gray-50/70 border-b border-gray-50 text-xs">
+                                    <td className="pl-10 pr-5 py-2 text-gray-500 whitespace-nowrap" colSpan={3}>
+                                      {new Date(c.calledAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                                    </td>
+                                    <td className="px-5 py-2" />
+                                    <td className="px-5 py-2 text-gray-600 whitespace-nowrap">{c.status || "—"}</td>
+                                    <td className="px-5 py-2 text-gray-500" colSpan={1}>
+                                      {c.notes ? <span title={c.notes}>{c.notes.length > 40 ? `${c.notes.slice(0, 40)}…` : c.notes}</span> : ""}
+                                    </td>
+                                    <td className="px-5 py-2 text-gray-500 whitespace-nowrap">{c.userName || "Unknown"}</td>
+                                    <td className="px-5 py-2 text-right tabular-nums text-gray-500">
+                                      {formatCallDuration((c.durationSeconds || 0) * 1000)}
+                                    </td>
+                                    <td className="px-5 py-2" />
+                                  </tr>
+                                ))}
+                            </Fragment>
+                          );
+                        })}
+                        {reportsLeadsShown.length === 0 && (
+                          <tr>
+                            <td colSpan={9} className="px-5 py-8 text-center text-sm text-gray-400">
+                              No leads called in this range
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  {reportsLeadsShown.length > reportsLeadLimit && (
+                    <button
+                      onClick={() => setReportsLeadLimit((n) => n + 200)}
+                      className="w-full py-2.5 text-sm text-gray-500 hover:bg-gray-50 border-t border-gray-100"
+                    >
+                      Show more ({reportsLeadsShown.length - reportsLeadLimit} more)
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
