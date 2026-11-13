@@ -523,6 +523,9 @@ export default function BookingWidget({ slug }) {
 
         {!selectedSlot ? (
           <div className="p-4 sm:p-6">
+            {!rescheduling && (
+              <h2 className="text-lg font-medium text-gray-900 text-center mb-4">Please choose a time below to book in your meeting</h2>
+            )}
             <div className="flex items-center justify-between mb-4">
               <button
                 onClick={() => { stopAutoPick(); setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; }); }}
