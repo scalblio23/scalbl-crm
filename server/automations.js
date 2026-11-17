@@ -32,7 +32,7 @@ import {
   getRunsWithSentEmails,
   claimOneTimeJob,
 } from "./db.js";
-import { sendCalendarEmail, missingEmailEnv } from "./email.js";
+import { sendEmail, missingEmailEnv } from "./email.js";
 import { sendCrazytelSms } from "./crazytelSms.js";
 import { SmsStore } from "./smsStore.js";
 import { parseDids, didsForTags, auToInternational } from "./smsPolicy.js";
@@ -154,12 +154,12 @@ function templateData(context) {
 // next to emails sent by hand. Keyed by run + step, so the backfill
 // below and a live send can never add the same email twice.
 // Best-effort: a failure here never fails the step.
-async function recordAutomationEmail({ stepKey, automationName, to, subject, html, text, sentAt }) {
+async function recordAutomationEmail({ stepKey, automationName, to, subject, html, text, sentAt, fromName }) {
   try {
     await saveOutgoingEmail({
       resendId: `auto:${stepKey}`,
       fromEmail: process.env.RESEND_FROM_EMAIL || "",
-      fromName: process.env.RESEND_FROM_NAME || "",
+      fromName: fromName ?? (process.env.RESEND_FROM_NAME || ""),
       to: String(to || "").trim().toLowerCase(),
       subject,
       text,
@@ -172,6 +172,14 @@ async function recordAutomationEmail({ stepKey, automationName, to, subject, htm
   }
 }
 
+// The email step's optional "From name" (merge fields allowed, e.g.
+// {{client}}). Blank → undefined, so sendEmail falls back to the CRM's
+// default sender name (RESEND_FROM_NAME). The address never changes.
+function automationFromName(step, data) {
+  const name = fillTemplate(step?.fromName || "", data).replace(/[<>"\r\n]/g, "").trim().slice(0, 100);
+  return name || undefined;
+}
+
 async function runStep(step, automation, context, stepKey, log = {}) {
   const data = templateData(context);
   if (step.type === "email") {
@@ -181,7 +189,9 @@ async function runStep(step, automation, context, stepKey, log = {}) {
     if (missingEmailEnv().length) { log.skipped = "Email sending is not set up"; return; }
     const body = fillTemplate(step.body, data);
     const html = body.replace(/\n/g, "<br/>");
-    await sendCalendarEmail({ to: context.contact.email, subject: log.text, html });
+    const fromName = automationFromName(step, data);
+    if (fromName) log.from = fromName;
+    await sendEmail({ to: context.contact.email, subject: log.text, html, fromName });
     await recordAutomationEmail({
       stepKey,
       automationName: automation.name,
@@ -189,6 +199,7 @@ async function runStep(step, automation, context, stepKey, log = {}) {
       subject: log.text,
       html,
       text: body,
+      fromName,
     });
   } else if (step.type === "sms") {
     log.to = context.contact?.phone || "";
@@ -249,6 +260,7 @@ export async function backfillAutomationEmails() {
         html: body.replace(/\n/g, "<br/>"),
         text: body,
         sentAt: entry.at || null,
+        fromName: entry.from || undefined,
       });
       added++;
     }
