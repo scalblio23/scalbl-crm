@@ -11536,6 +11536,18 @@ export default function SimpleCRM() {
                                   </div>
                                 )}
                                 {action.type === "email" && (
+                                  <label className="block mb-2">
+                                    <span className="block text-xs font-medium text-gray-500 mb-1">From name</span>
+                                    <input
+                                      value={action.fromName || ""}
+                                      onChange={(e) => updateAutomationAction(i, { fromName: e.target.value })}
+                                      placeholder="Optional, e.g. Scalbl Bookings. Blank uses the default sender name"
+                                      maxLength={100}
+                                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                                    />
+                                  </label>
+                                )}
+                                {action.type === "email" && (
                                   <input
                                     value={action.subject}
                                     onChange={(e) => updateAutomationAction(i, { subject: e.target.value })}
