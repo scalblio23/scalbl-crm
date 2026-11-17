@@ -172,11 +172,14 @@ async function recordAutomationEmail({ stepKey, automationName, to, subject, htm
   }
 }
 
-// The email step's optional "From name" (merge fields allowed, e.g.
-// {{client}}). Blank → undefined, so sendEmail falls back to the CRM's
-// default sender name (RESEND_FROM_NAME). The address never changes.
-function automationFromName(step, data) {
-  const name = fillTemplate(step?.fromName || "", data).replace(/[<>"\r\n]/g, "").trim().slice(0, 100);
+// The name this automation's emails are sent from — set once per
+// automation (merge fields allowed, e.g. "{{tag}} Team"). A step-level
+// fromName is only a fallback for automations saved while that briefly
+// existed. Blank → undefined, so sendEmail uses the CRM's default
+// sender name (RESEND_FROM_NAME). The address never changes.
+function automationFromName(automation, step, data) {
+  const raw = automation?.fromName || step?.fromName || "";
+  const name = fillTemplate(raw, data).replace(/[<>"\r\n]/g, "").trim().slice(0, 100);
   return name || undefined;
 }
 
@@ -189,7 +192,7 @@ async function runStep(step, automation, context, stepKey, log = {}) {
     if (missingEmailEnv().length) { log.skipped = "Email sending is not set up"; return; }
     const body = fillTemplate(step.body, data);
     const html = body.replace(/\n/g, "<br/>");
-    const fromName = automationFromName(step, data);
+    const fromName = automationFromName(automation, step, data);
     if (fromName) log.from = fromName;
     await sendEmail({ to: context.contact.email, subject: log.text, html, fromName });
     await recordAutomationEmail({
@@ -232,6 +235,66 @@ async function runStep(step, automation, context, stepKey, log = {}) {
   }
   // "call" isn't executed automatically yet — see its disabled option
   // in the Automations builder UI.
+}
+
+// "Test this automation" in the builder: runs every step right now
+// against a test recipient instead of a real lead. Emails and texts go
+// only to the test email / mobile (subject and text prefixed "[TEST]"),
+// a "Send SMS to user" step texts the test mobile instead of the team
+// member, waits are skipped, and nothing is written to Conversations
+// or the run log. Merge fields get sample values. Uses the automation
+// as passed in (the unsaved draft), so changes can be tried before Save.
+export async function testAutomation(automation, { name, email, phone } = {}) {
+  const now = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const context = {
+    contact: { name: String(name || "").trim() || "Test Lead", email: String(email || "").trim(), phone: String(phone || "").trim() },
+    tag: automation.triggerConfig?.tag || "Test tag",
+    calendarName: "Test calendar",
+    whenText: now.toLocaleString("en-AU", { dateStyle: "full", timeStyle: "short", timeZone: "Australia/Sydney" }),
+    timezone: "Australia/Sydney",
+  };
+  const data = templateData(context);
+  const results = [];
+  const stamp = Date.now();
+  const actions = Array.isArray(automation.actions) ? automation.actions : [];
+  for (let i = 0; i < actions.length; i++) {
+    const step = actions[i];
+    const r = { step: i + 1, type: step.type };
+    try {
+      if (step.type === "wait") {
+        r.status = "skipped";
+        r.detail = "Waits are skipped in a test";
+      } else if (step.type === "email") {
+        r.to = context.contact.email;
+        if (!r.to) { r.status = "skipped"; r.detail = "Enter a test email to test email steps"; }
+        else if (missingEmailEnv().length) { r.status = "skipped"; r.detail = "Email sending is not set up"; }
+        else {
+          const subject = `[TEST] ${fillTemplate(step.subject, data) || automation.name || "Automation"}`;
+          const fromName = automationFromName(automation, step, data);
+          await sendEmail({ to: r.to, subject, html: fillTemplate(step.body, data).replace(/\n/g, "<br/>"), fromName });
+          r.status = "sent";
+          r.detail = `"${subject}"${fromName ? ` from ${fromName}` : ""}`;
+        }
+      } else if (step.type === "sms" || step.type === "sms_user") {
+        r.to = context.contact.phone;
+        if (!r.to) { r.status = "skipped"; r.detail = "Enter a test mobile to test SMS steps"; }
+        else {
+          const text = `[TEST] ${fillTemplate(step.body, data)}`;
+          await sendAutomationSms(r.to, text, context, `automation-test-${stamp}-${i}`);
+          r.status = "sent";
+          r.detail = step.type === "sms_user" ? "Team text sent to your test mobile instead" : text.slice(0, 80);
+        }
+      } else {
+        r.status = "skipped";
+        r.detail = "This step type isn't run automatically";
+      }
+    } catch (err) {
+      r.status = "failed";
+      r.detail = String(err.message || err).slice(0, 300);
+    }
+    results.push(r);
+  }
+  return results;
 }
 
 const LOGGED_STEP_TYPES = new Set(["email", "sms", "sms_user"]);

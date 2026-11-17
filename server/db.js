@@ -873,6 +873,9 @@ export async function ensureSchema() {
     // which a fully set-up production database skips — so saving a user
     // failed with "column phone does not exist".
     await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT`);
+    // The name an automation's emails are sent from (blank = the CRM's
+    // default sender name). Same always-run spot so production gets it.
+    await query(`ALTER TABLE automations ADD COLUMN IF NOT EXISTS from_name TEXT`);
     // Extra calendars a booking calendar checks for clashes, on top of
     // the Google/Outlook calendar it writes bookings to: more calendars
     // on the connected accounts (ids), and other CRM booking calendars
@@ -3815,6 +3818,7 @@ function automationFromRow(r) {
     triggerConfig: r.trigger_config || {},
     actions: r.actions || [],
     active: r.active,
+    fromName: r.from_name || "",
     createdAt: r.created_at,
   };
 }
@@ -3855,7 +3859,8 @@ export async function updateAutomation(id, patch) {
        trigger_type = COALESCE($3, trigger_type),
        trigger_config = COALESCE($4::jsonb, trigger_config),
        actions = COALESCE($5::jsonb, actions),
-       active = COALESCE($6, active)
+       active = COALESCE($6, active),
+       from_name = CASE WHEN $7::boolean THEN $8 ELSE from_name END
      WHERE id = $1
      RETURNING *`,
     [
@@ -3865,6 +3870,9 @@ export async function updateAutomation(id, patch) {
       patch.triggerConfig ? JSON.stringify(patch.triggerConfig) : null,
       patch.actions ? JSON.stringify(patch.actions) : null,
       patch.active ?? null,
+      // fromName "" clears it (back to the default sender name).
+      patch.fromName !== undefined,
+      String(patch.fromName ?? "").replace(/[<>"\r\n]/g, "").trim().slice(0, 100),
     ]
   );
   return rows[0] ? automationFromRow(rows[0]) : null;
