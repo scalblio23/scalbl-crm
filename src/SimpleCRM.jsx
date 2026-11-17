@@ -1798,7 +1798,15 @@ export default function SimpleCRM() {
     const draft = {
       triggerType: openAutomation.triggerType,
       triggerConfig: openAutomation.triggerConfig || {},
-      actions: openAutomation.actions || [],
+      // Step-level fromName (briefly per email step) is folded into the
+      // automation-level one below, so it's dropped from the steps here.
+      actions: (openAutomation.actions || []).map(({ fromName: _stepFromName, ...a }) => a),
+      // One sender name for the whole automation. Automations saved
+      // while it briefly lived on each email step start from that.
+      fromName:
+        openAutomation.fromName ||
+        (openAutomation.actions || []).find((a) => a.type === "email" && a.fromName)?.fromName ||
+        "",
     };
     setAutomationDraft(draft);
     // A snapshot of what's actually persisted, so the builder can tell
@@ -1811,6 +1819,34 @@ export default function SimpleCRM() {
   }, [openAutomationId]);
   const automationHasUnsavedChanges =
     automationDraft && savedAutomationSnapshot !== null && JSON.stringify(automationDraft) !== savedAutomationSnapshot;
+
+  // "Test this automation" panel — runs the current draft's steps now
+  // against a test email / mobile (see testAutomation on the server).
+  const [automationTestRecipient, setAutomationTestRecipient] = useState({ name: "", email: "", phone: "" });
+  const [automationTestBusy, setAutomationTestBusy] = useState(false);
+  const [automationTestResults, setAutomationTestResults] = useState(null);
+  const [automationTestError, setAutomationTestError] = useState("");
+  useEffect(() => {
+    setAutomationTestResults(null);
+    setAutomationTestError("");
+  }, [openAutomationId]);
+  const runAutomationTest = async () => {
+    if (!openAutomation || !automationDraft) return;
+    setAutomationTestBusy(true);
+    setAutomationTestError("");
+    setAutomationTestResults(null);
+    try {
+      const { results } = await api.post(`/api/automations?action=test`, {
+        automation: { name: openAutomation.name, ...automationDraft },
+        recipient: automationTestRecipient,
+      });
+      setAutomationTestResults(results || []);
+    } catch (err) {
+      setAutomationTestError(err.message || "The test couldn't run.");
+    } finally {
+      setAutomationTestBusy(false);
+    }
+  };
 
   // Recent activity for the opened automation — the actual answer to
   // "did this fire": zero rows means the trigger never matched at all
@@ -11375,7 +11411,8 @@ export default function SimpleCRM() {
                 )}
 
                 {automationDraft && (
-                  <div className="p-4 md:p-8 max-w-xl space-y-8">
+                  <div className="p-4 md:p-8 flex flex-col lg:flex-row gap-8 items-start">
+                  <div className="w-full max-w-xl space-y-8">
                     <div className="border border-gray-100 rounded-lg p-5 space-y-4">
                       <h2 className="text-base font-bold flex items-center gap-2">
                         <Zap size={16} className="text-gray-400" /> Trigger
@@ -11420,6 +11457,22 @@ export default function SimpleCRM() {
                           />
                         </div>
                       )}
+                    </div>
+
+                    <div className="border border-gray-100 rounded-lg p-5 space-y-2">
+                      <h2 className="text-base font-bold flex items-center gap-2">
+                        <Mail size={16} className="text-gray-400" /> Send emails as
+                      </h2>
+                      <input
+                        value={automationDraft.fromName || ""}
+                        onChange={(e) => setAutomationDraft((d) => ({ ...d, fromName: e.target.value }))}
+                        placeholder="e.g. Bright Force Electrical. Blank uses the default sender name"
+                        maxLength={100}
+                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
+                      />
+                      <p className="text-xs text-gray-500">
+                        The name every email in this automation comes from. Merge fields work, e.g. {"{{tag}}"} Team.
+                      </p>
                     </div>
 
                     <div className="space-y-4">
@@ -11534,18 +11587,6 @@ export default function SimpleCRM() {
                                       A number typed here is used instead of the user's saved phone.
                                     </p>
                                   </div>
-                                )}
-                                {action.type === "email" && (
-                                  <label className="block mb-2">
-                                    <span className="block text-xs font-medium text-gray-500 mb-1">From name</span>
-                                    <input
-                                      value={action.fromName || ""}
-                                      onChange={(e) => updateAutomationAction(i, { fromName: e.target.value })}
-                                      placeholder="Optional, e.g. Scalbl Bookings. Blank uses the default sender name"
-                                      maxLength={100}
-                                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400"
-                                    />
-                                  </label>
                                 )}
                                 {action.type === "email" && (
                                   <input
@@ -11684,6 +11725,71 @@ export default function SimpleCRM() {
                         </div>
                       )}
                     </div>
+                  </div>
+
+                  <div className="w-full lg:w-80 lg:sticky lg:top-6 border border-gray-200 rounded-lg p-5 space-y-3 bg-gray-50/60">
+                    <h2 className="text-base font-bold flex items-center gap-2">
+                      <Play size={15} className="text-gray-400" /> Test this automation
+                    </h2>
+                    <p className="text-xs text-gray-500">
+                      Runs every step now, sent only to the details below (subjects and texts start with [TEST]). Waits are
+                      skipped and nothing is saved to the CRM. Uses what's on screen, even if not saved yet.
+                    </p>
+                    <input
+                      value={automationTestRecipient.name}
+                      onChange={(e) => setAutomationTestRecipient((r) => ({ ...r, name: e.target.value }))}
+                      placeholder="Name for {{name}} (optional)"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                    />
+                    <input
+                      type="email"
+                      value={automationTestRecipient.email}
+                      onChange={(e) => setAutomationTestRecipient((r) => ({ ...r, email: e.target.value }))}
+                      placeholder="Test email"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                    />
+                    <input
+                      value={automationTestRecipient.phone}
+                      onChange={(e) => setAutomationTestRecipient((r) => ({ ...r, phone: e.target.value }))}
+                      placeholder="Test mobile, e.g. 0412 345 678"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                    />
+                    <button
+                      onClick={runAutomationTest}
+                      disabled={
+                        automationTestBusy ||
+                        automationDraft.actions.length === 0 ||
+                        (!automationTestRecipient.email.trim() && !automationTestRecipient.phone.trim())
+                      }
+                      className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {automationTestBusy ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                      Send test
+                    </button>
+                    {automationTestError && <p className="text-xs text-red-600">{automationTestError}</p>}
+                    {automationTestResults && (
+                      <div className="space-y-1.5 pt-1">
+                        {automationTestResults.length === 0 && <p className="text-xs text-gray-500">No steps to run.</p>}
+                        {automationTestResults.map((r) => (
+                          <div key={r.step} className="text-xs bg-white border border-gray-100 rounded-md px-2.5 py-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium text-gray-700">
+                                Step {r.step}: {{ email: "Email", sms: "SMS", sms_user: "SMS to user", wait: "Wait" }[r.type] || r.type}
+                              </span>
+                              <span
+                                className={
+                                  r.status === "sent" ? "text-emerald-600 font-semibold" : r.status === "failed" ? "text-red-600 font-semibold" : "text-gray-400"
+                                }
+                              >
+                                {r.status === "sent" ? "Sent" : r.status === "failed" ? "Failed" : "Skipped"}
+                              </span>
+                            </div>
+                            {r.detail && <p className="text-gray-500 mt-0.5 break-words">{r.detail}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   </div>
                 )}
               </>

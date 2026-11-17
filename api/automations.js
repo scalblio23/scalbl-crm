@@ -12,6 +12,7 @@ import {
   getAutomationRunsByAutomationId,
 } from "../server/db.js";
 import { requireAuth, forbidWithoutTab } from "../server/auth.js";
+import { testAutomation } from "../server/automations.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
@@ -26,6 +27,17 @@ export default async function handler(req, res) {
 
     if (req.method === "GET") {
       return res.status(200).json(await getAutomations());
+    }
+
+    // POST ?action=test — "Test this automation": runs the steps sent in
+    // the body (the builder's current draft) against a test recipient.
+    if (req.method === "POST" && req.query.action === "test") {
+      const { automation, recipient } = req.body || {};
+      if (!automation || !Array.isArray(automation.actions)) return res.status(400).json({ error: "Missing automation steps" });
+      if (!recipient?.email && !recipient?.phone) {
+        return res.status(400).json({ error: "Enter a test email and/or mobile number" });
+      }
+      return res.status(200).json({ results: await testAutomation(automation, recipient) });
     }
 
     if (req.method === "POST") {
