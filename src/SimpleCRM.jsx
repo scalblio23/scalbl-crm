@@ -619,6 +619,14 @@ function workHoursParts(ms) {
   for (const { type, value } of workHoursTzFormatter.formatToParts(new Date(ms))) p[type] = value;
   return { day: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
 }
+// Adelaide calendar day (YYYY-MM-DD) a call log entry falls on, or ""
+// if calledAt can't be parsed. Used by the Reports and Portal date
+// filters so they agree with Working Hours.
+function callLogDay(calledAt) {
+  const ms = new Date(calledAt).getTime();
+  if (Number.isNaN(ms)) return "";
+  return workHoursParts(ms).day;
+}
 function workHoursTime(ms) {
   return workHoursParts(ms).time;
 }
@@ -4762,12 +4770,12 @@ export default function SimpleCRM() {
   const [wrapUp, setWrapUp] = useState(null); // { lead, status, notes, durationMs, secondsLeft }
 
   // ---------- Reports ----------
-  const isoToday = () => new Date().toISOString().slice(0, 10);
-  const isoDaysAgo = (n) => {
-    const d = new Date();
-    d.setDate(d.getDate() - n);
-    return d.toISOString().slice(0, 10);
-  };
+  // Date pickers and call bucketing both use the Adelaide calendar day
+  // (same as Working Hours). Using UTC here meant calls made before
+  // 10:30am local landed on "yesterday", and "today" itself was
+  // yesterday's date until 10:30am — so picking today showed nothing.
+  const isoToday = () => workHoursParts(Date.now()).day;
+  const isoDaysAgo = (n) => workHoursParts(Date.now() - n * 24 * 60 * 60 * 1000).day;
   const [reportsFrom, setReportsFrom] = useState(() => isoDaysAgo(30));
   const [reportsTo, setReportsTo] = useState(() => isoToday());
   const [reportsUserFilter, setReportsUserFilter] = useState("All");
@@ -4781,7 +4789,8 @@ export default function SimpleCRM() {
   const reportsTagOptions = isClientRole ? authUser?.allowedTags || [] : contactTagNames;
   const reportsCallLog = callLog.filter((e) => {
     if (!e.calledAt) return false;
-    const d = String(e.calledAt).slice(0, 10);
+    const d = callLogDay(e.calledAt);
+    if (!d) return false;
     if (reportsFrom && d < reportsFrom) return false;
     if (reportsTo && d > reportsTo) return false;
     if (reportsUserFilter !== "All" && (e.userName || "Unknown") !== reportsUserFilter) return false;
@@ -4948,7 +4957,8 @@ export default function SimpleCRM() {
     ? callLog.filter((e) => {
         if (!portalEffectiveTags.includes(e.tag)) return false;
         if (!e.calledAt) return false;
-        const d = String(e.calledAt).slice(0, 10);
+        const d = callLogDay(e.calledAt);
+        if (!d) return false;
         if (portalFrom && d < portalFrom) return false;
         if (portalTo && d > portalTo) return false;
         return true;
