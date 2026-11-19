@@ -1617,6 +1617,7 @@ export default function SimpleCRM() {
       minNoticeHours: String(openCalendar.minNoticeHours),
       bookingWindowDays: String(openCalendar.bookingWindowDays),
       maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
+      requireAttendanceConfirm: Boolean(openCalendar.requireAttendanceConfirm),
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     setCalendarNameDraft(openCalendar.name);
@@ -10933,6 +10934,7 @@ export default function SimpleCRM() {
                                 minNoticeHours: Number(rulesDraft.minNoticeHours),
                                 bookingWindowDays: Number(rulesDraft.bookingWindowDays),
                                 maxBookingsPerDay: rulesDraft.maxBookingsPerDay === "" ? null : Number(rulesDraft.maxBookingsPerDay),
+                                requireAttendanceConfirm: Boolean(rulesDraft.requireAttendanceConfirm),
                               })
                             }
                             disabled={savingCalendar}
@@ -10986,6 +10988,21 @@ export default function SimpleCRM() {
                             className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
                           />
                         </div>
+                        <label className="flex items-start gap-2.5 border border-gray-200 rounded-lg p-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(rulesDraft.requireAttendanceConfirm)}
+                            onChange={(e) => setRulesDraft((d) => ({ ...d, requireAttendanceConfirm: e.target.checked }))}
+                            className="mt-0.5 h-4 w-4 accent-blue-600"
+                          />
+                          <span>
+                            <span className="block text-sm font-medium">Require attendance confirmation</span>
+                            <span className="block text-xs text-gray-500 mt-0.5">
+                              Before booking, people must tick "Yes I keep my word and will show up to the call" under a
+                              note with their call's time, date and timezone.
+                            </span>
+                          </span>
+                        </label>
                       </div>
                     )}
 

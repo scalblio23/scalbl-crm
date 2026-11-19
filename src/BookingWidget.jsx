@@ -46,6 +46,13 @@ function bookingWhenParts(iso, timeZone) {
   return { day, time, zone, year: part({ year: "numeric" }) };
 }
 
+// "2:30 pm, Tuesday, 10 November, AEDT" — TIME, DATE, TIMEZONE for the
+// attendance-confirmation note.
+function commitWhen(iso, timeZone) {
+  const { day, time, zone } = bookingWhenParts(iso, timeZone);
+  return `${time}, ${day}, ${zone || timeZone}`;
+}
+
 function bookingWhenHeadline(iso, timeZone) {
   const { day, time, zone } = bookingWhenParts(iso, timeZone);
   return `${day} at ${time}${zone ? ` ${zone}` : ""}`;
@@ -123,6 +130,10 @@ export default function BookingWidget({ slug }) {
     const params = new URLSearchParams(window.location.search);
     return { requireCommit: params.get("commit") === "1", hideNotes: params.get("notes") === "0" };
   }, []);
+  // The attendance-confirmation box shows when the calendar has it
+  // switched on (Calendar settings → Booking rules) or the link asks
+  // for it with ?commit=1.
+  const requireCommit = embedOptions.requireCommit || Boolean(calendarInfo?.requireAttendanceConfirm);
   const [committed, setCommitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
@@ -331,7 +342,7 @@ export default function BookingWidget({ slug }) {
   async function submitBooking(e) {
     e.preventDefault();
     if (!selectedSlot) return;
-    if (embedOptions.requireCommit && !committed) return;
+    if (requireCommit && !committed) return;
     setSubmitting(true);
     setBookError("");
     try {
@@ -699,14 +710,12 @@ export default function BookingWidget({ slug }) {
                 />
               </div>
             )}
-            {embedOptions.requireCommit && (
+            {requireCommit && (
               <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
                 <p className="text-sm text-gray-800 mb-3">
-                  Do you commit to showing up at your scheduled time at{" "}
-                  <span className="font-semibold">
-                    {timeLabel(selectedSlot.startUTC, timezone)} {dayLabel(new Date(selectedSlot.startUTC), timezone)} ({timezone})
-                  </span>
-                  , missed calls are costly for businesses like ours so we appreciate your consideration?
+                  Please confirm your attendance for your call at{" "}
+                  <span className="font-semibold">{commitWhen(selectedSlot.startUTC, timezone)}</span>, no shows are costly to
+                  our business and we require your confirmation.
                 </p>
                 <label className="flex items-start gap-2.5 text-sm font-medium text-gray-900 cursor-pointer">
                   <input
@@ -716,14 +725,14 @@ export default function BookingWidget({ slug }) {
                     onChange={(e) => setCommitted(e.target.checked)}
                     className="mt-0.5 h-4 w-4 accent-blue-600"
                   />
-                  Yes I keep my word, and will show up on time.
+                  Yes I keep my word and will show up to the call
                 </label>
               </div>
             )}
             {bookError && <p className="text-sm text-red-600">{bookError}</p>}
             <button
               type="submit"
-              disabled={submitting || (!form.email && !form.phone) || (embedOptions.requireCommit && !committed)}
+              disabled={submitting || (!form.email && !form.phone) || (requireCommit && !committed)}
               className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {submitting && <Loader2 size={14} className="animate-spin" />}
