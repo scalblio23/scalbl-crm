@@ -75,6 +75,13 @@ export function loadSipConfig(env = process.env) {
     // of reusing the registration's connection.
     listenPort: Number(env.SIP_LISTEN_PORT) || 0,
     keepaliveSeconds: num(env.SIP_KEEPALIVE_SECONDS, 25),
+    // A connected call whose far end has sent no audio for this long is
+    // treated as dead (its hang-up never reached us) and ended, so it
+    // can't hold a channel forever — see Call.startMediaWatchdog. A call
+    // on hold is exempt. 0 turns it off.
+    mediaTimeoutSeconds: num(env.SIP_MEDIA_TIMEOUT_SECONDS, 120),
+    // Hard cap on any one connected call, as a backstop. 0 = no cap.
+    maxCallSeconds: num(env.SIP_MAX_CALL_SECONDS, 4 * 60 * 60),
     userAgent: env.SIP_USER_AGENT || "ScalblCRM-VoiceGateway/1.0",
   };
 }

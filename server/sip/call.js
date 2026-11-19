@@ -95,7 +95,44 @@ export class Call extends EventEmitter {
   setState(state) {
     if (this.state === state || this.isEnded) return;
     this.state = state;
+    if (state === "answered") this.startMediaWatchdog();
     this.emit("state", state);
+  }
+
+  // A connected call holds a SIP channel until a BYE says it's over. If
+  // that BYE never arrives (the far end or the network dropped it), the
+  // channel would stay "in use" forever and, once every channel is
+  // stuck, no one can dial ("No registered SIP trunk has a free
+  // channel"). So: no audio from the far end for mediaTimeoutSeconds
+  // (calls on hold excepted), or longer than maxCallSeconds overall,
+  // and the call is hung up and its channel released.
+  startMediaWatchdog() {
+    const quietMs = (Number(this.config.mediaTimeoutSeconds) || 0) * 1000;
+    const maxMs = (Number(this.config.maxCallSeconds) || 0) * 1000;
+    if (!quietMs && !maxMs) return;
+    let heldUntil = 0;
+    const check = () => {
+      if (this.isEnded || this.state !== "answered") return;
+      const now = Date.now();
+      if (this.rtp.paused) heldUntil = now; // on hold: silence is expected
+      const lastHeard = Math.max(this.rtp.lastPacketAt || 0, this.answeredAt || 0, heldUntil);
+      if (quietMs && now - lastHeard > quietMs) {
+        this.log.warn(`[sip] call ${this.remoteNumber || "?"}: no audio for ${Math.round((now - lastHeard) / 1000)}s — ending it`);
+        this.sendBye();
+        this.end("media-timeout", { sipReason: "No audio from the other side" });
+        return;
+      }
+      if (maxMs && this.answeredAt && now - this.answeredAt > maxMs) {
+        this.log.warn(`[sip] call ${this.remoteNumber || "?"}: over ${Math.round(maxMs / 60000)} min — ending it`);
+        this.sendBye();
+        this.end("max-duration", { sipReason: "Call reached the maximum length" });
+        return;
+      }
+      this.later(check, every);
+    };
+    // Check every 15s, or sooner when a limit is shorter than that.
+    const every = Math.min(15000, ...[quietMs, maxMs].filter(Boolean));
+    this.later(check, every);
   }
 
   later(fn, ms) {
