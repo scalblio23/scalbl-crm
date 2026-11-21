@@ -658,7 +658,7 @@ export default function BookingWidget({ slug }) {
   const atFirstMonth = monthKey <= todayKey.slice(0, 7);
   return (
     <div className="min-h-screen bg-gray-50 px-3 sm:px-6 py-4 sm:py-8">
-      <div className="max-w-6xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col md:flex-row">
+      <div className="max-w-6xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col md:flex-row">
         <aside className={`${mobileTimesOpen && !selectedSlot ? "hidden md:block" : ""} md:w-[30%] shrink-0 p-6 sm:p-8 border-b md:border-b-0 md:border-r border-gray-200`}>
           {selectedSlot && !rescheduling && (
             <button
