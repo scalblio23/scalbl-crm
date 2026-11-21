@@ -1648,6 +1648,7 @@ export default function SimpleCRM() {
       maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
       requireAttendanceConfirm: Boolean(openCalendar.requireAttendanceConfirm),
       sendCalendarInvite: Boolean(openCalendar.sendCalendarInvite),
+      attendanceConfirmText: openCalendar.attendanceConfirmText || "",
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     setCalendarNameDraft(openCalendar.name);
@@ -11050,6 +11051,7 @@ export default function SimpleCRM() {
                                 maxBookingsPerDay: rulesDraft.maxBookingsPerDay === "" ? null : Number(rulesDraft.maxBookingsPerDay),
                                 requireAttendanceConfirm: Boolean(rulesDraft.requireAttendanceConfirm),
                                 sendCalendarInvite: Boolean(rulesDraft.sendCalendarInvite),
+                                attendanceConfirmText: (rulesDraft.attendanceConfirmText || "").trim(),
                               })
                             }
                             disabled={savingCalendar}
@@ -11118,6 +11120,23 @@ export default function SimpleCRM() {
                             </span>
                           </span>
                         </label>
+                        {rulesDraft.requireAttendanceConfirm && (
+                          <div>
+                            <label className="text-xs font-medium block mb-1.5 text-gray-500">No-show warning wording</label>
+                            <textarea
+                              value={rulesDraft.attendanceConfirmText || ""}
+                              onChange={(e) => setRulesDraft((d) => ({ ...d, attendanceConfirmText: e.target.value }))}
+                              rows={4}
+                              maxLength={600}
+                              placeholder="Please confirm your attendance for your call at {time}, no shows are costly to our business and we require your confirmation."
+                              className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                            />
+                            <p className="text-xs text-gray-400 mt-1.5">
+                              Type {"{time}"} where the call's time, date and timezone should go (shown in bold). Leave empty
+                              to use the default wording shown in grey.
+                            </p>
+                          </div>
+                        )}
                         <label className="flex items-start gap-2.5 border border-gray-200 rounded-lg p-3 cursor-pointer">
                           <input
                             type="checkbox"
