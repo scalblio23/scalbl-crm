@@ -908,7 +908,20 @@ export default function BookingWidget({ slug }) {
           </div>
         ) : (
           <form onSubmit={submitBooking} className="flex-1 p-6 sm:p-8 flex flex-col bw-in">
-            <h2 className="text-xl sm:text-2xl font-medium text-gray-900 mb-6">Enter details</h2>
+            <h2 className="text-xl sm:text-2xl font-medium text-gray-900">Enter details</h2>
+            <p className="text-base text-gray-700 leading-relaxed mt-2 mb-6">
+              You are booking{" "}
+              {calendarInfo.meetingLocation === "phone"
+                ? "a phone call"
+                : meetingLocation(calendarInfo.meetingLocation)
+                ? `a ${meetingLocation(calendarInfo.meetingLocation).label} call`
+                : "a call"}{" "}
+              for{" "}
+              <span className="bg-amber-100 text-gray-900 font-semibold rounded px-1.5 py-0.5 box-decoration-clone">
+                {commitWhen(selectedSlot.startUTC, timezone)}
+              </span>
+              , please click Schedule Meeting to finalise your time.
+            </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5">
               <div>
                 <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">First name *</label>
