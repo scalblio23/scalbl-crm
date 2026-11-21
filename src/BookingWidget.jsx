@@ -149,6 +149,9 @@ export default function BookingWidget({ slug }) {
   const autoPickRef = useRef(true);
   const autoMonthsRef = useRef(0);
   const [selectedSlot, setSelectedSlot] = useState(null);
+  // A time they've clicked but not yet confirmed with "Select" — the
+  // two-step pick, so nobody books a time by a slip of the finger.
+  const [pendingSlotStart, setPendingSlotStart] = useState(null);
   // ?name=&email=&phone= pre-fill the form, e.g. when embedded after a lead-capture survey.
   const [form, setForm] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -285,6 +288,7 @@ export default function BookingWidget({ slug }) {
   // to whichever day was active when it was picked.
   useEffect(() => {
     setSelectedSlot(null);
+    setPendingSlotStart(null);
   }, [selectedDayKey]);
 
   // A commitment applies to one specific time — reset it whenever the slot changes.
@@ -554,18 +558,18 @@ export default function BookingWidget({ slug }) {
   const todayKey = dateKeyInZone(new Date(), timezone);
   const atFirstMonth = monthKey <= todayKey.slice(0, 7);
   return (
-    <div className="min-h-screen bg-gray-50 px-3 sm:px-6 py-6 sm:py-10">
-      <div className="max-w-7xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col md:flex-row">
-        <aside className="md:w-[32%] shrink-0 p-6 sm:p-10 border-b md:border-b-0 md:border-r border-gray-200">
-          <h1 className="text-2xl sm:text-3xl xl:text-4xl font-semibold text-gray-900 leading-tight">{calendarInfo.name}</h1>
+    <div className="min-h-screen bg-gray-50 px-3 sm:px-6 py-4 sm:py-8">
+      <div className="max-w-6xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col md:flex-row">
+        <aside className="md:w-[30%] shrink-0 p-6 sm:p-8 border-b md:border-b-0 md:border-r border-gray-200">
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">{calendarInfo.name}</h1>
           {calendarInfo.description && <p className="text-sm text-gray-500 mt-2">{calendarInfo.description}</p>}
-          <div className="mt-6 space-y-4 text-gray-600 sm:text-lg">
+          <div className="mt-5 space-y-3 text-gray-600">
             <p className="flex items-center gap-3 font-medium">
-              <Clock size={22} className="text-gray-500 shrink-0" /> {calendarInfo.eventLengthMinutes} min
+              <Clock size={18} className="text-gray-500 shrink-0" /> {calendarInfo.eventLengthMinutes} min
             </p>
             {selectedDayKey && (
               <p className="flex items-center gap-3 font-medium">
-                <CalendarDays size={22} className="text-gray-500 shrink-0" /> {dayKeyLabel(selectedDayKey)}
+                <CalendarDays size={18} className="text-gray-500 shrink-0" /> {dayKeyLabel(selectedDayKey)}
               </p>
             )}
           </div>
@@ -581,36 +585,36 @@ export default function BookingWidget({ slug }) {
 
         <section className="flex-1 min-w-0">
         {!selectedSlot ? (
-          <div className="p-5 sm:p-10">
-            <h2 className="text-xl sm:text-2xl font-medium text-gray-900 mb-8">Select Date &amp; Time</h2>
-            <div className="flex flex-col lg:flex-row gap-8 lg:gap-12">
+          <div className="p-5 sm:p-8">
+            <h2 className="text-lg sm:text-xl font-medium text-gray-900 mb-5">Select Date &amp; Time</h2>
+            <div className="flex flex-col lg:flex-row gap-6 lg:gap-10">
               <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-center gap-4 sm:gap-10 mb-8">
+                <div className="flex items-center justify-center gap-4 sm:gap-8 mb-4">
                   <button
                     type="button"
                     aria-label="Previous month"
                     onClick={() => { stopAutoPick(); setMonthKey((m) => addMonths(m, -1)); }}
                     disabled={atFirstMonth}
-                    className="h-11 w-11 flex items-center justify-center rounded-full text-gray-600 hover:bg-gray-100 disabled:text-gray-300 disabled:hover:bg-transparent"
+                    className="h-10 w-10 shrink-0 flex items-center justify-center rounded-full text-gray-600 hover:bg-gray-100 disabled:text-gray-300 disabled:hover:bg-transparent"
                   >
-                    <ChevronLeft size={22} />
+                    <ChevronLeft size={20} />
                   </button>
-                  <span className="text-lg sm:text-xl font-medium text-gray-900 w-48 text-center">{monthLabel(monthKey)}</span>
+                  <span className="text-base sm:text-lg font-medium text-gray-900 w-44 text-center">{monthLabel(monthKey)}</span>
                   <button
                     type="button"
                     aria-label="Next month"
                     onClick={() => { stopAutoPick(); setMonthKey((m) => addMonths(m, 1)); }}
-                    className="h-12 w-12 sm:h-16 sm:w-16 flex items-center justify-center rounded-full bg-blue-50 text-blue-600 hover:bg-blue-100"
+                    className="h-10 w-10 sm:h-12 sm:w-12 shrink-0 flex items-center justify-center rounded-full bg-blue-50 text-blue-600 hover:bg-blue-100"
                   >
-                    <ChevronRight size={22} />
+                    <ChevronRight size={20} />
                   </button>
                 </div>
-                <div className="grid grid-cols-7 text-center text-sm sm:text-lg font-medium text-gray-900 mb-6">
+                <div className="grid grid-cols-7 text-center text-sm sm:text-base font-medium text-gray-900 mb-3">
                   {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
                     <div key={d}>{d}</div>
                   ))}
                 </div>
-                <div className="grid grid-cols-7 gap-y-3 sm:gap-y-6 text-center">
+                <div className="grid grid-cols-7 gap-y-1.5 sm:gap-y-2 text-center">
                   {cells.map((key, i) => {
                     if (!key) return <div key={`blank-${i}`} />;
                     const active = key === selectedDayKey;
@@ -627,7 +631,7 @@ export default function BookingWidget({ slug }) {
                             setSelectedDayKey(key);
                           }}
                           disabled={disabled}
-                          className={`relative h-11 w-11 sm:h-16 sm:w-16 rounded-full text-base sm:text-xl ${
+                          className={`relative shrink-0 aspect-square h-10 w-10 sm:h-12 sm:w-12 rounded-full text-sm sm:text-base ${
                             active
                               ? "bg-blue-600 text-white font-semibold"
                               : available && !loadingSlots
@@ -648,13 +652,13 @@ export default function BookingWidget({ slug }) {
                     );
                   })}
                 </div>
-                <div className="mt-10 max-w-md">
-                  <label className="text-base sm:text-lg font-medium block mb-3 text-gray-900">Time zone</label>
+                <div className="mt-5 max-w-sm">
+                  <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">Time zone</label>
                   <Dropdown value={timezone} onChange={setTimezone} options={tzOptions} searchable />
                 </div>
               </div>
 
-              <div className="lg:w-80 xl:w-96 shrink-0">
+              <div className="lg:w-64 xl:w-72 shrink-0">
                 {selectedDayKey && (
                   <p className="lg:hidden text-sm font-medium text-gray-700 mb-3">{dayKeyLabel(selectedDayKey)}</p>
                 )}
@@ -665,16 +669,35 @@ export default function BookingWidget({ slug }) {
                 ) : slots.length === 0 ? (
                   <p className="text-sm text-gray-400 text-center py-10">No available times on this day.</p>
                 ) : (
-                  <div className="flex flex-col gap-4 lg:max-h-[46rem] lg:overflow-y-auto lg:pr-3">
-                    {slots.map((s) => (
-                      <button
-                        key={s.startUTC}
-                        onClick={() => setSelectedSlot(s)}
-                        className="shrink-0 border border-blue-600 rounded py-4 sm:py-5 text-base sm:text-lg font-semibold text-blue-600 hover:bg-blue-50"
-                      >
-                        {slotTimeLabel(s.startUTC, timezone)}
-                      </button>
-                    ))}
+                  <div className="flex flex-col gap-2.5 lg:max-h-[27rem] lg:overflow-y-auto lg:pr-2">
+                    {slots.map((s) =>
+                      pendingSlotStart === s.startUTC ? (
+                        <div key={s.startUTC} className="shrink-0 grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setPendingSlotStart(null)}
+                            className="rounded py-3 text-sm sm:text-base font-semibold text-white bg-gray-500 border border-gray-500"
+                          >
+                            {slotTimeLabel(s.startUTC, timezone)}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSlot(s)}
+                            className="rounded py-3 text-sm sm:text-base font-semibold text-white bg-blue-600 hover:bg-blue-700 border border-blue-600"
+                          >
+                            Select
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          key={s.startUTC}
+                          onClick={() => setPendingSlotStart(s.startUTC)}
+                          className="shrink-0 border border-blue-600 rounded py-3 text-sm sm:text-base font-semibold text-blue-600 hover:bg-blue-50"
+                        >
+                          {slotTimeLabel(s.startUTC, timezone)}
+                        </button>
+                      )
+                    )}
                   </div>
                 )}
               </div>
