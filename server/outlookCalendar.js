@@ -184,6 +184,10 @@ export async function createOutlookEvent({
   location,
   startISO,
   endISO,
+  // Set only when the calendar sends invites: Outlook then emails the
+  // attendee a meeting invite (and a cancellation if it's deleted).
+  attendeeEmail,
+  attendeeName,
 }) {
   const body = await msFetch(`${GRAPH_API}${calendarPath(calendarId)}/events`, {
     method: "POST",
@@ -195,6 +199,9 @@ export async function createOutlookEvent({
       end: { dateTime: new Date(endISO).toISOString().replace(/Z$/, ""), timeZone: "UTC" },
       location: location ? { displayName: location } : undefined,
       showAs: "busy",
+      attendees: attendeeEmail
+        ? [{ emailAddress: { address: attendeeEmail, name: attendeeName || attendeeEmail }, type: "required" }]
+        : undefined,
     }),
   });
   return body.id;

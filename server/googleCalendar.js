@@ -255,9 +255,12 @@ export async function createGoogleEvent({
   endISO,
   timezone,
   attendeeEmail,
+  // "all" = Google emails the attendee a real invite (Booking rules →
+  // "Send the lead a calendar invite"). Default stays "none".
+  sendUpdates = "none",
 }) {
   const body = await googleFetch(
-    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=none`,
+    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=${sendUpdates === "all" ? "all" : "none"}`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
@@ -333,10 +336,10 @@ export async function patchGoogleEventTimes({ accessToken, calendarId = "primary
   );
 }
 
-export async function deleteGoogleEvent({ accessToken, calendarId = "primary", eventId }) {
+export async function deleteGoogleEvent({ accessToken, calendarId = "primary", eventId, sendUpdates = "none" }) {
   if (!eventId) return;
   const res = await fetch(
-    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
+    `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=${sendUpdates === "all" ? "all" : "none"}`,
     { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
   );
   // 410 Gone = already deleted on the Google side — not an error here.

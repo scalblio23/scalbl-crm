@@ -1646,6 +1646,7 @@ export default function SimpleCRM() {
       bookingWindowDays: String(openCalendar.bookingWindowDays),
       maxBookingsPerDay: openCalendar.maxBookingsPerDay == null ? "" : String(openCalendar.maxBookingsPerDay),
       requireAttendanceConfirm: Boolean(openCalendar.requireAttendanceConfirm),
+      sendCalendarInvite: Boolean(openCalendar.sendCalendarInvite),
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     setCalendarNameDraft(openCalendar.name);
@@ -11026,6 +11027,7 @@ export default function SimpleCRM() {
                                 bookingWindowDays: Number(rulesDraft.bookingWindowDays),
                                 maxBookingsPerDay: rulesDraft.maxBookingsPerDay === "" ? null : Number(rulesDraft.maxBookingsPerDay),
                                 requireAttendanceConfirm: Boolean(rulesDraft.requireAttendanceConfirm),
+                                sendCalendarInvite: Boolean(rulesDraft.sendCalendarInvite),
                               })
                             }
                             disabled={savingCalendar}
@@ -11091,6 +11093,22 @@ export default function SimpleCRM() {
                             <span className="block text-xs text-gray-500 mt-0.5">
                               Before booking, people must tick "Yes I keep my word and will show up to the call" under a
                               note with their call's time, date and timezone.
+                            </span>
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-2.5 border border-gray-200 rounded-lg p-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(rulesDraft.sendCalendarInvite)}
+                            onChange={(e) => setRulesDraft((d) => ({ ...d, sendCalendarInvite: e.target.checked }))}
+                            className="mt-0.5 h-4 w-4 accent-blue-600"
+                          />
+                          <span>
+                            <span className="block text-sm font-medium">Send the lead a calendar invite</span>
+                            <span className="block text-xs text-gray-500 mt-0.5">
+                              When someone books, your connected Google or Outlook calendar emails them a real invite,
+                              so the call lands in their own calendar. If the booking is cancelled, they get the
+                              cancellation too. Needs a calendar connected under Integrate.
                             </span>
                           </span>
                         </label>
