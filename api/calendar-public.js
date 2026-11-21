@@ -24,6 +24,7 @@ export default async function handler(req, res) {
       requireAttendanceConfirm: Boolean(calendar.requireAttendanceConfirm),
       meetingLocation: calendar.meetingLocation || null,
       hostName: calendar.hostName || "",
+      attendanceConfirmText: calendar.attendanceConfirmText || "",
       hostPhoto: calendar.hostPhoto || null,
     });
   } catch (err) {

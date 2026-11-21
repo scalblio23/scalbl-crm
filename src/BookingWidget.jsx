@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { Fragment, useState, useEffect, useMemo, useRef } from "react";
 import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock, ArrowLeft, Globe, Mail } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import { LocationLogo, meetingLocation } from "./components/MeetingLocation";
 import { timezoneOptions, detectBrowserTimezone } from "./lib/calendarOptions";
+
+// Booking rules → attendance confirmation wording; {time} becomes the
+// call's time, date and timezone (in bold). Mirrored in SimpleCRM.jsx.
+const ATTENDANCE_CONFIRM_DEFAULT =
+  "Please confirm your attendance for your call at {time}, no shows are costly to our business and we require your confirmation.";
 
 function dateKeyInZone(date, timeZone) {
   return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(
@@ -989,9 +994,12 @@ export default function BookingWidget({ slug }) {
                 <div className="sm:col-span-2">
                 <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
                   <p className="text-sm text-gray-800 mb-3">
-                    Please confirm your attendance for your call at{" "}
-                    <span className="font-semibold">{commitWhen(selectedSlot.startUTC, timezone)}</span>, no shows are costly to
-                    our business and we require your confirmation.
+                    {(calendarInfo.attendanceConfirmText || ATTENDANCE_CONFIRM_DEFAULT).split("{time}").map((part, i) => (
+                      <Fragment key={i}>
+                        {i > 0 && <span className="font-semibold">{commitWhen(selectedSlot.startUTC, timezone)}</span>}
+                        {part}
+                      </Fragment>
+                    ))}
                   </p>
                   <label className="flex items-start gap-2.5 text-sm font-medium text-gray-900 cursor-pointer">
                     <input

@@ -894,6 +894,9 @@ export async function ensureSchema() {
     // Outlook event is created with the lead as a guest AND the provider
     // emails them the invite (and the cancellation, if it's cancelled).
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS send_calendar_invite BOOLEAN NOT NULL DEFAULT false`);
+    // Booking rules → custom wording for the attendance-confirmation
+    // warning; {time} = the call's time, date and timezone. null = default.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS attendance_confirm_text TEXT`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_outlook_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_crm_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     // Emails received through Resend (see api/email-inbound.js), shown
@@ -3016,6 +3019,7 @@ export function calendarFromRow(r, { includeSecrets = false } = {}) {
     hostName: r.host_name || "",
     hostPhoto: r.host_photo || null,
     sendCalendarInvite: Boolean(r.send_calendar_invite),
+    attendanceConfirmText: r.attendance_confirm_text || "",
     confirmationWorkflow: r.confirmation_workflow || null,
     connections,
     bookingConnectionId: target ? target.id : null,
@@ -3136,7 +3140,8 @@ export async function updateCalendar(id, patch) {
        meeting_location = CASE WHEN $23 THEN $24::text ELSE meeting_location END,
        host_name = CASE WHEN $25 THEN $26::text ELSE host_name END,
        host_photo = CASE WHEN $27 THEN $28::text ELSE host_photo END,
-       send_calendar_invite = COALESCE($29, send_calendar_invite)
+       send_calendar_invite = COALESCE($29, send_calendar_invite),
+       attendance_confirm_text = CASE WHEN $30 THEN $31::text ELSE attendance_confirm_text END
      WHERE id = $1
      RETURNING id`,
     [
@@ -3171,6 +3176,8 @@ export async function updateCalendar(id, patch) {
       Object.prototype.hasOwnProperty.call(patch, "hostPhoto"),
       patch.hostPhoto || null,
       typeof patch.sendCalendarInvite === "boolean" ? patch.sendCalendarInvite : null,
+      Object.prototype.hasOwnProperty.call(patch, "attendanceConfirmText"),
+      patch.attendanceConfirmText || null,
     ]
   );
   return rows[0] ? getCalendarById(rows[0].id) : null;

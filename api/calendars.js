@@ -78,6 +78,9 @@ export default async function handler(req, res) {
         }
       }
       if (patch.description !== undefined) patch.description = String(patch.description || "").trim().slice(0, 1000);
+      if (patch.attendanceConfirmText !== undefined) {
+        patch.attendanceConfirmText = String(patch.attendanceConfirmText || "").trim().slice(0, 600);
+      }
       if (patch.hostName !== undefined) patch.hostName = String(patch.hostName || "").trim().slice(0, 80);
       if (patch.hostPhoto !== undefined && patch.hostPhoto !== null) {
         const photo = String(patch.hostPhoto);
