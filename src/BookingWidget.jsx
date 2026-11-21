@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Loader2, ChevronLeft, ChevronRight, ChevronDown, CalendarDays, CheckCircle2 } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import { timezoneOptions, detectBrowserTimezone } from "./lib/calendarOptions";
@@ -23,6 +23,36 @@ function weekdayAndDay(date, timeZone) {
     weekday: parts.find((p) => p.type === "weekday")?.value || "",
     day: parts.find((p) => p.type === "day")?.value || "",
   };
+}
+
+// Month view helpers. Days are "YYYY-MM-DD" keys in the visitor's
+// timezone and months "YYYY-MM"; the grid is Sunday-first.
+function addMonths(ym, n) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
+}
+function monthCells(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const cells = Array(lead).fill(null);
+  for (let d = 1; d <= days; d++) cells.push(`${ym}-${String(d).padStart(2, "0")}`);
+  return cells;
+}
+const monthLabel = (ym) =>
+  new Date(`${ym}-15T12:00:00Z`).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+// "Mon, Nov 23, 2026"
+const dayKeyLabel = (key) =>
+  new Date(`${key}T12:00:00Z`).toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+// "08:00 AM" — the time buttons.
+function slotTimeLabel(iso, timeZone) {
+  return new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
 }
 
 function timeLabel(iso, timeZone) {
@@ -105,7 +135,8 @@ export default function BookingWidget({ slug }) {
   const [calendarInfo, setCalendarInfo] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [timezone, setTimezone] = useState(detectBrowserTimezone());
-  const [windowStart, setWindowStart] = useState(() => new Date());
+  // The month shown ("YYYY-MM").
+  const [monthKey, setMonthKey] = useState(() => dateKeyInZone(new Date(), detectBrowserTimezone()).slice(0, 7));
   const [selectedDayKey, setSelectedDayKey] = useState(null);
   const [windowSlots, setWindowSlots] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
@@ -113,10 +144,10 @@ export default function BookingWidget({ slug }) {
   // first available day" effect below waits on it.
   const [slotsLoadCount, setSlotsLoadCount] = useState(0);
   // On first load only: if today has no free times, select the first day
-  // that does, moving forward a week at a time if needed. Off as soon as
-  // the visitor picks a day or changes week themselves.
+  // that does, moving forward a month at a time if needed. Off as soon as
+  // the visitor picks a day or changes month themselves.
   const autoPickRef = useRef(true);
-  const autoWeeksRef = useRef(0);
+  const autoMonthsRef = useRef(0);
   const [selectedSlot, setSelectedSlot] = useState(null);
   // ?name=&email=&phone= pre-fill the form, e.g. when embedded after a lead-capture survey.
   const [form, setForm] = useState(() => {
@@ -138,8 +169,6 @@ export default function BookingWidget({ slug }) {
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
   const [confirmation, setConfirmation] = useState(null);
-  const [showAllSlots, setShowAllSlots] = useState(false);
-  const VISIBLE_SLOT_COUNT = 6;
   const parentTracksRef = useRef(false);
 
   useEffect(() => {
@@ -226,11 +255,7 @@ export default function BookingWidget({ slug }) {
   }
 
   const tzOptions = useMemo(() => timezoneOptions(), []);
-  const visibleDays = useMemo(() => Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(windowStart);
-    d.setDate(d.getDate() + i);
-    return d;
-  }), [windowStart]);
+  const cells = useMemo(() => monthCells(monthKey), [monthKey]);
 
   // These two requests don't actually depend on each other (the
   // slots endpoint only needs the slug + a date range, not anything
@@ -260,7 +285,6 @@ export default function BookingWidget({ slug }) {
   // to whichever day was active when it was picked.
   useEffect(() => {
     setSelectedSlot(null);
-    setShowAllSlots(false);
   }, [selectedDayKey]);
 
   // A commitment applies to one specific time — reset it whenever the slot changes.
@@ -268,17 +292,18 @@ export default function BookingWidget({ slug }) {
     setCommitted(false);
   }, [selectedSlot]);
 
-  // Fetch slots for the whole visible 7-day window in one call, not just
-  // the selected day — the day picker needs every day's slot count up
-  // front to grey out days with nothing available.
+  // Fetch slots for the whole visible month in one call, not just the
+  // selected day — the calendar needs every day's slot count up front
+  // to show which days are bookable.
   useEffect(() => {
     setLoadingSlots(true);
     // Query a day either side of the visible window too — a visitor's
     // local calendar day can span two of the host calendar's
     // server-side days near a timezone boundary; slots are grouped
     // back onto their local day below.
-    const firstKey = dateKeyInZone(visibleDays[0], timezone);
-    const lastKey = dateKeyInZone(visibleDays[6], timezone);
+    const monthDays = cells.filter(Boolean);
+    const firstKey = monthDays[0];
+    const lastKey = monthDays[monthDays.length - 1];
     const from = new Date(`${firstKey}T12:00:00Z`);
     from.setUTCDate(from.getUTCDate() - 1);
     const to = new Date(`${lastKey}T12:00:00Z`);
@@ -293,7 +318,7 @@ export default function BookingWidget({ slug }) {
         setSlotsLoadCount((n) => n + 1);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [windowStart, timezone, slug]);
+  }, [monthKey, timezone, slug]);
 
   const slotsByDay = useMemo(() => {
     const map = {};
@@ -309,29 +334,23 @@ export default function BookingWidget({ slug }) {
   useEffect(() => {
     if (!autoPickRef.current || !slotsLoadCount || loadingSlots) return;
     const todayKey = dateKeyInZone(new Date(), timezone);
-    const firstFree = visibleDays
-      .map((d) => dateKeyInZone(d, timezone))
-      .find((k) => k >= todayKey && (slotsByDay[k] || []).length > 0);
+    const firstFree = cells.find((k) => k && k >= todayKey && (slotsByDay[k] || []).length > 0);
     if (firstFree) {
       autoPickRef.current = false;
       setSelectedDayKey(firstFree);
       return;
     }
-    // Nothing this week — look at the next one, up to the booking window.
-    const maxWeeks = Math.ceil((calendarInfo?.bookingWindowDays || 60) / 7);
-    if (autoWeeksRef.current >= maxWeeks) {
-      // No availability at all: go back to this week and show today.
+    // Nothing left this month — look at the next one, up to the booking window.
+    const maxMonths = Math.ceil((calendarInfo?.bookingWindowDays || 60) / 28) + 1;
+    if (autoMonthsRef.current >= maxMonths) {
+      // No availability at all: go back to this month and show today.
       autoPickRef.current = false;
-      setWindowStart(new Date());
+      setMonthKey(todayKey.slice(0, 7));
       setSelectedDayKey(todayKey);
       return;
     }
-    autoWeeksRef.current += 1;
-    setWindowStart((d) => {
-      const n = new Date(d);
-      n.setDate(n.getDate() + 7);
-      return n;
-    });
+    autoMonthsRef.current += 1;
+    setMonthKey((m) => addMonths(m, 1));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slotsLoadCount, loadingSlots]);
 
@@ -532,119 +551,134 @@ export default function BookingWidget({ slug }) {
     );
   }
 
+  const todayKey = dateKeyInZone(new Date(), timezone);
+  const atFirstMonth = monthKey <= todayKey.slice(0, 7);
   return (
-    <div className="min-h-screen bg-gray-50 px-3 sm:px-4 py-6 sm:py-10">
-      <div className="max-w-3xl mx-auto bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
-        <div className="px-4 sm:px-6 py-5 border-b border-gray-100 flex flex-col sm:flex-row items-start justify-between gap-4">
-          <div>
-            <h1 className="text-lg font-bold flex items-center gap-2">
-              <CalendarDays size={18} className="text-gray-400" /> {calendarInfo.name}
-            </h1>
-            {calendarInfo.description && <p className="text-sm text-gray-500 mt-1">{calendarInfo.description}</p>}
-            {rescheduling && (
-              <p className="text-sm text-gray-700 mt-2">
-                Pick a new time.{" "}
-                <button type="button" onClick={() => { setRescheduling(false); setSelectedSlot(null); }} className="text-gray-400 hover:text-gray-700 underline">
-                  Back
-                </button>
+    <div className="min-h-screen bg-gray-50 px-3 sm:px-6 py-6 sm:py-10">
+      <div className="max-w-7xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col md:flex-row">
+        <aside className="md:w-[32%] shrink-0 p-6 sm:p-10 border-b md:border-b-0 md:border-r border-gray-200">
+          <h1 className="text-2xl sm:text-3xl xl:text-4xl font-semibold text-gray-900 leading-tight">{calendarInfo.name}</h1>
+          {calendarInfo.description && <p className="text-sm text-gray-500 mt-2">{calendarInfo.description}</p>}
+          <div className="mt-6 space-y-4 text-gray-600 sm:text-lg">
+            <p className="flex items-center gap-3 font-medium">
+              <Clock size={22} className="text-gray-500 shrink-0" /> {calendarInfo.eventLengthMinutes} min
+            </p>
+            {selectedDayKey && (
+              <p className="flex items-center gap-3 font-medium">
+                <CalendarDays size={22} className="text-gray-500 shrink-0" /> {dayKeyLabel(selectedDayKey)}
               </p>
             )}
-            <p className="text-xs text-gray-400 mt-1">{calendarInfo.eventLengthMinutes} minute call</p>
           </div>
-          <div className="w-full sm:w-56 shrink-0">
-            <label className="text-xs font-medium block mb-1.5 text-gray-500">Choose Your Timezone</label>
-            <Dropdown value={timezone} onChange={setTimezone} options={tzOptions} searchable />
-          </div>
-        </div>
+          {rescheduling && (
+            <p className="text-sm text-gray-700 mt-5">
+              Pick a new time.{" "}
+              <button type="button" onClick={() => { setRescheduling(false); setSelectedSlot(null); }} className="text-gray-400 hover:text-gray-700 underline">
+                Back
+              </button>
+            </p>
+          )}
+        </aside>
 
+        <section className="flex-1 min-w-0">
         {!selectedSlot ? (
-          <div className="p-4 sm:p-6">
-            {!rescheduling && (
-              <h2 className="text-lg font-medium text-gray-900 text-center mb-4">Please choose a time below to book in your meeting</h2>
-            )}
-            <div className="flex items-center justify-between mb-4">
-              <button
-                onClick={() => { stopAutoPick(); setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() - 7); return n; }); }}
-                className="text-gray-400 hover:text-gray-700"
-              >
-                <ChevronLeft size={18} />
-              </button>
-              <span className="text-sm font-medium text-gray-600">
-                {dayLabel(visibleDays[0], timezone)} – {dayLabel(visibleDays[6], timezone)}
-              </span>
-              <button
-                onClick={() => { stopAutoPick(); setWindowStart((d) => { const n = new Date(d); n.setDate(n.getDate() + 7); return n; }); }}
-                className="text-gray-400 hover:text-gray-700"
-              >
-                <ChevronRight size={18} />
-              </button>
-            </div>
-            <div className="grid grid-cols-7 gap-1 sm:gap-1.5 mb-6">
-              {visibleDays.map((d) => {
-                const key = dateKeyInZone(d, timezone);
-                const active = key === selectedDayKey;
-                // Grey out (and disable) days with no bookable slots, once
-                // the window has actually loaded — don't flash every day
-                // as unavailable while the fetch is still in flight.
-                const unavailable = !loadingSlots && !active && (slotsByDay[key] || []).length === 0;
-                const { weekday, day } = weekdayAndDay(d, timezone);
-                // Bookable days get a light blue glow on every screen size.
-                // Phones get a stacked "Thu / 1" tile; sm and up keep the
-                // "Thu, Oct 1" buttons.
-                return (
+          <div className="p-5 sm:p-10">
+            <h2 className="text-xl sm:text-2xl font-medium text-gray-900 mb-8">Select Date &amp; Time</h2>
+            <div className="flex flex-col lg:flex-row gap-8 lg:gap-12">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-center gap-4 sm:gap-10 mb-8">
                   <button
-                    key={key}
                     type="button"
-                    onClick={() => {
-                      stopAutoPick();
-                      setSelectedDayKey(key);
-                    }}
-                    disabled={unavailable}
-                    className={`flex flex-col items-center justify-center py-2 sm:py-2.5 rounded-xl sm:rounded-lg text-xs font-medium border ${
-                      active
-                        ? "bg-gray-900 text-white border-gray-900"
-                        : unavailable
-                        ? "bg-transparent text-gray-300 border-transparent sm:bg-gray-50 sm:border-gray-100 cursor-not-allowed"
-                        : "bg-sky-50 text-slate-700 border-transparent sm:border-sky-100 shadow-[0_0_10px_rgba(56,189,248,0.25)] hover:border-sky-300"
-                    }`}
+                    aria-label="Previous month"
+                    onClick={() => { stopAutoPick(); setMonthKey((m) => addMonths(m, -1)); }}
+                    disabled={atFirstMonth}
+                    className="h-11 w-11 flex items-center justify-center rounded-full text-gray-600 hover:bg-gray-100 disabled:text-gray-300 disabled:hover:bg-transparent"
                   >
-                    <span className="sm:hidden text-[13px] font-medium leading-tight">{weekday}</span>
-                    <span className="sm:hidden text-xl font-normal leading-tight mt-1">{day}</span>
-                    <span className="hidden sm:inline">{dayLabel(d, timezone)}</span>
+                    <ChevronLeft size={22} />
                   </button>
-                );
-              })}
-            </div>
-
-            {loadingSlots ? (
-              <div className="flex justify-center py-10">
-                <Loader2 size={18} className="animate-spin text-gray-400" />
-              </div>
-            ) : slots.length === 0 ? (
-              <p className="text-sm text-gray-400 text-center py-10">No available times on this day.</p>
-            ) : (
-              <div className="max-w-sm mx-auto">
-                <div className="flex flex-col gap-2">
-                  {(showAllSlots ? slots : slots.slice(0, VISIBLE_SLOT_COUNT)).map((s) => (
-                    <button
-                      key={s.startUTC}
-                      onClick={() => setSelectedSlot(s)}
-                      className="border border-gray-200 rounded-lg py-2.5 text-sm font-medium text-gray-700 hover:border-gray-900 hover:bg-gray-50"
-                    >
-                      {timeLabel(s.startUTC, timezone)}
-                    </button>
+                  <span className="text-lg sm:text-xl font-medium text-gray-900 w-48 text-center">{monthLabel(monthKey)}</span>
+                  <button
+                    type="button"
+                    aria-label="Next month"
+                    onClick={() => { stopAutoPick(); setMonthKey((m) => addMonths(m, 1)); }}
+                    className="h-12 w-12 sm:h-16 sm:w-16 flex items-center justify-center rounded-full bg-blue-50 text-blue-600 hover:bg-blue-100"
+                  >
+                    <ChevronRight size={22} />
+                  </button>
+                </div>
+                <div className="grid grid-cols-7 text-center text-sm sm:text-lg font-medium text-gray-900 mb-6">
+                  {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+                    <div key={d}>{d}</div>
                   ))}
                 </div>
-                {!showAllSlots && slots.length > VISIBLE_SLOT_COUNT && (
-                  <button
-                    onClick={() => setShowAllSlots(true)}
-                    className="w-full flex items-center justify-center gap-1.5 mt-3 text-sm text-gray-500 hover:text-gray-800 font-medium"
-                  >
-                    Show more times <ChevronDown size={14} />
-                  </button>
+                <div className="grid grid-cols-7 gap-y-3 sm:gap-y-6 text-center">
+                  {cells.map((key, i) => {
+                    if (!key) return <div key={`blank-${i}`} />;
+                    const active = key === selectedDayKey;
+                    // Days stay plain while the month is still loading, so they
+                    // don't flash as unavailable.
+                    const available = (slotsByDay[key] || []).length > 0;
+                    const disabled = !active && (loadingSlots || !available);
+                    return (
+                      <div key={key} className="flex justify-center">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            stopAutoPick();
+                            setSelectedDayKey(key);
+                          }}
+                          disabled={disabled}
+                          className={`relative h-11 w-11 sm:h-16 sm:w-16 rounded-full text-base sm:text-xl ${
+                            active
+                              ? "bg-blue-600 text-white font-semibold"
+                              : available && !loadingSlots
+                              ? "bg-blue-50 text-blue-600 font-semibold hover:bg-blue-100"
+                              : "text-gray-400 cursor-default"
+                          }`}
+                        >
+                          {Number(key.slice(8))}
+                          {key === todayKey && (
+                            <span
+                              className={`absolute left-1/2 -translate-x-1/2 bottom-1 h-1 w-1 rounded-full ${
+                                active ? "bg-white" : "bg-blue-500"
+                              }`}
+                            />
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-10 max-w-md">
+                  <label className="text-base sm:text-lg font-medium block mb-3 text-gray-900">Time zone</label>
+                  <Dropdown value={timezone} onChange={setTimezone} options={tzOptions} searchable />
+                </div>
+              </div>
+
+              <div className="lg:w-80 xl:w-96 shrink-0">
+                {selectedDayKey && (
+                  <p className="lg:hidden text-sm font-medium text-gray-700 mb-3">{dayKeyLabel(selectedDayKey)}</p>
+                )}
+                {loadingSlots ? (
+                  <div className="flex justify-center py-10">
+                    <Loader2 size={18} className="animate-spin text-gray-400" />
+                  </div>
+                ) : slots.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-10">No available times on this day.</p>
+                ) : (
+                  <div className="flex flex-col gap-4 lg:max-h-[46rem] lg:overflow-y-auto lg:pr-3">
+                    {slots.map((s) => (
+                      <button
+                        key={s.startUTC}
+                        onClick={() => setSelectedSlot(s)}
+                        className="shrink-0 border border-blue-600 rounded py-4 sm:py-5 text-base sm:text-lg font-semibold text-blue-600 hover:bg-blue-50"
+                      >
+                        {slotTimeLabel(s.startUTC, timezone)}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
-            )}
+            </div>
           </div>
         ) : rescheduling ? (
           <div className="p-6 max-w-sm mx-auto space-y-4">
@@ -743,6 +777,7 @@ export default function BookingWidget({ slug }) {
             )}
           </form>
         )}
+        </section>
       </div>
     </div>
   );
