@@ -77,6 +77,13 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: "Meta Pixel ID should be a number, e.g. 1234567890123456" });
         }
       }
+      if (patch.hostName !== undefined) patch.hostName = String(patch.hostName || "").trim().slice(0, 80);
+      if (patch.hostPhoto !== undefined && patch.hostPhoto !== null) {
+        const photo = String(patch.hostPhoto);
+        if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(photo) || photo.length > 500000) {
+          return res.status(400).json({ error: "That photo couldn't be used — try a JPG or PNG." });
+        }
+      }
       if (
         Object.prototype.hasOwnProperty.call(patch, "meetingLocation") &&
         patch.meetingLocation !== null &&

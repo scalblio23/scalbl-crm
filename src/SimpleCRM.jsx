@@ -103,6 +103,31 @@ import EmailInbox from "./components/EmailInbox";
 import BroadcastPanel from "./components/BroadcastPanel";
 import Dropdown from "./components/Dropdown";
 import { MEETING_LOCATIONS, LocationLogo, meetingLocation } from "./components/MeetingLocation";
+
+// Host photo → centre-cropped 320px square JPEG data URL (~20-40 KB),
+// small enough to store on the calendar row and send with its booking page.
+function squarePhotoDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new window.Image();
+    img.onload = () => {
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      const c = document.createElement("canvas");
+      c.width = c.height = 320;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, 320, 320);
+      ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 320, 320);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("unreadable image"));
+    };
+    img.src = url;
+  });
+}
 import CalendarAccounts, { ClashCalendarChecklist } from "./components/CalendarAccounts";
 import AddStepMenu from "./components/AddStepMenu";
 // Tabs with their own code load when first opened (and in the
@@ -1608,6 +1633,8 @@ export default function SimpleCRM() {
   const [rulesDraft, setRulesDraft] = useState(null);
   const [videoDraft, setVideoDraft] = useState(null);
   const [calendarNameDraft, setCalendarNameDraft] = useState("");
+  const [hostNameDraft, setHostNameDraft] = useState("");
+  const hostPhotoInputRef = useRef(null);
   const [metaPixelDraft, setMetaPixelDraft] = useState("");
   useEffect(() => {
     if (!openCalendar) return;
@@ -1622,6 +1649,7 @@ export default function SimpleCRM() {
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     setCalendarNameDraft(openCalendar.name);
+    setHostNameDraft(openCalendar.hostName || "");
     setMetaPixelDraft(openCalendar.metaPixelId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCalendar?.id]);
@@ -10723,9 +10751,13 @@ export default function SimpleCRM() {
                         <div className="flex items-center justify-between">
                           <h2 className="text-base font-bold">General</h2>
                           <button
-                            onClick={() => patchCalendar(openCalendar.id, { name: calendarNameDraft.trim() })}
+                            onClick={() =>
+                              patchCalendar(openCalendar.id, { name: calendarNameDraft.trim(), hostName: hostNameDraft.trim() })
+                            }
                             disabled={
-                              savingCalendar || !calendarNameDraft.trim() || calendarNameDraft.trim() === openCalendar.name
+                              savingCalendar ||
+                              !calendarNameDraft.trim() ||
+                              (calendarNameDraft.trim() === openCalendar.name && hostNameDraft.trim() === (openCalendar.hostName || ""))
                             }
                             className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
                           >
@@ -10742,6 +10774,64 @@ export default function SimpleCRM() {
                           />
                           <p className="text-xs text-gray-400 mt-1.5">
                             Shown on the booking page and in event titles. The booking link stays the same.
+                          </p>
+                        </div>
+                        <div className="pt-2">
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Host (who takes the calls)</label>
+                          <div className="flex items-center gap-4">
+                            {openCalendar.hostPhoto ? (
+                              <img src={openCalendar.hostPhoto} alt="" className="h-16 w-16 rounded-full object-cover shrink-0 ring-1 ring-gray-200" />
+                            ) : (
+                              <div className="h-16 w-16 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 shrink-0">
+                                <Users size={22} />
+                              </div>
+                            )}
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                disabled={savingCalendar}
+                                onClick={() => hostPhotoInputRef.current?.click()}
+                                className="border border-gray-200 hover:border-gray-300 text-sm px-3 py-1.5 rounded-lg font-medium disabled:opacity-40"
+                              >
+                                {openCalendar.hostPhoto ? "Change photo" : "Upload photo"}
+                              </button>
+                              {openCalendar.hostPhoto && (
+                                <button
+                                  type="button"
+                                  disabled={savingCalendar}
+                                  onClick={() => patchCalendar(openCalendar.id, { hostPhoto: null })}
+                                  className="text-sm px-3 py-1.5 rounded-lg text-gray-500 hover:text-red-600 disabled:opacity-40"
+                                >
+                                  Remove
+                                </button>
+                              )}
+                              <input
+                                ref={hostPhotoInputRef}
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  e.target.value = "";
+                                  if (!file) return;
+                                  try {
+                                    patchCalendar(openCalendar.id, { hostPhoto: await squarePhotoDataUrl(file) });
+                                  } catch {
+                                    alert("That photo couldn't be read — try a JPG or PNG.");
+                                  }
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <input
+                            value={hostNameDraft}
+                            onChange={(e) => setHostNameDraft(e.target.value)}
+                            placeholder="Host name, e.g. Henry Fortunatow"
+                            className="mt-3 w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            The photo and name show at the top of the booking page, so leads can see who they're meeting.
+                            The photo saves as soon as you pick it; press Save for the name.
                           </p>
                         </div>
                       </div>

@@ -671,6 +671,23 @@ export default function BookingWidget({ slug }) {
               <ArrowLeft size={22} />
             </button>
           )}
+          {(calendarInfo.hostPhoto || calendarInfo.hostName) && (
+            <div className="flex items-center gap-3 mb-4">
+              {calendarInfo.hostPhoto && (
+                <img
+                  src={calendarInfo.hostPhoto}
+                  alt={calendarInfo.hostName || "Your host"}
+                  className="h-16 w-16 sm:h-20 sm:w-20 rounded-full object-cover shrink-0 ring-2 ring-white shadow"
+                />
+              )}
+              {calendarInfo.hostName && (
+                <div className="min-w-0">
+                  <p className="text-xs text-gray-500">You're meeting with</p>
+                  <p className="text-base font-semibold text-gray-900 truncate">{calendarInfo.hostName}</p>
+                </div>
+              )}
+            </div>
+          )}
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">{calendarInfo.name}</h1>
           {calendarInfo.description && <p className="text-sm text-gray-500 mt-2">{calendarInfo.description}</p>}
           <div className="mt-5 space-y-3 text-gray-600">
