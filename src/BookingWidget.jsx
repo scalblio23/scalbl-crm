@@ -284,12 +284,25 @@ export default function BookingWidget({ slug }) {
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
   const [confirmation, setConfirmation] = useState(null);
+  // The host page's embed code sizes the iframe to fit (it answers the
+  // first scalbl:height with scalbl:autosize). Then nothing inside the
+  // frame scrolls on its own, so a swipe/scroll over the widget moves
+  // the whole page — on phones a scrollable iframe traps the finger.
+  // Old fixed-height embeds never send it and keep inner scrolling,
+  // which they need to reach content below the frame.
+  const [autoSized, setAutoSized] = useState(false);
+  useEffect(() => {
+    if (!autoSized) return;
+    document.documentElement.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+  }, [autoSized]);
   const parentTracksRef = useRef(false);
 
   useEffect(() => {
     if (!isFramed) return;
     const onMessage = (e) => {
       if (e.source === window.parent && e.data?.type === "scalbl:parent-tracking") parentTracksRef.current = true;
+      if (e.source === window.parent && e.data?.type === "scalbl:autosize") setAutoSized(true);
     };
     window.addEventListener("message", onMessage);
     window.parent.postMessage({ type: "scalbl:ready", slug }, "*");
@@ -782,7 +795,8 @@ export default function BookingWidget({ slug }) {
           {calendarInfo.description && (
             <p className="mt-5 text-sm text-gray-600 leading-relaxed whitespace-pre-line break-words">{calendarInfo.description}</p>
           )}
-          {meetingLocation(calendarInfo.meetingLocation) && (
+          {/* The "be somewhere quiet" note is for choosing a time — not shown once a time is picked. */}
+          {!selectedSlot && meetingLocation(calendarInfo.meetingLocation) && (
             <div className="mt-5 flex items-start gap-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
               <LocationLogo value={calendarInfo.meetingLocation} size={28} />
               <p className="text-sm text-gray-800 leading-snug">{meetingLocation(calendarInfo.meetingLocation).note}</p>
@@ -916,7 +930,7 @@ export default function BookingWidget({ slug }) {
                 ) : slots.length === 0 ? (
                   <p className="text-sm text-gray-400 text-center py-10">No available times on this day.</p>
                 ) : (
-                  <div className="flex flex-col gap-2.5 lg:max-h-[27rem] lg:overflow-y-auto lg:pr-2">
+                  <div className={`flex flex-col gap-2.5 ${autoSized ? "" : "lg:max-h-[27rem] lg:overflow-y-auto lg:pr-2"}`}>
                     {slots.map((s) =>
                       pendingSlotStart === s.startUTC ? (
                         <div key={s.startUTC} className="shrink-0 grid grid-cols-2 gap-2 bw-pop">
