@@ -23,6 +23,8 @@ export default async function handler(req, res) {
       metaPixelId: calendar.metaPixelId || null,
       requireAttendanceConfirm: Boolean(calendar.requireAttendanceConfirm),
       meetingLocation: calendar.meetingLocation || null,
+      hostName: calendar.hostName || "",
+      hostPhoto: calendar.hostPhoto || null,
     });
   } catch (err) {
     console.error("[api/calendar-public]", err);
