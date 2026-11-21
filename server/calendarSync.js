@@ -159,6 +159,7 @@ export async function pushBookingToCalendars(calendar, booking) {
         endISO: new Date(booking.endTime).toISOString(),
         timezone: calendar.timezone,
         attendeeEmail: booking.contactEmail || undefined,
+        sendUpdates: calendar.sendCalendarInvite && booking.contactEmail ? "all" : "none",
       });
       await setCalendarBookingGoogleEventId(booking.id, eventId, {
         connectionId: calendar.googleConnectionId,
@@ -184,6 +185,8 @@ export async function pushBookingToCalendars(calendar, booking) {
         location,
         startISO: booking.startTime,
         endISO: booking.endTime,
+        attendeeEmail: calendar.sendCalendarInvite ? booking.contactEmail || undefined : undefined,
+        attendeeName: booking.contactName,
       });
       await setCalendarBookingOutlookEventId(booking.id, eventId, { connectionId: calendar.outlookConnectionId });
       booking.outlookEventId = eventId;
@@ -216,7 +219,13 @@ export async function removeBookingFromCalendars(calendar, booking, logTag = "[c
   if (onGoogle) {
     try {
       const accessToken = await getValidAccessToken(onGoogle);
-      await deleteGoogleEvent({ accessToken, calendarId: onGoogle.googleCalendarId, eventId: booking.googleEventId });
+      await deleteGoogleEvent({
+        accessToken,
+        calendarId: onGoogle.googleCalendarId,
+        eventId: booking.googleEventId,
+        // The lead got an invite, so they get the cancellation too.
+        sendUpdates: calendar.sendCalendarInvite && booking.contactEmail ? "all" : "none",
+      });
     } catch (err) {
       console.error(`${logTag} failed to delete Google event`, err);
     }

@@ -890,6 +890,10 @@ export async function ensureSchema() {
     // the booking page. host_photo is a small resized JPEG data URL.
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS host_name TEXT`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS host_photo TEXT`);
+    // Booking rules → "Send the lead a calendar invite": the Google /
+    // Outlook event is created with the lead as a guest AND the provider
+    // emails them the invite (and the cancellation, if it's cancelled).
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS send_calendar_invite BOOLEAN NOT NULL DEFAULT false`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_outlook_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_crm_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     // Emails received through Resend (see api/email-inbound.js), shown
@@ -3011,6 +3015,7 @@ export function calendarFromRow(r, { includeSecrets = false } = {}) {
     meetingLocation: r.meeting_location || null,
     hostName: r.host_name || "",
     hostPhoto: r.host_photo || null,
+    sendCalendarInvite: Boolean(r.send_calendar_invite),
     confirmationWorkflow: r.confirmation_workflow || null,
     connections,
     bookingConnectionId: target ? target.id : null,
@@ -3130,7 +3135,8 @@ export async function updateCalendar(id, patch) {
        require_attendance_confirm = COALESCE($22, require_attendance_confirm),
        meeting_location = CASE WHEN $23 THEN $24::text ELSE meeting_location END,
        host_name = CASE WHEN $25 THEN $26::text ELSE host_name END,
-       host_photo = CASE WHEN $27 THEN $28::text ELSE host_photo END
+       host_photo = CASE WHEN $27 THEN $28::text ELSE host_photo END,
+       send_calendar_invite = COALESCE($29, send_calendar_invite)
      WHERE id = $1
      RETURNING id`,
     [
@@ -3164,6 +3170,7 @@ export async function updateCalendar(id, patch) {
       patch.hostName || null,
       Object.prototype.hasOwnProperty.call(patch, "hostPhoto"),
       patch.hostPhoto || null,
+      typeof patch.sendCalendarInvite === "boolean" ? patch.sendCalendarInvite : null,
     ]
   );
   return rows[0] ? getCalendarById(rows[0].id) : null;
