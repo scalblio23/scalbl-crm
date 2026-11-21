@@ -689,7 +689,6 @@ export default function BookingWidget({ slug }) {
             </div>
           )}
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">{calendarInfo.name}</h1>
-          {calendarInfo.description && <p className="text-sm text-gray-500 mt-2">{calendarInfo.description}</p>}
           <div className="mt-5 space-y-3 text-gray-600">
             <p className="flex items-center gap-3 font-medium">
               <Clock size={18} className="text-gray-500 shrink-0" /> {calendarInfo.eventLengthMinutes} min
@@ -718,6 +717,9 @@ export default function BookingWidget({ slug }) {
               )
             )}
           </div>
+          {calendarInfo.description && (
+            <p className="mt-5 text-sm text-gray-600 leading-relaxed whitespace-pre-line break-words">{calendarInfo.description}</p>
+          )}
           {meetingLocation(calendarInfo.meetingLocation) && (
             <div className="mt-5 flex items-start gap-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
               <LocationLogo value={calendarInfo.meetingLocation} size={28} />
