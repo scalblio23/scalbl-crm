@@ -204,6 +204,16 @@ function loadMetaPixel(pixelId) {
 // inside a cross-site iframe miss the host page's cookies and don't
 // show up in Meta's pixel helper for that page. A bare <iframe> embed
 // (no listener) never answers, so we fall back to firing in here.
+// Framed pages size to their content (the embed resizes the iframe to
+// match); a full-viewport minimum there would pin the frame's height.
+const fullHeight = (() => {
+  try {
+    return window.self !== window.top ? "min-h-[24rem]" : "min-h-screen";
+  } catch {
+    return "min-h-[24rem]";
+  }
+})();
+
 const isFramed = (() => {
   try {
     return window.self !== window.top;
@@ -285,6 +295,39 @@ export default function BookingWidget({ slug }) {
     window.parent.postMessage({ type: "scalbl:ready", slug }, "*");
     return () => window.removeEventListener("message", onMessage);
   }, [slug]);
+
+  // Embedded: tell the host page how tall the widget is, so the embed
+  // code can size the iframe to fit (no inner scrolling, the Schedule
+  // button is never hidden below a fixed-height frame). Measured from
+  // the content itself — the page doesn't stretch to the frame height
+  // when framed (see fullHeight) — and re-sent whenever it changes,
+  // including when a dropdown opens past the bottom.
+  useEffect(() => {
+    if (!isFramed) return;
+    let last = 0;
+    let raf = 0;
+    const send = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const body = document.body;
+        const h = Math.ceil(Math.max(body.scrollHeight, body.getBoundingClientRect().height));
+        if (h && Math.abs(h - last) > 2) {
+          last = h;
+          window.parent.postMessage({ type: "scalbl:height", height: h }, "*");
+        }
+      });
+    };
+    const ro = new ResizeObserver(send);
+    ro.observe(document.body);
+    const mo = new MutationObserver(send);
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true });
+    send();
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   // Manage mode — /book/<slug>#manage=<token>[&action=reschedule|cancel|confirm|calendar],
   // the link in a booking confirmation message (see api/calendar-manage.js).
@@ -392,6 +435,20 @@ export default function BookingWidget({ slug }) {
     setSelectedSlot(null);
     setPendingSlotStart(null);
   }, [selectedDayKey]);
+
+  // Embedded: moving to another step (times, details, booked) asks the
+  // host page to scroll the widget's top into view, since scrolling
+  // inside the frame can't move the page around it.
+  const stepKey = `${Boolean(selectedSlot)}-${mobileTimesOpen}-${Boolean(confirmation)}`;
+  const firstStepRef = useRef(true);
+  useEffect(() => {
+    if (!isFramed) return;
+    if (firstStepRef.current) {
+      firstStepRef.current = false;
+      return;
+    }
+    window.parent.postMessage({ type: "scalbl:step" }, "*");
+  }, [stepKey]);
 
   // A commitment applies to one specific time — reset it whenever the slot changes.
   useEffect(() => {
@@ -505,7 +562,7 @@ export default function BookingWidget({ slug }) {
 
   if (loadError && !showManage) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <div className={`${fullHeight} flex items-center justify-center bg-gray-50 px-4`}>
         <p className="text-gray-500 text-sm">{loadError}</p>
       </div>
     );
@@ -513,7 +570,7 @@ export default function BookingWidget({ slug }) {
 
   if (!calendarInfo && !showManage) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className={`${fullHeight} flex items-center justify-center bg-gray-50`}>
         <Loader2 size={20} className="animate-spin text-gray-400" />
       </div>
     );
@@ -535,7 +592,7 @@ export default function BookingWidget({ slug }) {
       : "";
     const btn = "w-full flex items-center justify-center gap-2 text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40";
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <div className={`${fullHeight} flex items-center justify-center bg-gray-50 px-4`}>
         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-8 max-w-md w-full">
           {!v ? (
             manageError ? (
@@ -628,7 +685,7 @@ export default function BookingWidget({ slug }) {
 
   if (confirmation) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <div className={`${fullHeight} flex items-center justify-center bg-gray-50 px-4`}>
         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
           <CheckCircle2 size={36} className="text-emerald-500 mx-auto mb-4" />
           <h1 className="text-lg font-bold mb-1">You're booked!</h1>
@@ -663,7 +720,7 @@ export default function BookingWidget({ slug }) {
   const todayKey = dateKeyInZone(new Date(), timezone);
   const atFirstMonth = monthKey <= todayKey.slice(0, 7);
   return (
-    <div className="min-h-screen bg-gray-50 px-3 sm:px-6 py-4 sm:py-8">
+    <div className={`${fullHeight} bg-gray-50 px-3 sm:px-6 py-4 sm:py-8`}>
       <div className="max-w-6xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col md:flex-row">
         <aside className={`${mobileTimesOpen && !selectedSlot ? "hidden md:block" : ""} md:w-[30%] shrink-0 p-6 sm:p-8 border-b md:border-b-0 md:border-r border-gray-200`}>
           {selectedSlot && !rescheduling && (
