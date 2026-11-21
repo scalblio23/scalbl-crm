@@ -77,6 +77,7 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: "Meta Pixel ID should be a number, e.g. 1234567890123456" });
         }
       }
+      if (patch.description !== undefined) patch.description = String(patch.description || "").trim().slice(0, 1000);
       if (patch.hostName !== undefined) patch.hostName = String(patch.hostName || "").trim().slice(0, 80);
       if (patch.hostPhoto !== undefined && patch.hostPhoto !== null) {
         const photo = String(patch.hostPhoto);

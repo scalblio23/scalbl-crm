@@ -1634,6 +1634,7 @@ export default function SimpleCRM() {
   const [videoDraft, setVideoDraft] = useState(null);
   const [calendarNameDraft, setCalendarNameDraft] = useState("");
   const [hostNameDraft, setHostNameDraft] = useState("");
+  const [descriptionDraft, setDescriptionDraft] = useState("");
   const hostPhotoInputRef = useRef(null);
   const [metaPixelDraft, setMetaPixelDraft] = useState("");
   useEffect(() => {
@@ -1651,6 +1652,7 @@ export default function SimpleCRM() {
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     setCalendarNameDraft(openCalendar.name);
     setHostNameDraft(openCalendar.hostName || "");
+    setDescriptionDraft(openCalendar.description || "");
     setMetaPixelDraft(openCalendar.metaPixelId || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openCalendar?.id]);
@@ -10753,12 +10755,18 @@ export default function SimpleCRM() {
                           <h2 className="text-base font-bold">General</h2>
                           <button
                             onClick={() =>
-                              patchCalendar(openCalendar.id, { name: calendarNameDraft.trim(), hostName: hostNameDraft.trim() })
+                              patchCalendar(openCalendar.id, {
+                                name: calendarNameDraft.trim(),
+                                hostName: hostNameDraft.trim(),
+                                description: descriptionDraft.trim(),
+                              })
                             }
                             disabled={
                               savingCalendar ||
                               !calendarNameDraft.trim() ||
-                              (calendarNameDraft.trim() === openCalendar.name && hostNameDraft.trim() === (openCalendar.hostName || ""))
+                              (calendarNameDraft.trim() === openCalendar.name &&
+                                hostNameDraft.trim() === (openCalendar.hostName || "") &&
+                                descriptionDraft.trim() === (openCalendar.description || ""))
                             }
                             className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-40"
                           >
@@ -10775,6 +10783,20 @@ export default function SimpleCRM() {
                           />
                           <p className="text-xs text-gray-400 mt-1.5">
                             Shown on the booking page and in event titles. The booking link stays the same.
+                          </p>
+                        </div>
+                        <div>
+                          <label className="text-xs font-medium block mb-1.5 text-gray-500">Booking description</label>
+                          <textarea
+                            value={descriptionDraft}
+                            onChange={(e) => setDescriptionDraft(e.target.value)}
+                            rows={4}
+                            maxLength={1000}
+                            placeholder="e.g. A 30 minute call to walk through how we can get you more booked jobs."
+                            className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                          />
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Shown on the booking page under the call's date, above the meeting note. Leave empty to hide it.
                           </p>
                         </div>
                         <div className="pt-2">
