@@ -1039,17 +1039,22 @@ const CALENDAR_SETTINGS_SECTIONS = [
   { key: "team", label: "Team access", icon: Users },
 ];
 
-// Share & embed's embed code: the iframe plus a small listener so the
-// booking's Meta Pixel "Schedule" event fires on the host page itself
+// Share & embed's embed code: the iframe plus a small listener that
+// sizes the iframe to the widget's height (scalbl:height), scrolls it
+// into view on each step (scalbl:step), and makes the
+// booking's Meta Pixel "Schedule" event fire on the host page itself
 // (see the scalbl:* postMessage handshake in src/BookingWidget.jsx).
 // The pixel ID comes from the booked message, not this snippet, so
 // changing it in Tracking doesn't require re-embedding.
 function bookingEmbedCode(slug) {
   const origin = window.location.origin;
-  return `<iframe src="${origin}/book/${slug}" width="100%" height="700" frameborder="0"></iframe>
+  return `<iframe src="${origin}/book/${slug}" width="100%" height="700" frameborder="0" style="border:0;width:100%;min-height:400px"></iframe>
 <script>
-(function(){var O="${origin}";window.addEventListener("message",function(e){if(e.origin!==O||!e.data)return;var d=e.data;
+(function(){var O="${origin}";function F(w){var f=document.getElementsByTagName("iframe");for(var i=0;i<f.length;i++)if(f[i].contentWindow===w)return f[i]}
+window.addEventListener("message",function(e){if(e.origin!==O||!e.data)return;var d=e.data;
 if(d.type==="scalbl:ready"){e.source.postMessage({type:"scalbl:parent-tracking"},O);return}
+if(d.type==="scalbl:height"){var f=F(e.source);if(f&&d.height>0)f.style.height=d.height+"px";return}
+if(d.type==="scalbl:step"){var g=F(e.source);if(g){var r=g.getBoundingClientRect();if(r.top<0||r.top>window.innerHeight*0.5)g.scrollIntoView({behavior:"smooth",block:"start"})}return}
 if(d.type!=="scalbl:booked"||!d.metaPixelId)return;
 !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version="2.0";n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,"script","https://connect.facebook.net/en_US/fbevents.js");
 var ids=window.fbq.instance&&window.fbq.instance.pixelsByID;if(!ids||!ids[d.metaPixelId])fbq("init",d.metaPixelId);
