@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock, ArrowLeft } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock, ArrowLeft, Globe, Mail } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import { timezoneOptions, detectBrowserTimezone } from "./lib/calendarOptions";
@@ -42,6 +42,84 @@ function monthCells(ym) {
 const monthLabel = (ym) =>
   new Date(`${ym}-15T12:00:00Z`).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
 // "Mon, Nov 23, 2026"
+// Small inline flags (emoji flags don't render on Windows).
+const UnionJack = ({ w = 30, h = 15 }) => (
+  <svg viewBox="0 0 60 30" width={w} height={h} preserveAspectRatio="none">
+    <clipPath id="uj-c"><path d="M0,0 v30 h60 v-30 z" /></clipPath>
+    <clipPath id="uj-t"><path d="M30,15 h30 v15 z v15 h-30 z h-30 v-15 z v-15 h30 z" /></clipPath>
+    <g clipPath="url(#uj-c)">
+      <path d="M0,0 v30 h60 v-30 z" fill="#012169" />
+      <path d="M0,0 L60,30 M60,0 L0,30" stroke="#fff" strokeWidth="6" />
+      <path d="M0,0 L60,30 M60,0 L0,30" clipPath="url(#uj-t)" stroke="#C8102E" strokeWidth="4" />
+      <path d="M30,0 v30 M0,15 h60" stroke="#fff" strokeWidth="10" />
+      <path d="M30,0 v30 M0,15 h60" stroke="#C8102E" strokeWidth="6" />
+    </g>
+  </svg>
+);
+const Star = ({ x, y, r, fill = "#fff" }) => (
+  <polygon
+    fill={fill}
+    points={Array.from({ length: 10 }, (_, i) => {
+      const a = (Math.PI / 5) * i - Math.PI / 2;
+      const rr = i % 2 ? r * 0.45 : r;
+      return `${x + rr * Math.cos(a)},${y + rr * Math.sin(a)}`;
+    }).join(" ")}
+  />
+);
+function Flag({ code }) {
+  const box = "w-[26px] h-[17px] shrink-0 overflow-hidden rounded-[2px] ring-1 ring-black/10";
+  if (code === "GB") return <span className={box}><UnionJack w={26} h={17} /></span>;
+  if (code === "US")
+    return (
+      <svg viewBox="0 0 26 17" className={box}>
+        {Array.from({ length: 7 }, (_, i) => <rect key={i} y={(i * 2 * 17) / 13} width="26" height={17 / 13} fill="#B22234" />)}
+        <rect width="11" height={(7 * 17) / 13} fill="#3C3B6E" />
+      </svg>
+    );
+  // Blue ensign: Australia / New Zealand.
+  return (
+    <svg viewBox="0 0 26 17" className={box}>
+      <rect width="26" height="17" fill="#012169" />
+      <UnionJack w={13} h={8.5} />
+      {code === "NZ" ? (
+        <>
+          <Star x={20} y={4} r={1.3} fill="#C8102E" /><Star x={17.5} y={8} r={1.4} fill="#C8102E" />
+          <Star x={22.5} y={7.5} r={1.2} fill="#C8102E" /><Star x={20} y={13} r={1.5} fill="#C8102E" />
+        </>
+      ) : (
+        <>
+          <Star x={6.5} y={12.8} r={2.2} /><Star x={20} y={3.2} r={1.1} /><Star x={17} y={7.8} r={1.1} />
+          <Star x={23.2} y={6.8} r={1.1} /><Star x={20} y={14} r={1.1} /><Star x={21.6} y={9.6} r={0.6} />
+        </>
+      )}
+    </svg>
+  );
+}
+const PHONE_COUNTRIES = [
+  { code: "AU", name: "Australia", dial: "61" },
+  { code: "NZ", name: "New Zealand", dial: "64" },
+  { code: "GB", name: "United Kingdom", dial: "44" },
+  { code: "US", name: "United States", dial: "1" },
+];
+// Australian numbers are sent exactly as typed (the server normalises
+// them); other countries get their dialling code prefixed.
+function phoneForSubmit(raw, countryCode) {
+  const v = (raw || "").trim();
+  if (!v || countryCode === "AU" || v.startsWith("+")) return v;
+  const c = PHONE_COUNTRIES.find((x) => x.code === countryCode);
+  return `+${c.dial}${v.replace(/\D/g, "").replace(/^0+/, "")}`;
+}
+const tzLabel = (tz) => {
+  try {
+    const off = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" })
+      .formatToParts(new Date())
+      .find((x) => x.type === "timeZoneName")?.value;
+    return off ? `${tz} (${off})` : tz;
+  } catch {
+    return tz;
+  }
+};
+
 const dayKeyPart = (key, opts) => new Date(`${key}T12:00:00Z`).toLocaleDateString("en-US", { ...opts, timeZone: "UTC" });
 
 const dayKeyLabel = (key) =>
@@ -157,10 +235,23 @@ export default function BookingWidget({ slug }) {
   // Phones/tablets (below lg): tapping a date swaps the calendar for a
   // full-width time list with a back arrow, instead of listing times below.
   const [mobileTimesOpen, setMobileTimesOpen] = useState(false);
+  // Which view just slid in: "times" / "calendar" (phone date <-> times),
+  // "form" (time picked), "picker" (back from the details form).
+  const [anim, setAnim] = useState(null);
+  const goToForm = (slot) => {
+    setAnim("form");
+    setSelectedSlot(slot);
+    if (window.matchMedia("(max-width: 767px)").matches) window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const backToPicker = () => {
+    setAnim("picker");
+    setSelectedSlot(null);
+  };
   // ?name=&email=&phone= pre-fill the form, e.g. when embedded after a lead-capture survey.
   const [form, setForm] = useState(() => {
     const params = new URLSearchParams(window.location.search);
-    return { name: params.get("name") || "", email: params.get("email") || "", phone: params.get("phone") || "", notes: "" };
+    const [firstName = "", ...rest] = (params.get("name") || "").trim().split(/\s+/);
+    return { firstName, lastName: rest.join(" "), country: "AU", email: params.get("email") || "", phone: params.get("phone") || "", notes: "" };
   });
   // Opt-in embed options, so other booking links are unaffected:
   //   ?commit=1  -> require a "will you show up" commitment checkbox before booking
@@ -379,7 +470,10 @@ export default function BookingWidget({ slug }) {
         startUTC: selectedSlot.startUTC,
         endUTC: selectedSlot.endUTC,
         timezone,
-        ...form,
+        name: `${form.firstName} ${form.lastName}`.trim(),
+        email: form.email.trim(),
+        phone: phoneForSubmit(form.phone, form.country),
+        notes: form.notes,
       });
       setConfirmation(result);
       const eventId = `scalbl-booking-${result.booking?.id ?? Date.now()}`;
@@ -566,16 +660,39 @@ export default function BookingWidget({ slug }) {
     <div className="min-h-screen bg-gray-50 px-3 sm:px-6 py-4 sm:py-8">
       <div className="max-w-6xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col md:flex-row">
         <aside className={`${mobileTimesOpen && !selectedSlot ? "hidden md:block" : ""} md:w-[30%] shrink-0 p-6 sm:p-8 border-b md:border-b-0 md:border-r border-gray-200`}>
+          {selectedSlot && !rescheduling && (
+            <button
+              type="button"
+              aria-label="Pick a different time"
+              onClick={backToPicker}
+              className="mb-6 h-12 w-12 flex items-center justify-center rounded-full border border-gray-200 text-blue-600 hover:bg-gray-50 bw-pop"
+            >
+              <ArrowLeft size={22} />
+            </button>
+          )}
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">{calendarInfo.name}</h1>
           {calendarInfo.description && <p className="text-sm text-gray-500 mt-2">{calendarInfo.description}</p>}
           <div className="mt-5 space-y-3 text-gray-600">
             <p className="flex items-center gap-3 font-medium">
               <Clock size={18} className="text-gray-500 shrink-0" /> {calendarInfo.eventLengthMinutes} min
             </p>
-            {selectedDayKey && (
-              <p className="flex items-center gap-3 font-medium">
-                <CalendarDays size={18} className="text-gray-500 shrink-0" /> {dayKeyLabel(selectedDayKey)}
-              </p>
+            {selectedSlot ? (
+              <>
+                <p key={selectedSlot.startUTC} className="flex items-center gap-3 font-medium bw-fade">
+                  <CalendarDays size={18} className="text-gray-500 shrink-0" />
+                  {slotTimeLabel(selectedSlot.startUTC, timezone)} - {slotTimeLabel(selectedSlot.endUTC, timezone)} ,{" "}
+                  {dayKeyLabel(dateKeyInZone(new Date(selectedSlot.startUTC), timezone))}
+                </p>
+                <p className="flex items-center gap-3 font-medium bw-fade">
+                  <Globe size={18} className="text-gray-500 shrink-0" /> {tzLabel(timezone)}
+                </p>
+              </>
+            ) : (
+              selectedDayKey && (
+                <p className="flex items-center gap-3 font-medium">
+                  <CalendarDays size={18} className="text-gray-500 shrink-0" /> {dayKeyLabel(selectedDayKey)}
+                </p>
+              )
             )}
           </div>
           {rescheduling && (
@@ -588,12 +705,15 @@ export default function BookingWidget({ slug }) {
           )}
         </aside>
 
-        <section className="flex-1 min-w-0">
+        <section className="flex-1 min-w-0 flex flex-col">
         {!selectedSlot ? (
-          <div className="p-5 sm:p-8">
+          <div className={`p-5 sm:p-8 ${anim === "picker" ? "bw-in-back" : ""}`}>
             <h2 className={`${mobileTimesOpen ? "hidden lg:block" : ""} text-lg sm:text-xl font-medium text-gray-900 mb-5`}>Select Date &amp; Time</h2>
             <div className="flex flex-col lg:flex-row gap-6 lg:gap-10">
-              <div className={`${mobileTimesOpen ? "hidden lg:block" : ""} flex-1 min-w-0`}>
+              <div
+                key={`cal-${mobileTimesOpen}`}
+                className={`${mobileTimesOpen ? "hidden lg:block" : ""} ${anim === "calendar" ? "bw-in-back" : ""} flex-1 min-w-0`}
+              >
                 <div className="flex items-center justify-center gap-4 sm:gap-8 mb-4">
                   <button
                     type="button"
@@ -635,8 +755,9 @@ export default function BookingWidget({ slug }) {
                             stopAutoPick();
                             setSelectedDayKey(key);
                             if (window.matchMedia("(max-width: 1023px)").matches) {
+                              setAnim("times");
                               setMobileTimesOpen(true);
-                              window.scrollTo({ top: 0 });
+                              window.scrollTo({ top: 0, behavior: "smooth" });
                             }
                           }}
                           disabled={disabled}
@@ -667,14 +788,17 @@ export default function BookingWidget({ slug }) {
                 </div>
               </div>
 
-              <div className={`${mobileTimesOpen ? "" : "hidden lg:block"} lg:w-64 xl:w-72 shrink-0`}>
+              <div
+                key={`times-${mobileTimesOpen}`}
+                className={`${mobileTimesOpen ? "" : "hidden lg:block"} ${anim === "times" && mobileTimesOpen ? "bw-in" : ""} lg:w-64 xl:w-72 shrink-0`}
+              >
                 {selectedDayKey && (
                   <div className="lg:hidden mb-5">
                     <div className="relative flex items-center justify-center min-h-[3.5rem]">
                       <button
                         type="button"
                         aria-label="Back to calendar"
-                        onClick={() => { setMobileTimesOpen(false); setPendingSlotStart(null); }}
+                        onClick={() => { setAnim("calendar"); setMobileTimesOpen(false); setPendingSlotStart(null); }}
                         className="absolute left-0 h-12 w-12 flex items-center justify-center rounded-full border border-gray-200 text-blue-600 hover:bg-gray-50"
                       >
                         <ArrowLeft size={22} />
@@ -702,7 +826,7 @@ export default function BookingWidget({ slug }) {
                   <div className="flex flex-col gap-2.5 lg:max-h-[27rem] lg:overflow-y-auto lg:pr-2">
                     {slots.map((s) =>
                       pendingSlotStart === s.startUTC ? (
-                        <div key={s.startUTC} className="shrink-0 grid grid-cols-2 gap-2">
+                        <div key={s.startUTC} className="shrink-0 grid grid-cols-2 gap-2 bw-pop">
                           <button
                             type="button"
                             onClick={() => setPendingSlotStart(null)}
@@ -712,7 +836,7 @@ export default function BookingWidget({ slug }) {
                           </button>
                           <button
                             type="button"
-                            onClick={() => setSelectedSlot(s)}
+                            onClick={() => goToForm(s)}
                             className="rounded py-3 text-sm sm:text-base font-semibold text-white bg-blue-600 hover:bg-blue-700 border border-blue-600"
                           >
                             Select
@@ -735,7 +859,7 @@ export default function BookingWidget({ slug }) {
           </div>
         ) : rescheduling ? (
           <div className="p-6 max-w-sm mx-auto space-y-4">
-            <button type="button" onClick={() => setSelectedSlot(null)} className="text-xs text-gray-400 hover:text-gray-700">
+            <button type="button" onClick={backToPicker} className="text-xs text-gray-400 hover:text-gray-700">
               ← Pick a different time
             </button>
             <p className="text-sm font-medium text-gray-900">
@@ -752,82 +876,117 @@ export default function BookingWidget({ slug }) {
             </button>
           </div>
         ) : (
-          <form onSubmit={submitBooking} className="p-6 max-w-sm mx-auto space-y-4">
-            <button type="button" onClick={() => setSelectedSlot(null)} className="text-xs text-gray-400 hover:text-gray-700">
-              ← Pick a different time
-            </button>
-            <h1 className="text-lg font-medium text-gray-900 leading-snug">
-              Your Zoom Call is booked for {bookingWhenHeadline(selectedSlot.startUTC, timezone)}. Please confirm by clicking the
-              button below.
-            </h1>
-            <div>
-              <label className="text-sm font-medium block mb-1.5">Name</label>
-              <input
-                required
-                value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium block mb-1.5">Email</label>
-              <input
-                type="email"
-                value={form.email}
-                onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium block mb-1.5">Phone (for a text reminder)</label>
-              <input
-                value={form.phone}
-                onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
-              />
-            </div>
-            {!embedOptions.hideNotes && (
+          <form onSubmit={submitBooking} className="flex-1 p-6 sm:p-8 flex flex-col bw-in">
+            <h2 className="text-xl sm:text-2xl font-medium text-gray-900 mb-6">Enter details</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5">
               <div>
-                <label className="text-sm font-medium block mb-1.5">Notes (optional)</label>
-                <textarea
-                  value={form.notes}
-                  onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-                  rows={2}
-                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm outline-none focus:border-gray-400"
+                <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">First name *</label>
+                <input
+                  required
+                  autoComplete="given-name"
+                  value={form.firstName}
+                  onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-4 py-3 text-base text-gray-900 outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
                 />
               </div>
-            )}
-            {requireCommit && (
-              <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                <p className="text-sm text-gray-800 mb-3">
-                  Please confirm your attendance for your call at{" "}
-                  <span className="font-semibold">{commitWhen(selectedSlot.startUTC, timezone)}</span>, no shows are costly to
-                  our business and we require your confirmation.
-                </p>
-                <label className="flex items-start gap-2.5 text-sm font-medium text-gray-900 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    required
-                    checked={committed}
-                    onChange={(e) => setCommitted(e.target.checked)}
-                    className="mt-0.5 h-4 w-4 accent-blue-600"
-                  />
-                  Yes I keep my word and will show up to the call
-                </label>
+              <div>
+                <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">Last name *</label>
+                <input
+                  required
+                  autoComplete="family-name"
+                  value={form.lastName}
+                  onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-4 py-3 text-base text-gray-900 outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
+                />
               </div>
-            )}
-            {bookError && <p className="text-sm text-red-600">{bookError}</p>}
-            <button
-              type="submit"
-              disabled={submitting || (!form.email && !form.phone) || (requireCommit && !committed)}
-              className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm px-5 py-2.5 rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {submitting && <Loader2 size={14} className="animate-spin" />}
-              Confirm booking
-            </button>
-            {!form.email && !form.phone && (
-              <p className="text-xs text-gray-400 text-center">An email or phone number is required.</p>
-            )}
+              <div>
+                <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">Phone *</label>
+                <div className="flex items-center border border-gray-300 rounded-lg focus-within:border-blue-600 focus-within:ring-1 focus-within:ring-blue-600">
+                  <label className="relative flex items-center gap-1.5 pl-4 pr-2 py-3 cursor-pointer" aria-label="Country">
+                    <Flag code={form.country} />
+                    <span className="text-[10px] text-gray-600">▼</span>
+                    <select
+                      value={form.country}
+                      onChange={(e) => setForm((f) => ({ ...f, country: e.target.value }))}
+                      className="absolute inset-0 opacity-0 cursor-pointer"
+                    >
+                      {PHONE_COUNTRIES.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {c.name} (+{c.dial})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <input
+                    required
+                    type="tel"
+                    autoComplete="tel"
+                    placeholder={form.country === "AU" ? "0412 345 678" : ""}
+                    value={form.phone}
+                    onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                    className="flex-1 min-w-0 pr-4 py-3 text-base text-gray-900 bg-transparent outline-none placeholder:text-gray-400"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">Email *</label>
+                <div className="flex items-center border border-gray-300 rounded-lg focus-within:border-blue-600 focus-within:ring-1 focus-within:ring-blue-600">
+                  <Mail size={20} className="ml-4 text-gray-500 shrink-0" />
+                  <input
+                    required
+                    type="email"
+                    autoComplete="email"
+                    value={form.email}
+                    onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                    className="flex-1 min-w-0 px-3 py-3 text-base text-gray-900 bg-transparent outline-none"
+                  />
+                </div>
+              </div>
+              {!embedOptions.hideNotes && (
+                <div className="sm:col-span-2">
+                  <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">Additional information</label>
+                  <textarea
+                    value={form.notes}
+                    onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
+                    rows={4}
+                    placeholder="Is there anything you would like us to know before your appointment?"
+                    className="w-full border border-gray-300 rounded-lg px-4 py-3 text-base text-gray-900 outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600 resize-none placeholder:text-gray-400"
+                  />
+                </div>
+              )}
+              {requireCommit && (
+                <div className="sm:col-span-2">
+                <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                  <p className="text-sm text-gray-800 mb-3">
+                    Please confirm your attendance for your call at{" "}
+                    <span className="font-semibold">{commitWhen(selectedSlot.startUTC, timezone)}</span>, no shows are costly to
+                    our business and we require your confirmation.
+                  </p>
+                  <label className="flex items-start gap-2.5 text-sm font-medium text-gray-900 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={committed}
+                      onChange={(e) => setCommitted(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 accent-blue-600"
+                    />
+                    Yes I keep my word and will show up to the call
+                  </label>
+                </div>
+                </div>
+              )}
+            </div>
+            {bookError && <p className="text-sm text-red-600 mt-5">{bookError}</p>}
+            <div className="mt-8 sm:mt-auto pt-2 sm:pt-10 flex justify-end">
+              <button
+                type="submit"
+                disabled={submitting || (requireCommit && !committed)}
+                className="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-base px-7 py-3.5 rounded-lg font-semibold shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {submitting && <Loader2 size={16} className="animate-spin" />}
+                Schedule meeting
+              </button>
+            </div>
           </form>
         )}
         </section>
