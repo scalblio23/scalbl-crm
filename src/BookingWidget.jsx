@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock, ArrowLeft } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import { timezoneOptions, detectBrowserTimezone } from "./lib/calendarOptions";
@@ -42,6 +42,8 @@ function monthCells(ym) {
 const monthLabel = (ym) =>
   new Date(`${ym}-15T12:00:00Z`).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
 // "Mon, Nov 23, 2026"
+const dayKeyPart = (key, opts) => new Date(`${key}T12:00:00Z`).toLocaleDateString("en-US", { ...opts, timeZone: "UTC" });
+
 const dayKeyLabel = (key) =>
   new Date(`${key}T12:00:00Z`).toLocaleDateString("en-US", {
     weekday: "short",
@@ -152,6 +154,9 @@ export default function BookingWidget({ slug }) {
   // A time they've clicked but not yet confirmed with "Select" — the
   // two-step pick, so nobody books a time by a slip of the finger.
   const [pendingSlotStart, setPendingSlotStart] = useState(null);
+  // Phones/tablets (below lg): tapping a date swaps the calendar for a
+  // full-width time list with a back arrow, instead of listing times below.
+  const [mobileTimesOpen, setMobileTimesOpen] = useState(false);
   // ?name=&email=&phone= pre-fill the form, e.g. when embedded after a lead-capture survey.
   const [form, setForm] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -560,7 +565,7 @@ export default function BookingWidget({ slug }) {
   return (
     <div className="min-h-screen bg-gray-50 px-3 sm:px-6 py-4 sm:py-8">
       <div className="max-w-6xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden flex flex-col md:flex-row">
-        <aside className="md:w-[30%] shrink-0 p-6 sm:p-8 border-b md:border-b-0 md:border-r border-gray-200">
+        <aside className={`${mobileTimesOpen && !selectedSlot ? "hidden md:block" : ""} md:w-[30%] shrink-0 p-6 sm:p-8 border-b md:border-b-0 md:border-r border-gray-200`}>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">{calendarInfo.name}</h1>
           {calendarInfo.description && <p className="text-sm text-gray-500 mt-2">{calendarInfo.description}</p>}
           <div className="mt-5 space-y-3 text-gray-600">
@@ -586,9 +591,9 @@ export default function BookingWidget({ slug }) {
         <section className="flex-1 min-w-0">
         {!selectedSlot ? (
           <div className="p-5 sm:p-8">
-            <h2 className="text-lg sm:text-xl font-medium text-gray-900 mb-5">Select Date &amp; Time</h2>
+            <h2 className={`${mobileTimesOpen ? "hidden lg:block" : ""} text-lg sm:text-xl font-medium text-gray-900 mb-5`}>Select Date &amp; Time</h2>
             <div className="flex flex-col lg:flex-row gap-6 lg:gap-10">
-              <div className="flex-1 min-w-0">
+              <div className={`${mobileTimesOpen ? "hidden lg:block" : ""} flex-1 min-w-0`}>
                 <div className="flex items-center justify-center gap-4 sm:gap-8 mb-4">
                   <button
                     type="button"
@@ -629,6 +634,10 @@ export default function BookingWidget({ slug }) {
                           onClick={() => {
                             stopAutoPick();
                             setSelectedDayKey(key);
+                            if (window.matchMedia("(max-width: 1023px)").matches) {
+                              setMobileTimesOpen(true);
+                              window.scrollTo({ top: 0 });
+                            }
                           }}
                           disabled={disabled}
                           className={`relative shrink-0 aspect-square h-10 w-10 sm:h-12 sm:w-12 rounded-full text-sm sm:text-base ${
@@ -658,9 +667,30 @@ export default function BookingWidget({ slug }) {
                 </div>
               </div>
 
-              <div className="lg:w-64 xl:w-72 shrink-0">
+              <div className={`${mobileTimesOpen ? "" : "hidden lg:block"} lg:w-64 xl:w-72 shrink-0`}>
                 {selectedDayKey && (
-                  <p className="lg:hidden text-sm font-medium text-gray-700 mb-3">{dayKeyLabel(selectedDayKey)}</p>
+                  <div className="lg:hidden mb-5">
+                    <div className="relative flex items-center justify-center min-h-[3.5rem]">
+                      <button
+                        type="button"
+                        aria-label="Back to calendar"
+                        onClick={() => { setMobileTimesOpen(false); setPendingSlotStart(null); }}
+                        className="absolute left-0 h-12 w-12 flex items-center justify-center rounded-full border border-gray-200 text-blue-600 hover:bg-gray-50"
+                      >
+                        <ArrowLeft size={22} />
+                      </button>
+                      <div className="text-center">
+                        <p className="text-xl font-semibold text-gray-900">{dayKeyPart(selectedDayKey, { weekday: "long" })}</p>
+                        <p className="text-sm text-gray-500 mt-0.5">{dayKeyPart(selectedDayKey, { month: "long", day: "numeric", year: "numeric" })}</p>
+                      </div>
+                    </div>
+                    <div className="mt-5">
+                      <label className="text-sm font-medium block mb-2 text-gray-900">Time zone</label>
+                      <Dropdown value={timezone} onChange={setTimezone} options={tzOptions} searchable />
+                    </div>
+                    <h3 className="text-xl font-semibold text-gray-900 text-center mt-6">Choose Time Slot</h3>
+                    <p className="text-sm text-gray-500 text-center mt-1">Duration : {calendarInfo.eventLengthMinutes} min</p>
+                  </div>
                 )}
                 {loadingSlots ? (
                   <div className="flex justify-center py-10">
