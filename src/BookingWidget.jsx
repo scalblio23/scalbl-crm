@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock, ArrowLeft, Globe, Mail } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
+import { LocationLogo, meetingLocation } from "./components/MeetingLocation";
 import { timezoneOptions, detectBrowserTimezone } from "./lib/calendarOptions";
 
 function dateKeyInZone(date, timeZone) {
@@ -676,6 +677,11 @@ export default function BookingWidget({ slug }) {
             <p className="flex items-center gap-3 font-medium">
               <Clock size={18} className="text-gray-500 shrink-0" /> {calendarInfo.eventLengthMinutes} min
             </p>
+            {meetingLocation(calendarInfo.meetingLocation) && (
+              <p className="flex items-center gap-3 font-medium">
+                <LocationLogo value={calendarInfo.meetingLocation} size={20} /> {meetingLocation(calendarInfo.meetingLocation).label}
+              </p>
+            )}
             {selectedSlot ? (
               <>
                 <p key={selectedSlot.startUTC} className="flex items-center gap-3 font-medium bw-fade">
@@ -695,6 +701,12 @@ export default function BookingWidget({ slug }) {
               )
             )}
           </div>
+          {meetingLocation(calendarInfo.meetingLocation) && (
+            <div className="mt-5 flex items-start gap-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+              <LocationLogo value={calendarInfo.meetingLocation} size={28} />
+              <p className="text-sm text-gray-800 leading-snug">{meetingLocation(calendarInfo.meetingLocation).note}</p>
+            </div>
+          )}
           {rescheduling && (
             <p className="text-sm text-gray-700 mt-5">
               Pick a new time.{" "}

@@ -884,6 +884,8 @@ export async function ensureSchema() {
     // Booking rules → "Require attendance confirmation": the booking
     // page asks the booker to tick "Yes I keep my word…" before booking.
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS require_attendance_confirm BOOLEAN NOT NULL DEFAULT false`);
+    // Calendar settings → Location: zoom | gmeet | teams | phone (null = not shown).
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS meeting_location TEXT`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_outlook_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_crm_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     // Emails received through Resend (see api/email-inbound.js), shown
@@ -3002,6 +3004,7 @@ export function calendarFromRow(r, { includeSecrets = false } = {}) {
     videoConferenceLink: r.video_conference_link || "",
     metaPixelId: r.meta_pixel_id || "",
     requireAttendanceConfirm: Boolean(r.require_attendance_confirm),
+    meetingLocation: r.meeting_location || null,
     confirmationWorkflow: r.confirmation_workflow || null,
     connections,
     bookingConnectionId: target ? target.id : null,
@@ -3118,7 +3121,8 @@ export async function updateCalendar(id, patch) {
        -- $9. api/calendars.js checks the account belongs to this calendar.
        booking_connection_id = CASE WHEN $19 THEN $20::int ELSE booking_connection_id END,
        booking_calendar_id = CASE WHEN $19 THEN $21 ELSE booking_calendar_id END,
-       require_attendance_confirm = COALESCE($22, require_attendance_confirm)
+       require_attendance_confirm = COALESCE($22, require_attendance_confirm),
+       meeting_location = CASE WHEN $23 THEN $24::text ELSE meeting_location END
      WHERE id = $1
      RETURNING id`,
     [
@@ -3146,6 +3150,8 @@ export async function updateCalendar(id, patch) {
       patch.bookingConnectionId ? Number(patch.bookingConnectionId) : null,
       (patch.bookingConnectionId && patch.bookingCalendarId) || null,
       typeof patch.requireAttendanceConfirm === "boolean" ? patch.requireAttendanceConfirm : null,
+      Object.prototype.hasOwnProperty.call(patch, "meetingLocation"),
+      patch.meetingLocation || null,
     ]
   );
   return rows[0] ? getCalendarById(rows[0].id) : null;
