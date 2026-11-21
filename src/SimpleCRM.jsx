@@ -102,6 +102,7 @@ import CrazytelSmsInbox from "./components/CrazytelSmsInbox";
 import EmailInbox from "./components/EmailInbox";
 import BroadcastPanel from "./components/BroadcastPanel";
 import Dropdown from "./components/Dropdown";
+import { MEETING_LOCATIONS, LocationLogo, meetingLocation } from "./components/MeetingLocation";
 import CalendarAccounts, { ClashCalendarChecklist } from "./components/CalendarAccounts";
 import AddStepMenu from "./components/AddStepMenu";
 // Tabs with their own code load when first opened (and in the
@@ -1005,7 +1006,7 @@ const CALENDAR_SETTINGS_SECTIONS = [
   { key: "timezone", label: "Timezone", icon: Clock },
   { key: "availability", label: "Availability", icon: Calendar },
   { key: "rules", label: "Booking rules", icon: ListChecks },
-  { key: "video", label: "Video conference", icon: Video },
+  { key: "video", label: "Location & video", icon: Video },
   { key: "tracking", label: "Tracking", icon: BarChart3 },
   { key: "reminders", label: "Patient reminders", icon: Bell },
   { key: "share", label: "Share & embed", icon: Link2 },
@@ -11008,6 +11009,37 @@ export default function SimpleCRM() {
 
                     {calendarSettingsTab === "video" && videoDraft && (
                       <div className="max-w-sm space-y-4">
+                        <div>
+                          <h2 className="text-base font-bold">Location</h2>
+                          <p className="text-sm text-gray-500 mt-1">
+                            Shown with its logo on the booking page. Saves as soon as you pick one.
+                          </p>
+                          <div className="grid grid-cols-2 gap-2 mt-3">
+                            {MEETING_LOCATIONS.map((loc) => {
+                              const on = openCalendar.meetingLocation === loc.value;
+                              return (
+                                <button
+                                  key={loc.value}
+                                  type="button"
+                                  disabled={savingCalendar}
+                                  onClick={() => patchCalendar(openCalendar.id, { meetingLocation: on ? null : loc.value })}
+                                  className={`flex items-center gap-2.5 border rounded-lg px-3 py-2.5 text-sm font-medium text-left disabled:opacity-60 ${
+                                    on ? "border-blue-600 ring-1 ring-blue-600 bg-blue-50/50" : "border-gray-200 hover:border-gray-300"
+                                  }`}
+                                >
+                                  <LocationLogo value={loc.value} size={26} />
+                                  {loc.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {meetingLocation(openCalendar.meetingLocation) && (
+                            <p className="text-xs text-gray-500 mt-2">
+                              Booking page note: “{meetingLocation(openCalendar.meetingLocation).note}” Click it again to remove.
+                            </p>
+                          )}
+                        </div>
+                        <hr className="border-gray-100" />
                         <div className="flex items-center justify-between">
                           <h2 className="text-base font-bold">Video conference</h2>
                           <button

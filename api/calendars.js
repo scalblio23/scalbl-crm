@@ -78,6 +78,13 @@ export default async function handler(req, res) {
         }
       }
       if (
+        Object.prototype.hasOwnProperty.call(patch, "meetingLocation") &&
+        patch.meetingLocation !== null &&
+        !["zoom", "gmeet", "teams", "phone"].includes(patch.meetingLocation)
+      ) {
+        return res.status(400).json({ error: "Unknown meeting location" });
+      }
+      if (
         Object.prototype.hasOwnProperty.call(patch, "confirmationWorkflow") &&
         patch.confirmationWorkflow !== null &&
         !Object.prototype.hasOwnProperty.call(WORKFLOWS, patch.confirmationWorkflow)

@@ -22,6 +22,7 @@ export default async function handler(req, res) {
       bookingWindowDays: calendar.bookingWindowDays,
       metaPixelId: calendar.metaPixelId || null,
       requireAttendanceConfirm: Boolean(calendar.requireAttendanceConfirm),
+      meetingLocation: calendar.meetingLocation || null,
     });
   } catch (err) {
     console.error("[api/calendar-public]", err);
