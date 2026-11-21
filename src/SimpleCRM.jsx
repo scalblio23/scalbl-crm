@@ -1053,7 +1053,7 @@ function bookingEmbedCode(slug) {
 (function(){var O="${origin}";function F(w){var f=document.getElementsByTagName("iframe");for(var i=0;i<f.length;i++)if(f[i].contentWindow===w)return f[i]}
 window.addEventListener("message",function(e){if(e.origin!==O||!e.data)return;var d=e.data;
 if(d.type==="scalbl:ready"){e.source.postMessage({type:"scalbl:parent-tracking"},O);return}
-if(d.type==="scalbl:height"){var f=F(e.source);if(f&&d.height>0)f.style.height=d.height+"px";return}
+if(d.type==="scalbl:height"){var f=F(e.source);if(f&&d.height>0){f.style.height=d.height+"px";if(!f.getAttribute("data-scalbl-fit")){f.setAttribute("data-scalbl-fit","1");f.setAttribute("scrolling","no");e.source.postMessage({type:"scalbl:autosize"},O)}}return}
 if(d.type==="scalbl:step"){var g=F(e.source);if(g){var r=g.getBoundingClientRect();if(r.top<0||r.top>window.innerHeight*0.5)g.scrollIntoView({behavior:"smooth",block:"start"})}return}
 if(d.type!=="scalbl:booked"||!d.metaPixelId)return;
 !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version="2.0";n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,"script","https://connect.facebook.net/en_US/fbevents.js");
