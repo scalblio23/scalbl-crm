@@ -1,3 +1,16 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Booking widget view transitions */
+@keyframes bw-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+@keyframes bw-in-back { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+@keyframes bw-pop { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
+@keyframes bw-fade { from { opacity: 0; } to { opacity: 1; } }
+.bw-in { animation: bw-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.bw-in-back { animation: bw-in-back 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.bw-pop { animation: bw-pop 0.18s ease-out both; }
+.bw-fade { animation: bw-fade 0.3s ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .bw-in, .bw-in-back, .bw-pop, .bw-fade { animation: none; }
+}
