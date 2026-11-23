@@ -118,15 +118,15 @@ test("recording tokens are scoped to one recording", () => {
 
 test("gateway records an answered call and reports it with the lead id", async () => {
   const dir = tmpDir();
-  const trunk = new FakeTrunk({ username: "T909317", password: "pw" });
+  const trunk = new FakeTrunk({ username: "ct100001", password: "pw" });
   const port = await trunk.listen();
   const ua = new SipUserAgent(
     loadSipConfig({
       SIP_SERVER: "127.0.0.1",
       SIP_PORT: String(port),
-      SIP_USERNAME: "T909317",
+      SIP_USERNAME: "ct100001",
       SIP_PASSWORD: "pw",
-      SIP_CALLER_ID: "+61480851534",
+      SIP_CALLER_ID: "+61485000111",
       SIP_MAX_CHANNELS: "1",
       SIP_RTP_PORTS: "45000-45999",
     }),

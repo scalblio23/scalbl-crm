@@ -1,5 +1,5 @@
 // Shared AI Voice logic — the "AI Voice" tab's speech-in → Claude →
-// speech-out turn loop. Same split as twilioCore.js: this file holds
+// speech-out turn loop. Same split as the other server/*.js cores: this file holds
 // the actual provider calls, used by both the local Express server
 // (server/index.js, for `npm run dev:all`) and the Vercel serverless
 // function (api/ai-voice-turn.js), so the two paths can't drift apart.
@@ -9,7 +9,7 @@
 // think → speak → play back), not a live, streaming, interruptible
 // phone call. That's the real engineering difference between this and
 // something like Vapi — see the pipeline below for where a future
-// upgrade (Twilio Media Streams + streaming STT/TTS + barge-in) would
+// upgrade (streaming call audio + streaming STT/TTS + barge-in) would
 // slot in. For an MVP you can actually talk to today, turn-based is
 // the right tradeoff: no WebSocket audio plumbing, no turn-taking
 // state machine, just three REST calls.

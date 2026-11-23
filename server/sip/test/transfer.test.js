@@ -15,15 +15,15 @@ const quiet = { log() {}, warn() {} };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function setup() {
-  const trunk = new FakeTrunk({ username: "T909317", password: "pw" });
+  const trunk = new FakeTrunk({ username: "ct100001", password: "pw" });
   const port = await trunk.listen();
   const ua = new SipUserAgent(
     loadSipConfig({
       SIP_SERVER: "127.0.0.1",
       SIP_PORT: String(port),
-      SIP_USERNAME: "T909317",
+      SIP_USERNAME: "ct100001",
       SIP_PASSWORD: "pw",
-      SIP_CALLER_ID: "+61480851534",
+      SIP_CALLER_ID: "+61485000111",
       SIP_MAX_CHANNELS: "3",
       SIP_RTP_PORTS: "46000-46999",
     }),
@@ -139,7 +139,7 @@ test("transfer: three-way audio, then handover bridges lead and third party", as
 
     // Third party hangs up → the lead is hung up too, both channels freed.
     const leadBye = trunk.next("bye", (m) => m.callId === leadInv.callId);
-    trunk.sendRequest("BYE", "sip:T909317@127.0.0.1", {
+    trunk.sendRequest("BYE", "sip:ct100001@127.0.0.1", {
       from: tInv.get("to").includes("tag=") ? tInv.get("to") : `${tInv.get("to")};tag=${targetTag}`,
       to: tInv.get("from"),
       callId: tInv.callId,

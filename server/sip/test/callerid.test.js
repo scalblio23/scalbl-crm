@@ -9,14 +9,14 @@ import { SipUserAgent } from "../ua.js";
 const quiet = { log() {}, warn() {} };
 
 async function startUa(extraEnv) {
-  const trunk = new FakeTrunk({ username: "T909317", password: "pw" });
+  const trunk = new FakeTrunk({ username: "ct100001", password: "pw" });
   const port = await trunk.listen();
   const ua = new SipUserAgent(
     loadSipConfig({
       SIP_SERVER: "127.0.0.1",
       SIP_PORT: String(port),
-      SIP_DOMAIN: "sipm5.au.voipcloud.online",
-      SIP_USERNAME: "T909317",
+      SIP_DOMAIN: "sip.crazytel.net.au",
+      SIP_USERNAME: "ct100001",
       SIP_PASSWORD: "pw",
       SIP_MAX_CHANNELS: "1",
       SIP_RTP_PORTS: "43000-43999",
@@ -44,19 +44,19 @@ async function dialOnce(trunk, ua) {
 
 test("SIP_CALLER_IDS: calls rotate through the numbers, in From and PAI", async () => {
   const { trunk, ua } = await startUa({
-    SIP_CALLER_ID: "+61480851534",
-    SIP_CALLER_IDS: "+61480851534, 0485 998 251, 61485991651",
+    SIP_CALLER_ID: "+61485000111",
+    SIP_CALLER_IDS: "+61485000111, 0485 998 251, 61485991651",
   });
   try {
     const seen = [];
     for (let i = 0; i < 4; i++) {
       const { invite, call } = await dialOnce(trunk, ua);
       seen.push(call.callerId);
-      assert.match(invite.get("from"), new RegExp(`<sip:\\${call.callerId}@sipm5\\.au\\.voipcloud\\.online>`));
+      assert.match(invite.get("from"), new RegExp(`<sip:\\${call.callerId}@sip\\.crazytel\\.net\\.au>`));
       assert.match(invite.get("p-asserted-identity"), new RegExp(`<sip:\\${call.callerId}@`));
     }
-    assert.deepEqual(seen, ["+61480851534", "+61485998251", "+61485991651", "+61480851534"]);
-    assert.deepEqual(ua.status().callerIds, ["+61480851534", "+61485998251", "+61485991651"]);
+    assert.deepEqual(seen, ["+61485000111", "+61485998251", "+61485991651", "+61485000111"]);
+    assert.deepEqual(ua.status().callerIds, ["+61485000111", "+61485998251", "+61485991651"]);
   } finally {
     await ua.stop();
     trunk.close();
@@ -70,7 +70,7 @@ test("SIP_CALLER_ID_FORMAT=national writes the caller ID as 04…", async () => 
   });
   try {
     const { invite } = await dialOnce(trunk, ua);
-    assert.match(invite.get("from"), /<sip:0485998251@sipm5\.au\.voipcloud\.online>/);
+    assert.match(invite.get("from"), /<sip:0485998251@sip\.crazytel\.net\.au>/);
   } finally {
     await ua.stop();
     trunk.close();

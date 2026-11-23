@@ -3,7 +3,7 @@
 // api/calendar-google-callback.js) and by every endpoint that needs
 // to read/write the connected Google Calendar (api/calendar-slots.js,
 // api/calendar-book.js, api/calendar-cancel.js). Same shared-module
-// pattern as server/twilioCore.js — no separate googleapis dependency;
+// pattern as the other server/*.js modules — no separate googleapis dependency;
 // this is a handful of plain REST calls, made with the runtime's
 // built-in fetch (Node 18+, same assumption the rest of the app makes).
 import { updateCalendarConnectionTokens } from "./db.js";
@@ -54,7 +54,7 @@ export function googleRedirectUri(baseUrl) {
 // The base URL used to build the OAuth redirect_uri — Google rejects
 // the whole flow with "Error 400: redirect_uri_mismatch" unless this
 // exactly matches an Authorized redirect URI registered in Google
-// Cloud Console. Deliberately NOT server/twilioCore.js's
+// Cloud Console. Deliberately NOT server/publicUrl.js's
 // publicBaseUrl() here: that prefers VERCEL_URL, which on Vercel is
 // the deployment's own unique hash URL (e.g.
 // "my-app-git-branch-hash.vercel.app"), not the custom/production

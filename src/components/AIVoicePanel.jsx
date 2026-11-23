@@ -102,8 +102,8 @@ function KeyField({ label, hint, value, onChange, placeholder, usingEnvFallback 
 // One turn = one round trip (record → POST /api/ai-voice-turn →
 // transcript + spoken reply back) rather than a live streaming phone
 // call — see server/aiVoiceCore.js for why that's the right scope for
-// a first version, and what a real-time upgrade (Twilio Media
-// Streams, streaming STT/TTS, barge-in) would need on top of this.
+// a first version, and what a real-time upgrade (streaming call audio,
+// streaming STT/TTS, barge-in) would need on top of this.
 // Settings fetched ahead of time (prefetchAIVoice, after start-up) and
 // kept between visits to the tab, so it opens with them already there.
 let settingsRequest = null;

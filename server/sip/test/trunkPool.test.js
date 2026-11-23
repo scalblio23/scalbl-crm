@@ -78,7 +78,7 @@ test("bad SIP_TRUNKS_FILE setups fail clearly without leaking passwords", () => 
 });
 
 test("without SIP_TRUNKS_FILE the single trunk loads exactly as before", () => {
-  const env = { SIP_USERNAME: "T1", SIP_PASSWORD: "p", SIP_CALLER_ID: "0480851534" };
+  const env = { SIP_USERNAME: "T1", SIP_PASSWORD: "p", SIP_CALLER_ID: "0485000111" };
   assert.deepEqual(loadSipConfigs(env), [loadSipConfig(env)]);
 });
 

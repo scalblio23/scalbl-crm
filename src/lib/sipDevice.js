@@ -1,6 +1,5 @@
-// Browser softphone for the SIP trunk (VoIPcloud/VoIPline) — the SIP
-// equivalent of twilioDevice.js, with the same call-object shape so
-// the Powerdialler doesn't care which one it's talking to.
+// Browser softphone for the SIP trunk (Crazytel) — the Powerdialler,
+// Multi Line and manual calls all go through it (via voiceDevice.js).
 //
 // The browser never speaks SIP itself: it holds one WebSocket to the
 // voice gateway (server/voiceGateway.js), which owns the SIP
@@ -8,8 +7,7 @@
 // raw audio — 16-bit mono PCM at 8 kHz, 20 ms per frame — resampled
 // to/from the sound card here by two small AudioWorklets.
 //
-// Call objects emit the same events the Twilio SDK's Call does, so the
-// existing UI wiring works unchanged:
+// Call objects emit these events:
 //   "ringing", "accept", "disconnect" (info), "cancel", "error" (err)
 // plus "dtmf" (digit) and, for multi-line, "legs" (legs[]).
 // "disconnect" carries { outcome, outcomeMessage } — outcome is
@@ -118,8 +116,7 @@ class SipCall extends Emitter {
     this.answered = false;
     Object.assign(this, props);
   }
-  // Same values the Twilio Call's status() uses where the Powerdialler
-  // checks it: "closed" once this call is over.
+  // What the Powerdialler checks: "closed" once this call is over.
   status() {
     if (current !== this) return "closed";
     return this.answered ? "open" : "ringing";
@@ -448,7 +445,7 @@ function finishCall() {
 }
 
 // ---------- ringback ----------
-// VoIPcloud signals ringing (SIP 180) without sending any audio, so
+// The provider can signal ringing (SIP 180) without sending any audio, so
 // without this the rep hears silence while the lead's phone rings.
 // Plays the Australian ringback tone locally instead — 400 + 450 Hz,
 // 0.4 s on, 0.2 s off, 0.4 s on, 2 s off — until the call is answered
@@ -510,7 +507,7 @@ function hasSound(buffer) {
 
 // ---------- calls ----------
 
-// Same Australia-first E.164 normalization as twilioDevice.js.
+// Australia-first E.164 normalization ("0412 345 678" → "+61412345678").
 function toE164(rawPhone) {
   const cleaned = String(rawPhone || "").replace(/[^\d+]/g, "");
   if (cleaned.startsWith("+")) return cleaned;
@@ -541,7 +538,7 @@ async function begin(call, message) {
   });
 }
 
-// Returns { call, callerId } like twilioDevice.placeCall.
+// Returns { call, callerId }.
 // `leadId` labels the call's recording with its contact.
 export function placeCall(phoneNumber, { leadId } = {}) {
   const to = toE164(phoneNumber);

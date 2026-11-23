@@ -83,7 +83,6 @@ import {
 import {
   placeCall,
   hangUp,
-  joinConference,
   placeMultilineCall,
   playSoundboardClip,
   sendDigits,
@@ -727,18 +726,16 @@ function computeWorkingHours(entries, { gapMinutes, maxMinutesPerCall }) {
 }
 
 // One multi-line dial candidate's status → a friendly label/color for
-// the "Dialling N lines" panel. Mirrors the statuses a Twilio call
-// leg actually reports (see api/multiline-status.js).
+// the "Dialling N lines" panel (statuses come from the voice gateway).
 const MULTILINE_STATUS_LABELS = {
   placed: "Dialling…",
   queued: "Dialling…",
   initiated: "Dialling…",
   ringing: "Ringing…",
   // Deliberately not "Connected" or "Answered" alone — answering
-  // doesn't mean the rep can hear (or be heard by) this line yet; it
-  // stays muted server-side until confirmed as the one winning line
-  // (see server/twilioCore.js), which is also the split second this
-  // card disappears in favor of the single live-call view.
+  // doesn't mean the rep can hear (or be heard by) this line yet; it's
+  // only bridged once confirmed as the one winning line, which is also
+  // the split second this card disappears in favor of the live-call view.
   "in-progress": "Answered — connecting…",
   completed: "Ended",
   busy: "Busy",
@@ -756,29 +753,13 @@ function multilineStatusColor(status) {
 }
 
 // ---------- Live transfer ----------
-// Fresh conference name for moving a Powerdialler call into, made in
-// the browser (not by the server) so the rep's leg can rejoin it the
-// instant its old <Dial> leg drops — before the server has even
-// replied. Same shape the server validates (see
-// isValidTransferConferenceName in server/twilioCore.js).
-function generateTransferConferenceName() {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return `xfer_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
-}
-
 const TRANSFER_ACTIVE_STATUSES = ["placing", "ringing", "connected"];
-// Call legs a live transfer has replaced — the Powerdialler leg whose
-// <Dial> the lead was moved out of. Any late event it still emits
-// after the rep has rejoined the lead elsewhere must not be mistaken
-// for the *new* leg ending.
-const supersededCallLegs = new WeakSet();
 const TRANSFER_ENDED_STATUSES = ["no-answer", "busy", "failed", "left", "cancelled"];
 
 // The "Live transfer" section of the live-call card (Powerdialler and
 // Multi Line alike). Purely presentational — every action is a
 // callback into the transfer flow in SimpleCRM (startTransfer &
-// friends), which is where the actual Twilio choreography lives.
+// friends), which asks the voice gateway to ring and bridge.
 function LiveTransferPanel({ transfer, defaultNumber, clientName, live, onStart, onCancel, onComplete, onDismiss }) {
   const [open, setOpen] = useState(false);
   const [number, setNumber] = useState(defaultNumber || "");
@@ -938,7 +919,7 @@ function LiveTransferPanel({ transfer, defaultNumber, clientName, live, onStart,
 }
 
 // DTMF keypad for the live call — sends tones into the call itself
-// (IVR menus, extensions), over the SIP trunk or Twilio alike.
+// (IVR menus, extensions), over the SIP trunk.
 const DTMF_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
 function DtmfKeypad({ disabled }) {
   const [open, setOpen] = useState(false);
@@ -1893,7 +1874,7 @@ export default function SimpleCRM() {
   // "did this fire": zero rows means the trigger never matched at all
   // (check the filter, Active, and whether it was saved); a 'done' row
   // means it ran — so a missing message from there is a delivery
-  // problem (Resend/Twilio), not an automation problem.
+  // problem (Resend/Crazytel), not an automation problem.
   const [automationRuns, setAutomationRuns] = useState([]);
   const [automationRunsLoading, setAutomationRunsLoading] = useState(false);
   const loadAutomationRuns = async (id) => {
@@ -2216,9 +2197,9 @@ export default function SimpleCRM() {
       .then(setTagBookingLinks)
       .catch(() => {}); // hotseat just shows no link
   }, [authUser]);
-  // Call recordings land in a lead's conversation via Twilio's
-  // callback a little after the call ends (see api/recording-status.js)
-  // — and inbound SMS arrive server-side too — so re-fetch the threads
+  // Call recordings land in a lead's conversation from the voice
+  // gateway a little after the call ends — and inbound SMS arrive
+  // server-side too — so re-fetch the threads
   // each time the Conversation tab is opened, not just at login.
   useEffect(() => {
     if (page !== "conversation" || !authUser) return;
@@ -4352,11 +4333,11 @@ export default function SimpleCRM() {
   const activeLead = dialQueueById.get(activeLeadId) || null;
 
   // Live calling — same model as GoHighLevel's power dialler: the
-  // browser registers as a Twilio Voice "device" and calls ring
-  // through the rep's mic/speakers via the backend in /server.
+  // browser connects to the SIP voice gateway and calls ring through
+  // the rep's mic/speakers (src/lib/voiceDevice.js).
   const [callStatus, setCallStatus] = useState("idle"); // idle | connecting | ringing | in-progress
   const [callError, setCallError] = useState("");
-  const [activeCallerId, setActiveCallerId] = useState(""); // which of the rotated Twilio numbers is placing the current call
+  const [activeCallerId, setActiveCallerId] = useState(""); // which of our numbers is placing the current call
   // The number actually being dialled for the live call — usually
   // just activeLead.phone, but "Call again with a different number"
   // (below) overrides it, so the hotseat always shows what's really
@@ -4488,34 +4469,24 @@ export default function SimpleCRM() {
   // the same session/queue engine Powerdialler uses.
   const [multiLines, setMultiLines] = useState(4);
   const [multilineBatch, setMultilineBatch] = useState(null); // { id, candidates: [{leadId,name,phone,status}] } | null
-  const multilineBatchIdRef = useRef(null); // current batch id, for cancelling on an early hang-up
   const multilineWinnerRef = useRef(null); // resolved winning lead, read once the rep's own leg disconnects
   const multilinePollRef = useRef(null);
-  // Which conference the current Multi Line call is in — a live
-  // transfer on a Multi Line call just dials the third party straight
-  // into it, rather than moving anyone (see startTransfer).
-  const multilineConferenceRef = useRef(null);
 
   // Live transfer — bringing a third person (usually the client's own
   // closer, from the client's "Transfer number") into the live call
-  // and then handing the lead over to them. See server/twilioCore.js's
-  // "Live transfer" section for the Twilio choreography; the browser
+  // and then handing the lead over to them. The voice gateway rings the
+  // third party and bridges everyone (server/sip/gateway.js); the browser
   // side is startTransfer / cancelTransfer / completeTransfer below.
   //
   // Held in a ref as well as state because the call-end handlers
   // (attached once, when a call starts) need the *current* transfer,
   // not whatever it was when the call began. Shape:
-  //   { conferenceName, leadId, to, phase, targetStatus, targetCallSid,
-  //     completed, completing, error, oldCall, oldCallDropped }
-  //   phase: "moving" (Powerdialler only — the lead's just been moved
-  //     into the conference and this browser's own leg is about to
-  //     drop and rejoin it) | "in-conference" | "none" (a transfer
-  //     that failed before anything moved — the call is unchanged)
+  //   { sip, leadId, to, phase, targetStatus, completed, completing, error }
+  //   phase: "in-conference"
   //   targetStatus: "idle" | "placing" | "ringing" | "connected" |
   //     "no-answer" | "busy" | "failed" | "left" | "cancelled"
   const [transfer, setTransfer] = useState(null);
   const transferRef = useRef(null);
-  const transferPollRef = useRef(null);
   const setTransferState = (next) => {
     transferRef.current = next;
     setTransfer(next);
@@ -5003,7 +4974,7 @@ export default function SimpleCRM() {
   // the same status values, coloured the same way, as everywhere else.
   const callOutcomeColor = (value) => (value ? statusSolidClass(value) : "");
 
-  // Kept in sync with `session` so the long-lived Twilio call event
+  // Kept in sync with `session` so the long-lived call event
   // handlers below (registered once per call, not re-created each
   // render) always see whether a session is *currently* active rather
   // than whichever one was active when the call started.
@@ -5075,7 +5046,7 @@ export default function SimpleCRM() {
     setSession(null);
     setSessionPaused(false);
     setWrapUp(null);
-    // Stopped directly here rather than only relying on the Twilio
+    // Stopped directly here rather than only relying on the
     // call's own disconnect/cancel event to eventually fire
     // onCallEnded — that event isn't guaranteed (e.g. the conference
     // leg is in a bad state), and until it does, the poll loop would
@@ -5084,10 +5055,6 @@ export default function SimpleCRM() {
     // later observes a winner.
     stopMultilinePolling();
     setMultilineBatch(null);
-    if (multilineBatchIdRef.current) {
-      cancelMultilineBatch(multilineBatchIdRef.current);
-      multilineBatchIdRef.current = null;
-    }
     // Deliberately NOT clearing multilineWinnerRef here — if the rep
     // is actively connected to a winner when they hit Stop, the
     // conference call's disconnect event is still going to fire
@@ -5106,9 +5073,7 @@ export default function SimpleCRM() {
       completeTransfer();
       return;
     }
-    // Any other live transfer in flight goes with it — the third
-    // party's leg gets dropped, and a Powerdialler leg mid-rejoin (see
-    // rejoinTransferConference) sees the transfer's gone and bails.
+    // Any other live transfer in flight goes with it.
     finishTransferOnCallEnd();
     if (calling) {
       hangUp();
@@ -5185,8 +5150,8 @@ export default function SimpleCRM() {
   // rang and lost leave the queue too, instead of contaminating the
   // next round with numbers that were just tried a moment ago.
   //
-  // `error` is set when Twilio reported the call as failed (bad
-  // number, gateway/TwiML error, dropped connection, …). Mid-session
+  // `error` is set when the call was reported as failed (bad
+  // number, gateway error, dropped connection, …). Mid-session
   // the wrap-up still opens for those — with the session paused so it
   // can't auto-advance — because the rep has to be able to record
   // what happened ("wrong number", …) and move on to the next lead:
@@ -5336,7 +5301,6 @@ export default function SimpleCRM() {
     setActiveCallPhone(lead.phone);
     setLastAdHocCall(null); // starting any call retires the previous one's redial card
     callEndedRef.current = false;
-    multilineConferenceRef.current = null;
     try {
       const { call, callerId } = await placeCall(lead.phone, "rep", { leadId: lead.id });
       activeCallRef.current = call;
@@ -5345,21 +5309,9 @@ export default function SimpleCRM() {
 
       // Shared end-of-call handling for disconnect/cancel/error alike —
       // guarded so it only ever runs once per call, however it ends
-      // (Twilio's own event, or the user hitting "End call" below).
-      const onCallEnded = (err, leg = null) => {
+      // (the call's own event, or the user hitting "End call" below).
+      const onCallEnded = (err) => {
         if (callEndedRef.current) return;
-        if (leg && supersededCallLegs.has(leg)) return; // a late event from a leg a transfer already replaced
-        // A live transfer has just moved the lead out of this leg's
-        // <Dial> bridge into a conference, and Twilio ending this leg
-        // is the expected consequence — not the call being over. Rejoin
-        // the lead in the conference (the new leg gets these same
-        // handlers, so the *real* end of the call still lands below).
-        if (!err && transferRef.current?.phase === "moving" && leg && leg === transferRef.current.oldCall) {
-          transferRef.current.oldCallDropped = true;
-          supersededCallLegs.add(leg);
-          rejoinTransferConference(wireCall, onCallEnded);
-          return;
-        }
         callEndedRef.current = true;
         const transferredTo = finishTransferOnCallEnd();
         setCalling(false);
@@ -5400,7 +5352,7 @@ export default function SimpleCRM() {
         handleCallEnded(lead, durationMs);
       };
 
-      // Twilio's 'error' doesn't always mean the call is over (a DTMF
+      // A call's 'error' doesn't always mean the call is over (a DTMF
       // or message-send failure mid-call is reported the same way),
       // and a fatal one is normally followed by its own 'disconnect'.
       // So an error is remembered here and acted on when the call
@@ -5408,9 +5360,6 @@ export default function SimpleCRM() {
       // SDK closes a call without emitting 'disconnect' (its signaling
       // connection dropping), so the hotseat can't get stuck on
       // "Live call" with no way to wrap up.
-      //
-      // Wrapped up as wireCall so the leg a live transfer rejoins with
-      // gets exactly the same handling as the original one.
       const wireCall = (c) => {
         let failure = null;
         const finalize = () => onCallEnded(failure, c);
@@ -5443,7 +5392,7 @@ export default function SimpleCRM() {
   // ----- Manual dial (floating phone button, every page) -----
   // Dial any number by hand without it having to be a contact. Goes
   // through the same placeCall() as every other call, so it picks up
-  // the same caller ID rotation across TWILIO_CALLER_IDS — but keeps
+  // the same caller ID rotation across the SIP accounts — but keeps
   // its own state rather than borrowing activeLeadId/startCall, since
   // those assume a lead in dialQueue and would open a wrap-up screen
   // if a Powerdialler session happened to be paused underneath.
@@ -5465,7 +5414,7 @@ export default function SimpleCRM() {
     const phone = manualDialNumber.trim();
     // `calling` is the one flag every dial path already checks, so
     // setting it here is what stops the diallers (and this button)
-    // from putting a second call on the same Twilio device.
+    // from putting a second call on the same browser softphone.
     if (!phone || calling || manualCall) return;
     setManualCallError("");
     setManualCallElapsedMs(0);
@@ -5504,105 +5453,22 @@ export default function SimpleCRM() {
     } catch (err) {
       setCalling(false);
       setManualCall(null);
-      setManualCallError(err.message || "Could not start the call — check your Twilio setup.");
+      setManualCallError(err.message || "Could not start the call — check the phone line status.");
     }
   };
 
   // ----- Live transfer -----
-  // See the `transfer` state above for the shape, and
-  // server/twilioCore.js for what the backend does with each call.
-
-  const stopTransferPolling = () => {
-    if (transferPollRef.current) {
-      clearInterval(transferPollRef.current);
-      transferPollRef.current = null;
-    }
-  };
-
-  // Twilio is the source of truth for how the third party's leg is
-  // going (there's no status callback to wait on — see the server
-  // notes), so it's polled every couple of seconds for as long as the
-  // transfer's up. `giveUpAt` is the same kind of client-side backstop
-  // Multi Line uses, a little past the server-side ring timeout.
-  const startTransferPolling = (targetCallSid, giveUpAt) => {
-    stopTransferPolling();
-    transferPollRef.current = setInterval(async () => {
-      const t = transferRef.current;
-      if (!t || t.targetCallSid !== targetCallSid) {
-        stopTransferPolling();
-        return;
-      }
-      let data;
-      try {
-        data = await api.get(`/api/transfer-status?callSid=${encodeURIComponent(targetCallSid)}`);
-      } catch {
-        return; // transient — try again next tick
-      }
-      const s = data.status;
-      if (s === "in-progress") {
-        if (t.targetStatus !== "connected") updateTransfer({ targetStatus: "connected" });
-      } else if (s === "completed") {
-        stopTransferPolling();
-        updateTransfer({ targetStatus: t.targetStatus === "connected" ? "left" : "no-answer", targetCallSid: null });
-      } else if (s === "busy" || s === "no-answer" || s === "failed" || s === "canceled") {
-        stopTransferPolling();
-        updateTransfer({
-          targetStatus: s === "busy" ? "busy" : s === "failed" ? "failed" : s === "canceled" ? "cancelled" : "no-answer",
-          targetCallSid: null,
-        });
-      } else if (Date.now() >= giveUpAt && t.targetStatus !== "connected") {
-        stopTransferPolling();
-        api.post("/api/transfer-cancel", { targetCallSid }).catch(() => {});
-        updateTransfer({ targetStatus: "no-answer", targetCallSid: null });
-      }
-    }, 2000);
-  };
+  // The voice gateway rings the third party and bridges everyone; its
+  // progress comes back through onSipTransferState (the effect below).
 
   // Ends whatever transfer is in flight as part of the call itself
-  // ending — cancels a still-ringing target so their phone doesn't
-  // keep ringing on its own — and reports the number the lead was
-  // handed to, if the transfer was completed, for the call's log line.
-  // Safe to call with no transfer at all.
+  // ending, and reports the number the lead was handed to, if the
+  // transfer was completed, for the call's log line. Safe to call with
+  // no transfer at all.
   const finishTransferOnCallEnd = () => {
     const t = transferRef.current;
-    stopTransferPolling();
-    if (t && !t.completed && t.targetCallSid && TRANSFER_ACTIVE_STATUSES.includes(t.targetStatus)) {
-      api.post("/api/transfer-cancel", { targetCallSid: t.targetCallSid }).catch(() => {});
-    }
     setTransferState(null);
-    multilineConferenceRef.current = null;
     return t?.completed ? t.to : null;
-  };
-
-  // Powerdialler only — after the lead's been moved into the transfer
-  // conference and this browser's old <Dial> leg has dropped as a
-  // result, join the same conference so the rep and lead are back
-  // together (the same joinConference every Multi Line call uses).
-  // The new leg is wired with the original call's end handlers, so
-  // however the call eventually ends, it's logged/wrapped up once.
-  const rejoinTransferConference = async (wireCall, onCallEnded) => {
-    const t = transferRef.current;
-    if (!t) return;
-    setCallStatus("connecting");
-    try {
-      const { call } = await joinConference(t.conferenceName, "rep", { leadId: t.leadId });
-      if (transferRef.current?.conferenceName !== t.conferenceName) {
-        // Torn down (session stopped, say) while this was connecting —
-        // the rep's leg owns the conference, so dropping it ends it.
-        call.disconnect();
-        return;
-      }
-      activeCallRef.current = call;
-      wireCall(call);
-      updateTransfer({ phase: "in-conference" });
-    } catch (err) {
-      // Couldn't get back in — the lead's now alone in the conference
-      // and the third party may be ringing. Drop the target, and let
-      // the call end for real through the normal failure path.
-      setTransferState(null);
-      if (t.targetCallSid) api.post("/api/transfer-cancel", { targetCallSid: t.targetCallSid }).catch(() => {});
-      onCallEnded(new Error(`The transfer moved the lead, but rejoining them failed: ${err.message || err}`));
-    }
   };
 
   const startTransfer = async (toNumber, lead) => {
@@ -5610,156 +5476,55 @@ export default function SimpleCRM() {
     const existing = transferRef.current;
     if (!call || !calling || callEndedRef.current) return;
     if (existing && TRANSFER_ACTIVE_STATUSES.includes(existing.targetStatus)) return; // one at a time
-    // VoIPline: the voice gateway rings the third party and bridges
-    // everyone itself — progress comes back through onSipTransferState
-    // (see the effect below), not by polling.
-    if (getVoiceProvider() === "sip") {
-      setTransferState({
-        sip: true,
-        leadId: lead?.id || existing?.leadId || null,
-        to: toNumber,
-        phase: "in-conference",
-        targetStatus: "placing",
-        targetCallSid: null,
-        completed: false,
-        completing: false,
-        error: "",
-      });
-      startSipTransfer(toNumber);
-      // The gateway answers "placing"/"ringing" within a second or two.
-      // Silence means it never handled the request (e.g. it's running a
-      // build without live transfer) — say so rather than leaving the
-      // card on "Starting transfer…" forever. The call with the lead
-      // isn't touched either way.
-      const startedAt = Date.now();
-      updateTransfer({ sipStartedAt: startedAt });
-      setTimeout(() => {
-        const t = transferRef.current;
-        if (t?.sip && t.sipStartedAt === startedAt && t.targetStatus === "placing") {
-          cancelSipTransfer();
-          updateTransfer({
-            targetStatus: "failed",
-            error: "The voice server didn't respond to the transfer, so the number wasn't rung. Your call with the lead is unaffected.",
-          });
-        }
-      }, 20000);
-      return;
-    }
-    // Already in a conference — a Multi Line call, or a second attempt
-    // on a call an earlier transfer already moved — just dial the
-    // third party straight into it. Otherwise (a plain Powerdialler
-    // call) the lead has to be moved into a fresh one first.
-    const inConference =
-      multilineConferenceRef.current || (existing?.phase === "in-conference" ? existing.conferenceName : null);
-    const conferenceName = inConference || generateTransferConferenceName();
-    const moveLead = !inConference;
     setTransferState({
-      conferenceName,
+      sip: true,
       leadId: lead?.id || existing?.leadId || null,
       to: toNumber,
-      phase: moveLead ? "moving" : "in-conference",
+      phase: "in-conference",
       targetStatus: "placing",
-      targetCallSid: null,
       completed: false,
       completing: false,
       error: "",
-      oldCall: moveLead ? call : null,
-      oldCallDropped: false,
     });
-    try {
-      const started = await api.post("/api/transfer-start", {
-        conferenceName,
-        to: toNumber,
-        callerId: activeCallerId,
-        moveLead,
-        callSid: call.parameters?.CallSid,
-      });
+    startSipTransfer(toNumber);
+    // The gateway answers "placing"/"ringing" within a second or two.
+    // Silence means it never handled the request — say so rather than
+    // leaving the card on "Starting transfer…" forever. The call with
+    // the lead isn't touched either way.
+    const startedAt = Date.now();
+    updateTransfer({ sipStartedAt: startedAt });
+    setTimeout(() => {
       const t = transferRef.current;
-      if (!t || t.conferenceName !== conferenceName) {
-        // The call ended while this was in flight — don't leave the
-        // third party's phone ringing.
-        if (started.targetCallSid) api.post("/api/transfer-cancel", { targetCallSid: started.targetCallSid }).catch(() => {});
-        return;
+      if (t?.sip && t.sipStartedAt === startedAt && t.targetStatus === "placing") {
+        cancelSipTransfer();
+        updateTransfer({
+          targetStatus: "failed",
+          error: "The voice server didn't respond to the transfer, so the number wasn't rung. Your call with the lead is unaffected.",
+        });
       }
-      if (moveLead && !t.oldCallDropped) {
-        // The lead's been moved out of this leg's bridge; Twilio ends
-        // the leg on its own moments later, but ending it here too is
-        // deterministic — either way the disconnect handler rejoins.
-        try {
-          t.oldCall?.disconnect?.();
-        } catch {
-          // already closed
-        }
-      }
-      if (!started.targetCallSid) {
-        updateTransfer({ targetStatus: "failed", error: started.targetError || "Could not ring that number." });
-        return;
-      }
-      updateTransfer({ targetCallSid: started.targetCallSid, to: started.to || toNumber, targetStatus: "ringing" });
-      startTransferPolling(started.targetCallSid, Date.now() + (started.ringSeconds || 30) * 1000 + 10000);
-    } catch (err) {
-      // The server validates everything — and finds the lead's leg —
-      // before moving anyone, so a thrown error means nothing changed:
-      // the call carries on exactly as it was.
-      const t = transferRef.current;
-      if (!t || t.conferenceName !== conferenceName) return;
-      setTransferState({
-        ...t,
-        phase: inConference ? "in-conference" : "none",
-        targetStatus: "failed",
-        error: err.message || "Could not start the transfer.",
-      });
-    }
+    }, 20000);
   };
 
   // Drops the third party (still ringing, or already on the line) and
-  // carries on with the lead. Nobody moves back anywhere — a call
-  // that's been put in a conference simply stays there, which sounds
-  // no different to the lead.
+  // carries on with the lead.
   const cancelTransfer = () => {
-    const t = transferRef.current;
-    if (!t) return;
-    if (t.sip) {
-      cancelSipTransfer();
-      updateTransfer({ targetStatus: "cancelled", error: "" });
-      return;
-    }
-    stopTransferPolling();
-    if (t.targetCallSid) api.post("/api/transfer-cancel", { targetCallSid: t.targetCallSid }).catch(() => {});
-    updateTransfer({ targetStatus: "cancelled", targetCallSid: null, error: "" });
+    if (!transferRef.current) return;
+    cancelSipTransfer();
+    updateTransfer({ targetStatus: "cancelled", error: "" });
   };
 
-  // Hands the lead over: the server flips who owns the conference (so
-  // the rep leaving no longer ends it — see handOffConference), then
-  // the rep's own leg hangs up. That hang-up goes through the call's
-  // normal end handling — logged as transferred, wrap-up, next lead.
+  // Hands the lead over: the gateway confirms ("completed"), then ends
+  // this call with reason "transferred" — the normal end-of-call
+  // handling logs it as transferred and moves on.
   const completeTransfer = async () => {
     const t = transferRef.current;
     const call = activeCallRef.current;
     if (!t || t.targetStatus !== "connected" || !call || t.completing) return;
     updateTransfer({ completing: true, error: "" });
-    if (t.sip) {
-      // The gateway confirms ("completed"), then ends this call with
-      // reason "transferred" — the normal end-of-call handling logs it
-      // as transferred and moves on.
-      completeSipTransfer();
-      return;
-    }
-    try {
-      await api.post("/api/transfer-complete", {
-        conferenceName: t.conferenceName,
-        repCallSid: call.parameters?.CallSid,
-        targetCallSid: t.targetCallSid,
-      });
-      stopTransferPolling();
-      updateTransfer({ completed: true, completing: false });
-      hangUp();
-    } catch (err) {
-      updateTransfer({ completing: false, error: err.message || "Could not complete the transfer." });
-    }
+    completeSipTransfer();
   };
 
-  // VoIPline transfer progress, pushed by the voice gateway.
+  // Live transfer progress, pushed by the voice gateway.
   useEffect(
     () =>
       onSipTransferState(({ status, to, message }) => {
@@ -5787,7 +5552,7 @@ export default function SimpleCRM() {
       setTransferState(null);
       return;
     }
-    setTransferState({ ...t, targetStatus: "idle", targetCallSid: null, error: "", completed: false, completing: false });
+    setTransferState({ ...t, targetStatus: "idle", error: "", completed: false, completing: false });
   };
 
   const endCall = () => {
@@ -5816,96 +5581,9 @@ export default function SimpleCRM() {
     }
   };
 
-  // Best-effort — drops every still-ringing/placed leg in a batch.
-  // Used whenever a multi-line dial ends without a winner (the rep
-  // hung up early, or their own leg never connected) so the other
-  // lines don't keep ringing out on their own. Safe to call even
-  // after a winner's already been decided — nothing's left pending to
-  // cancel at that point, so it's just a no-op.
-  const cancelMultilineBatch = (batchId) => {
-    api.post("/api/multiline-cancel", { batchId }).catch(() => {});
-  };
-
-  // `giveUpAt` is a client-side backstop, independent of Twilio's own
-  // per-leg ring timeout and its status-callback webhooks actually
-  // reaching this server — if either of those silently fails to
-  // report back (a bad PUBLIC_URL, a dropped webhook, …), the batch
-  // would otherwise sit in "dialling" forever with no visible sign
-  // anything had gone wrong. A little past when every line should've
-  // been given up on Twilio's side (see MULTILINE_RING_SECONDS
-  // server-side), give up here too rather than ring indefinitely.
-  const startMultilinePolling = (batchId, giveUpAt) => {
-    stopMultilinePolling();
-    multilinePollRef.current = setInterval(async () => {
-      // Second line of defense against a stale poll outliving the
-      // call it belongs to (see the callEndedRef check right before
-      // this function is called in startMultilineCall) — if the call
-      // it was tracking has already ended one way or another, there's
-      // nothing left for this tick to usefully do, and the give-up
-      // branch below calling hangUp() would otherwise risk dropping
-      // whatever call the rep has since moved on to.
-      if (callEndedRef.current) {
-        stopMultilinePolling();
-        return;
-      }
-      let data;
-      try {
-        data = await api.get(`/api/multiline-batch?id=${batchId}`);
-      } catch {
-        return; // transient — try again next tick
-      }
-      // clearInterval (stopMultilinePolling) only stops *future* ticks
-      // — it can't cancel this tick's fetch once it's already in
-      // flight. If the call ended while that fetch was pending (the
-      // rep hung up right as this tick started), re-check here too:
-      // otherwise this stale tick would still set state for a call
-      // that's no longer live.
-      if (callEndedRef.current) return;
-      setMultilineBatch((b) => (b && b.id === batchId ? { ...b, candidates: data.calls } : b));
-
-      if (data.status === "connected" && data.winner && !multilineWinnerRef.current) {
-        stopMultilinePolling();
-        // Prefer the live contact (has notes/fields/tag/etc. for the
-        // wrap-up screen and call script) — data.winner is just the
-        // id/name/phone snapshot taken when the batch started, used
-        // only as a fallback if the contact's since disappeared.
-        const winnerLead = dialQueueRef.current.find((l) => l.id === data.winner.leadId) || {
-          id: data.winner.leadId,
-          name: data.winner.name,
-          phone: data.winner.phone,
-        };
-        multilineWinnerRef.current = winnerLead;
-        callStartRef.current = Date.now();
-        setActiveLeadId(winnerLead.id);
-        setActiveCallPhone(data.winner.phone);
-        // Overrides the rep's own conference-join caller id with the
-        // number this particular lead was actually dialled from —
-        // that's what shows up as "Calling from…" in the live-call
-        // view, and it's the number that matters to the lead/rep here.
-        if (data.winner.fromNumber) setActiveCallerId(data.winner.fromNumber);
-        setCallStatus("in-progress");
-        setMultilineBatch(null);
-      } else if (data.status === "no-answer" || Date.now() >= giveUpAt) {
-        stopMultilinePolling();
-        setCallError(
-          data.status === "no-answer"
-            ? "No answer on any line."
-            : "No answer on any line (gave up waiting — Twilio didn't report back in time)."
-        );
-        // Ends the rep's own conference leg — same 'disconnect' path
-        // as hanging up any other call, just with no winner to log.
-        hangUp();
-        if (batchId) cancelMultilineBatch(batchId); // best-effort — drop any leg still stuck ringing
-      }
-    }, 600); // was 400ms — still snappy, but that rate was adding meaningfully to the concurrent load that tipped the database into "remaining connection slots" errors (see server/db.js)
-  };
-
   // Dials several leads at once (see startSession/togglePause/
-  // finishWrapUp below), bridging the rep to whichever answers first.
-  // The rep's browser leg joins the shared conference immediately;
-  // the backend places every lead's leg via the REST API (see
-  // api/multiline-start.js), and polling (above) is how the browser
-  // finds out who — if anyone — actually picked up.
+  // finishWrapUp below), bridging the rep to whichever answers first —
+  // the voice gateway rings every lead itself (startSipMultilineCall).
   const startMultilineCall = async (leadsToTry) => {
     if (!leadsToTry.length || calling) return;
     setCallError("");
@@ -5917,194 +5595,14 @@ export default function SimpleCRM() {
     setLastAdHocCall(null);
     multilineWinnerRef.current = null;
     callEndedRef.current = false;
-    if (getVoiceProvider() === "sip") {
-      if (inboundCallRef.current) {
-        setCalling(false);
-        setCallStatus("idle");
-        setCallError("Finish the inbound call before dialling out.");
-        if (sessionRef.current) setSessionPaused(true);
-        return;
-      }
-      return startSipMultilineCall(leadsToTry);
-    }
-
-    let batchId;
-    try {
-      // Phase 1: reserve the batch and a row per lead, but don't dial
-      // anyone yet — see api/multiline-start.js's comment for why.
-      const started = await api.post("/api/multiline-start", { leadIds: leadsToTry.map((l) => l.id) });
-      batchId = started.batchId;
-      multilineBatchIdRef.current = batchId;
-      const ringSeconds = started.ringSeconds || 25;
-      setMultilineBatch({
-        id: batchId,
-        candidates: started.candidates.map((c) => ({ ...c, status: "placed" })),
-        startedAt: Date.now(), // corrected below, once the leads are actually dialled
-        ringSeconds,
-      });
-
-      const { call, callerId } = await joinConference(started.conferenceName);
-      activeCallRef.current = call;
-      multilineConferenceRef.current = started.conferenceName; // for a live transfer on this call
-      setActiveCallerId(callerId);
-
-      // Same shared end-of-call handling as startCall, plus tearing
-      // down whatever's left of the batch.
-      const onCallEnded = (err) => {
-        if (callEndedRef.current) return;
-        callEndedRef.current = true;
-        const transferredTo = finishTransferOnCallEnd();
-        setCalling(false);
-        setCallStatus("idle");
-        setActiveCallerId("");
-        // Cleared the instant the call ends, not left to whenever the
-        // *next* dial attempt happens to get around to it — the "Live
-        // call" panel is gated on `calling && activeLead`, and the
-        // next multi-line batch's own activeLeadId reset doesn't land
-        // until a moment into that batch's async setup (reserving the
-        // batch, joining the conference, waiting for it to connect).
-        // Leaving the just-ended lead's id sitting here in the
-        // meantime is exactly what let a stray render during that gap
-        // redisplay this lead's full "Live call" card — script panel,
-        // soundboard and all — for a few confusing seconds after the
-        // rep had already hung up on them, right as the wrap-up screen
-        // was handing off to the next batch.
-        setActiveLeadId(null);
-        setActiveCallPhone("");
-        activeCallRef.current = null;
-        stopMultilinePolling();
-        setMultilineBatch(null);
-        if (multilineBatchIdRef.current) {
-          cancelMultilineBatch(multilineBatchIdRef.current);
-          multilineBatchIdRef.current = null;
-        }
-        const winner = multilineWinnerRef.current;
-        multilineWinnerRef.current = null;
-        const durationMs = callStartRef.current ? Date.now() - callStartRef.current : 0;
-        callStartRef.current = null;
-
-        if (err) {
-          // Same as startCall: pause the session rather than burn
-          // through the list, but if someone had already been bridged
-          // still open the (paused) wrap-up so their outcome can be
-          // recorded and the session moved past them.
-          if (winner && sessionRef.current) {
-            setSessionPaused(true);
-            handleCallEnded(
-              winner,
-              durationMs,
-              leadsToTry.map((l) => l.id),
-              err
-            );
-            return;
-          }
-          setCallError(err.message || "The call failed.");
-          if (sessionRef.current) setSessionPaused(true);
-          return;
-        }
-        if (!winner) {
-          // Nobody answered any of this round's lines (or the rep
-          // cancelled mid-dial) — there's no wrap-up screen for a round
-          // with no one to log, so this is the only place a losing
-          // round's leads ever leave the queue. Without this, the
-          // session just sat idle forever after a no-answer batch —
-          // finishWrapUp (the only other place that advances the
-          // queue) only ever runs once someone's actually been talked
-          // to. All of leadsToTry — not just one lead — needs to come
-          // off the queue, or the very next batch would mostly re-dial
-          // the same numbers that just failed to pick up.
-          if (sessionRef.current) {
-            const dialledIds = new Set(leadsToTry.map((l) => l.id));
-            const remainingQueue = sessionRef.current.queue.filter((id) => !dialledIds.has(id));
-            if (!remainingQueue.length) {
-              setSession(null);
-              setSessionPaused(false);
-            } else {
-              setSession((s) => (s ? { ...s, queue: remainingQueue } : s));
-              if (!sessionPausedRef.current) dialNextInQueue(remainingQueue, sessionRef.current.lines);
-            }
-          }
-          return;
-        }
-
-        logCallToConversation(winner, durationMs, transferredTo);
-        handleCallEnded(
-          winner,
-          durationMs,
-          leadsToTry.map((l) => l.id)
-        );
-      };
-
-      // See startCall for why 'error' is deferred to the call's close.
-      let failure = null;
-      const finalize = () => onCallEnded(failure);
-      call.on("disconnect", finalize);
-      call.on("cancel", finalize);
-      call.on("error", (err) => {
-        failure = err;
-        setTimeout(() => {
-          if (call.status() === "closed") finalize();
-        }, 1500);
-      });
-
-      // Wait for the rep's own leg to actually be live in the
-      // conference before dialling anyone — startConferenceOnEnter
-      // means THIS leg is what starts the conference (see
-      // buildConferenceTwiml), so placing a lead's call any earlier
-      // risks it answering into a conference that hasn't started yet:
-      // it would sit there on hold, unable to hear anything, until
-      // the rep's leg caught up a moment later. A lead who answers
-      // fast enough to land in that window experiences exactly "I
-      // picked up and couldn't hear anyone." 'accept' is the SDK's
-      // signal that this leg is genuinely connected.
-      await new Promise((resolve, reject) => {
-        call.once("accept", resolve);
-        call.once("disconnect", () => reject(new Error("Call ended before connecting.")));
-        call.once("cancel", () => reject(new Error("Call ended before connecting.")));
-        call.once("error", (err) => reject(err));
-      });
-      if (callEndedRef.current) return; // onCallEnded already ran (e.g. hung up mid-connect) — nothing left to do
-
-      const startedAt = Date.now();
-      setMultilineBatch((b) => (b && b.id === batchId ? { ...b, startedAt } : b));
-
-      // Phase 2: now that the conference is actually live, place the
-      // real Twilio call to every reserved lead.
-      await api.post("/api/multiline-place-legs", { batchId });
-      // That POST is a real network round trip (up to 6 concurrent
-      // Twilio REST calls server-side) — long enough for the rep to
-      // hit Stop/Cancel while it's in flight. onCallEnded (from the
-      // call's own disconnect/cancel/error, or stopSession acting
-      // directly) can't reach into an already-sent fetch to stop it,
-      // so without this check a batch the UI already tore down would
-      // still start polling once the POST resolves — reviving "in a
-      // call" UI for a call the rep dismissed, or worse, since the
-      // give-up branch below calls hangUp() (device.disconnectAll()),
-      // silently dropping whatever call the rep has since moved on to.
-      if (callEndedRef.current) return;
-
-      // A few seconds of slack on top of Twilio's own per-leg ring
-      // timeout, so a normal "genuinely nobody answered" resolution
-      // (which arrives via the status callback around ringSeconds)
-      // isn't raced by this backstop firing first.
-      startMultilinePolling(batchId, startedAt + ringSeconds * 1000 + 8000);
-    } catch (err) {
-      if (callEndedRef.current) return; // onCallEnded (above) already fully handled this
-      setCallError(err.message || "Could not start multi-line dialling.");
+    if (inboundCallRef.current) {
       setCalling(false);
       setCallStatus("idle");
-      setActiveCallerId("");
-      setMultilineBatch(null);
-      // The rep's own leg may already be live in an empty conference
-      // (e.g. /api/multiline-place-legs failed after 'accept') — don't
-      // strand it.
-      if (activeCallRef.current) {
-        hangUp();
-        activeCallRef.current = null;
-      }
-      if (batchId) cancelMultilineBatch(batchId);
-      multilineBatchIdRef.current = null;
+      setCallError("Finish the inbound call before dialling out.");
+      if (sessionRef.current) setSessionPaused(true);
+      return;
     }
+    return startSipMultilineCall(leadsToTry);
   };
 
   // SIP trunk version of startMultilineCall — the voice gateway rings
@@ -6176,7 +5674,7 @@ export default function SimpleCRM() {
         }
         if (!winner) {
           if (info?.outcomeMessage) setCallError(info.outcomeMessage);
-          // Same as the Twilio round above: nobody answered, so this
+          // Nobody answered, so this
           // round's leads leave the session queue and the next round
           // dials — otherwise the session would sit idle.
           if (sessionRef.current) {
@@ -8736,9 +8234,8 @@ export default function SimpleCRM() {
                             {c.phone}
                             {c.fromNumber && <span> · from {c.fromNumber}</span>}
                           </div>
-                          {/* The call never actually reached Twilio's dial queue at
-                              all — e.g. a badly-formatted number, or an unverified
-                              number on a trial Twilio account — as opposed to a
+                          {/* The call never actually reached the phone network at
+                              all — e.g. a badly-formatted number — as opposed to a
                               normal ring-then-no-answer. */}
                           {c.status === "failed" && c.errorMessage && (
                             <div className="text-xs text-red-500 truncate mt-0.5" title={c.errorMessage}>

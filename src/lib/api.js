@@ -1,5 +1,5 @@
-// Thin fetch wrapper for the database API. Same base-URL convention
-// as twilioDevice.js: empty string = same-origin (/api/...), correct
+// Thin fetch wrapper for the database API. Base URL: empty string =
+// same-origin (/api/...), correct
 // for the deployed site; local dev overrides it via
 // VITE_CALL_SERVER_URL in .env to point at the Express server on
 // :3001 instead.
@@ -14,8 +14,8 @@ function unreachableError() {
 }
 
 // Every error handler here surfaces the server's own `error` string
-// when there is one, so a failure reads as its cause ("Twilio returned
-// 401") rather than a bare status code.
+// when there is one, so a failure reads as its cause ("Crazytel
+// rejected the SMS (HTTP 401)") rather than a bare status code.
 async function throwForStatus(res) {
   const body = await res.json().catch(() => ({}));
   const err = new Error(body.error || `Request failed (${res.status})`);

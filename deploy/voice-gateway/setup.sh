@@ -100,8 +100,12 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 GENERATED_SECRET=no
 if [[ "$WRITE_ENV" == yes ]]; then
-  ask SIP_PASSWORD "VoIPcloud SIP password for T909317: " secret
+  ask SIP_USERNAME "Crazytel SIP username (e.g. ct393909): "
+  [[ -n "$SIP_USERNAME" ]] || { echo "The SIP username is required." >&2; exit 1; }
+  ask SIP_PASSWORD "Crazytel SIP password for $SIP_USERNAME: " secret
   [[ -n "$SIP_PASSWORD" ]] || { echo "The SIP password is required." >&2; exit 1; }
+  ask SIP_CALLER_ID "That account's phone number (e.g. +61485998180): "
+  [[ -n "$SIP_CALLER_ID" ]] || { echo "The caller ID is required." >&2; exit 1; }
   ask GW_SECRET "VOICE_GATEWAY_SECRET (blank = generate one): " secret
   if [[ -z "$GW_SECRET" ]]; then
     GW_SECRET="$(openssl rand -hex 32)"
@@ -121,13 +125,12 @@ if [[ "$WRITE_ENV" == yes ]]; then
   }
   umask 077
   {
-    echo "VOICE_PROVIDER=sip"
-    echo "SIP_SERVER=sipm5.au.voipcloud.online"
-    echo "SIP_PORT=7060"
+    echo "SIP_SERVER=sip.crazytel.net.au"
+    echo "SIP_PORT=5060"
     echo "SIP_TRANSPORT=tcp"
-    echo "SIP_USERNAME=T909317"
+    echo "SIP_USERNAME=$(quote "$SIP_USERNAME")"
     echo "SIP_PASSWORD=$(quote "$SIP_PASSWORD")"
-    echo "SIP_CALLER_ID=+61480851534"
+    echo "SIP_CALLER_ID=$(quote "$SIP_CALLER_ID")"
     echo "SIP_MAX_CHANNELS=1"
     echo "SIP_RING_TIMEOUT=60"
     echo "SIP_RTP_PORTS=10000-10999"
@@ -217,7 +220,7 @@ done
 
 echo
 if [[ "$STATE" == '"state":"registered"' ]]; then
-  echo "✔ Registered with VoIPcloud."
+  echo "✔ Registered with Crazytel."
 else
   echo "✖ Not registered yet ($STATE). Check the logs: journalctl -u $SERVICE -n 50"
 fi
@@ -225,13 +228,14 @@ echo
 echo "Health:  https://$DOMAIN/health   (needs the DNS record pointing at this server)"
 echo "Logs:    journalctl -u $SERVICE -f"
 echo "Restart: systemctl restart $SERVICE"
-echo
-echo "Now set these in Vercel → Settings → Environment Variables, then redeploy:"
-echo "  VOICE_PROVIDER=sip"
-echo "  VOICE_GATEWAY_URL=wss://$DOMAIN/voice"
-if [[ "$WRITE_ENV" == yes && "$GENERATED_SECRET" == yes ]]; then
-  echo "  VOICE_GATEWAY_SECRET=$GW_SECRET"
-else
-  echo "  VOICE_GATEWAY_SECRET=<the same value as in $ENV_FILE>"
+if [[ "$WRITE_ENV" == yes ]]; then
+  echo
+  echo "First-time setup only — set these in Vercel → Settings → Environment Variables, then redeploy:"
+  echo "  VOICE_GATEWAY_URL=wss://$DOMAIN/voice"
+  if [[ "$GENERATED_SECRET" == yes ]]; then
+    echo "  VOICE_GATEWAY_SECRET=$GW_SECRET"
+  else
+    echo "  VOICE_GATEWAY_SECRET=<the same value as in $ENV_FILE>"
+  fi
+  echo "(An update that kept the existing .env needs no Vercel changes.)"
 fi
-echo "  SIP_CALLER_ID=+61480851534"

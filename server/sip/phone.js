@@ -1,6 +1,6 @@
 // Phone number formatting for the SIP trunk. Same Australia-first
-// normalization as src/lib/twilioDevice.js and server/twilioCore.js
-// (keep them in sync): "0412 345 678" → "+61412345678".
+// normalization as src/lib/sipDevice.js (keep them in sync):
+// "0412 345 678" → "+61412345678".
 export function toE164(rawPhone) {
   const cleaned = String(rawPhone || "").replace(/[^\d+]/g, "");
   if (cleaned.startsWith("+")) return cleaned;

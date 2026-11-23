@@ -1,5 +1,5 @@
 // Shared auth logic — used by both the local Express server and the
-// Vercel serverless functions, same pattern as twilioCore.js/db.js.
+// Vercel serverless functions, same pattern as db.js.
 // Sessions are a signed, HttpOnly cookie holding a JWT (no server-side
 // session store needed). Users are invite-only: an admin seeds a row
 // in `users` with an email and no password, and that person claims

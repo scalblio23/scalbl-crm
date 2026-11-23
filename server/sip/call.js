@@ -230,7 +230,7 @@ export class Call extends EventEmitter {
     req.set("contact", `<${this.ua.contactUri()}>`);
     req.set("allow", ALLOW);
     // Assert the call's caller ID. Unless the trunk's Caller ID is set
-    // to "Keep originator's caller ID", VoIPcloud presents its own
+    // to "Keep originator's caller ID", the provider presents its own
     // configured number instead.
     req.set("p-asserted-identity", `"${callerId}" <sip:${callerId}@${domain}>`);
     req.set("remote-party-id", `"${callerId}" <sip:${callerId}@${domain}>;party=calling;screen=yes;privacy=off`);

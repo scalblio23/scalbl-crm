@@ -1,28 +1,9 @@
-// Local dev backend (used with `npm run dev:all`) — Twilio calling
-// plus the database API. The deployed site uses the equivalent
-// functions in /api instead; both paths share their logic from
-// server/twilioCore.js and server/db.js.
+// Local dev backend (used with `npm run dev:all`) — the database API
+// and the voice-gateway token. The deployed site uses the equivalent
+// functions in /api instead; both share their logic from server/*.js.
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import {
-  missingTwilioEnv,
-  mintAccessToken,
-  buildVoiceTwiml,
-  buildConferenceTwiml,
-  getCallerIdPool,
-  recordingOptions,
-  sendSms,
-  generateMultilineConferenceName,
-  placeConferenceLeg,
-  endOrCancelCall,
-  unmuteConferenceParticipant,
-  publicBaseUrl,
-  MULTILINE_RING_SECONDS,
-  startLiveTransfer,
-  getCallStatus,
-  handOffConference,
-} from "./twilioCore.js";
 import { getVoiceProvider, missingVoiceGatewayEnv, sipTokenResponse } from "./voiceConfig.js";
 import {
   isDbConfigured,
@@ -72,16 +53,6 @@ import {
   deleteApiKey,
   findApiKeyByHash,
   touchApiKeyLastUsed,
-  createMultilineBatch,
-  getMultilineBatchById,
-  addMultilineBatchCall,
-  getUnplacedMultilineBatchCalls,
-  setMultilineBatchCallSid,
-  setMultilineBatchCallFailed,
-  updateMultilineBatchCallStatusByRowId,
-  claimMultilineWinner,
-  getOtherPendingMultilineBatchCalls,
-  getMultilineBatchWithCalls,
   getSoundboardClips,
   getArchivedTags,
   archiveTag,
@@ -107,7 +78,7 @@ import {
 // Each handler is a plain (req, res) function with no Vercel-specific
 // behavior (query/body/status/json all work identically under
 // Express), and the feature's actual logic (Google OAuth, freebusy,
-// Resend, Twilio SMS) is substantial enough that keeping one copy
+// Resend, Crazytel SMS) is substantial enough that keeping one copy
 // of it is worth the small deviation from this file's usual pattern.
 import calendarsHandler from "../api/calendars.js";
 import leadStatusHandler from "../api/lead-status.js";
@@ -125,11 +96,11 @@ import calendarSlotsHandler from "../api/calendar-slots.js";
 import calendarBookHandler from "../api/calendar-book.js";
 import calendarCancelHandler from "../api/calendar-cancel.js";
 import calendarManageHandler from "../api/calendar-manage.js";
-import bookingSmsStatusHandler from "../api/booking-sms-status.js";
 import automationsHandler from "../api/automations.js";
 import tagFoldersHandler from "../api/tag-folders.js";
 import tagBookingLinksHandler from "../api/tag-booking-links.js";
-import recordingStatusHandler from "../api/recording-status.js";
+import smsSendHandler from "../api/sms-send.js";
+import smsBulkSendHandler from "../api/sms-bulk-send.js";
 import recordingAudioHandler from "../api/recording-audio.js";
 import csmHandler from "../api/csm.js";
 import memoHandler from "../api/memo.js";
@@ -145,7 +116,7 @@ import unsubscribeHandler from "../api/unsubscribe.js";
 import whatsappHandler from "../api/whatsapp.js";
 import automationsProcessRunsHandler from "../api/automations-process-runs.js";
 import { processDueAutomationRuns } from "./automations.js";
-import { processDueBookingReminders, handleBookingReply, verifyTwilioSignature, candidateWebhookUrls } from "./patientReminders.js";
+import { processDueBookingReminders } from "./patientReminders.js";
 import {
   getSessionUser,
   requireAuth,
@@ -193,13 +164,10 @@ app.use(express.urlencoded({ extended: false }));
 // (see /api/contacts-bulk-import) can run to a few MB of JSON.
 app.use(express.json({ limit: "10mb" }));
 
-// Twilio webhooks and the auth endpoints themselves are the only
+// Provider webhooks and the auth endpoints themselves are the only
 // routes reachable without a session cookie.
 const PUBLIC_PATHS = new Set([
   "/api/health",
-  "/api/voice",
-  "/api/status",
-  "/api/sms-inbound",
   // Crazytel's Forward Inbound SMS webhook — checks its own ?key= (see
   // api/sms-crazytel-inbound.js).
   "/api/sms-crazytel-inbound",
@@ -222,14 +190,6 @@ const PUBLIC_PATHS = new Set([
   // Same ?token= API-key auth, checked inside the route — see
   // api/lead-status.js.
   "/api/lead-status",
-  // Multi-line dialling's per-lead-leg TwiML and status callback —
-  // Twilio-only, identified by the batch/row ids baked into the URL
-  // (see api/multiline-start.js), same trust model as /api/voice and
-  // /api/sms-inbound above.
-  "/api/voice-multiline-leg",
-  "/api/multiline-status",
-  // Twilio's finished-recording callback — see api/recording-status.js.
-  "/api/recording-status",
   // Calendars — the public booking-widget side (see api/calendar-*.js
   // for how each authenticates itself instead: signed OAuth state,
   // a calendar's own slug, or a booking's cancel token).
@@ -242,10 +202,8 @@ const PUBLIC_PATHS = new Set([
   // A proposal's signing link — the token in it is the credential (see
   // api/proposal-public.js).
   "/api/proposal-public",
-  // Patient manage page (token in body) and Twilio's signed delivery
-  // callback — see api/calendar-manage.js / api/booking-sms-status.js.
+  // Patient manage page (token in body) — see api/calendar-manage.js.
   "/api/calendar-manage",
-  "/api/booking-sms-status",
   // Cron-invoked, not user-invoked — authenticated by its own
   // CRON_SECRET bearer-token check instead of a session (see
   // api/automations-process-runs.js).
@@ -273,14 +231,6 @@ app.use(
     "/api/contacts-bulk-import",
     "/api/dial-lists",
     "/api/sms-bulk-send",
-    "/api/multiline-start",
-    "/api/multiline-place-legs",
-    "/api/multiline-batch",
-    "/api/multiline-cancel",
-    "/api/transfer-start",
-    "/api/transfer-status",
-    "/api/transfer-complete",
-    "/api/transfer-cancel",
     "/api/soundboard-clips",
     "/api/users", // team roster (names/emails) is internal-only
     "/api/portal-invites",
@@ -307,7 +257,6 @@ for (const [path, tab] of [
   ["/api/calendar-google-calendars", "calendars"],
   ["/api/calendar-bookings", "calendars"],
   ["/api/clients-import", "clients"],
-  ["/api/multiline-start", "multiline"],
   ["/api/sms-bulk-send", "bulk-sms"],
   ["/api/automations", "automations"],
 ]) {
@@ -349,7 +298,7 @@ function dbRoute(fn) {
 
 app.get("/api/health", (req, res) => {
   const voiceProvider = getVoiceProvider();
-  const missing = voiceProvider === "sip" ? missingVoiceGatewayEnv() : missingTwilioEnv();
+  const missing = missingVoiceGatewayEnv();
   const dbConfigured = isDbConfigured();
   res.json({
     ok: missing.length === 0 && dbConfigured,
@@ -571,302 +520,17 @@ app.get(
   })
 );
 
-// ---------- Twilio calling ----------
+// ---------- Calling ----------
 
-// Mints a short-lived Access Token so the browser can register as a
-// Twilio Voice device (the same softphone model GoHighLevel uses),
-// scoped to place outgoing calls through our TwiML App.
+// Hands the browser the SIP voice gateway's URL and a signed token
+// (npm run voice-gateway locally) — see server/voiceConfig.js.
 app.get("/api/token", (req, res) => {
-  // VOICE_PROVIDER=sip: the browser talks to the SIP voice gateway
-  // (npm run voice-gateway) instead — see server/voiceConfig.js.
-  if (getVoiceProvider() === "sip") {
-    const missingSip = missingVoiceGatewayEnv();
-    if (missingSip.length) {
-      return res.status(500).json({ error: `SIP calling is not configured. Missing: ${missingSip.join(", ")}` });
-    }
-    return res.json(sipTokenResponse(req.user));
-  }
-  const missing = missingTwilioEnv();
+  const missing = missingVoiceGatewayEnv();
   if (missing.length) {
-    return res.status(500).json({
-      error: `Twilio is not configured. Missing: ${missing.join(", ")}`,
-    });
+    return res.status(500).json({ error: `Calling is not configured. Missing: ${missing.join(", ")}` });
   }
-  const identity = req.query.identity || "rep";
-  res.json({ token: mintAccessToken(identity), identity, callerIds: getCallerIdPool() });
+  res.json(sipTokenResponse(req.user));
 });
-
-// TwiML voice webhook. This is the URL you paste into the TwiML App's
-// "Voice" config in the Twilio Console. Twilio hits this once the
-// browser device places a call, and we tell it who to actually dial
-// and what caller ID to show — mirroring GHL's "call bridges through
-// our number" behaviour.
-app.post("/api/voice", (req, res) => {
-  res.type("text/xml");
-
-  // Multi-line dialling: the rep's own browser leg connects here with
-  // a Conference param (see src/lib/twilioDevice.js's joinConference)
-  // instead of a To number — join them into that conference rather
-  // than dialing out. See "Multi-line dialling" below.
-  const conferenceName = req.body?.Conference;
-  if (conferenceName) {
-    return res.send(
-      buildConferenceTwiml({
-        conferenceName,
-        isRep: true,
-        // leadId is only sent by a live-transfer rejoin — see api/voice.js.
-        recording: recordingOptions({ conferenceName, leadId: req.body?.leadId }),
-      })
-    );
-  }
-
-  const pool = getCallerIdPool();
-  // The browser picks which number to rotate to itself (see
-  // src/lib/twilioDevice.js) and passes it through as a custom
-  // connect() param — trust it as long as it's actually one of our
-  // own numbers. No database round-trip on the hot path: falling back
-  // to the first configured number if the passed one is missing or
-  // invalid is a plain, instant default, not a second rotation pick.
-  const requested = req.body?.callerId;
-  const callerId = requested && pool.includes(requested) ? requested : pool[0];
-  res.send(
-    buildVoiceTwiml(req.body.To, callerId, { recording: recordingOptions({ leadId: req.body?.leadId, to: req.body.To }) })
-  );
-});
-
-// Call status callback — set this as the TwiML App / <Dial> status
-// callback URL to log ringing/in-progress/completed events against a
-// lead's activity history.
-app.post("/api/status", (req, res) => {
-  console.log(
-    "[twilio status]",
-    req.body.CallStatus,
-    "to:",
-    req.body.To,
-    "sid:",
-    req.body.CallSid
-  );
-  res.sendStatus(204);
-});
-
-// ---------- Multi-line dialling ----------
-// "Dial N leads at once, whoever answers first gets bridged to the
-// rep, the rest get hung up" — see server/twilioCore.js's conference
-// helpers and the matching api/multiline-*.js files, which this
-// mirrors route-for-route.
-const MULTILINE_MAX_LINES = 6;
-
-// Reserves a batch and a row per lead (an id to embed in each call's
-// own TwiML/status-callback URLs later) but does NOT dial anyone yet
-// — that's /api/multiline-place-legs below, called once the frontend's
-// own conference leg has actually joined and started the conference.
-// See that route's comment for why the split exists: dialling a lead
-// before the rep's own leg has joined leaves that lead's call sitting
-// in the conference on hold — unable to hear anything — until the rep
-// catches up, which a fast-answering lead can easily notice as "they
-// can't hear me".
-app.post(
-  "/api/multiline-start",
-  dbRoute(async (req, res) => {
-    const missing = missingTwilioEnv();
-    if (missing.length) {
-      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
-    }
-    if (!publicBaseUrl()) {
-      return res.status(500).json({
-        error:
-          "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
-      });
-    }
-    const ids = Array.isArray(req.body?.leadIds) ? req.body.leadIds.map(Number).filter(Boolean) : [];
-    if (!ids.length) return res.status(400).json({ error: "Select at least one lead to dial" });
-
-    const contacts = await getContactsByIds(ids);
-    const withPhone = contacts.filter((c) => c.phone).slice(0, MULTILINE_MAX_LINES);
-    if (!withPhone.length) {
-      return res.status(400).json({ error: "None of the selected leads have a phone number" });
-    }
-
-    const conferenceName = generateMultilineConferenceName();
-    const batch = await createMultilineBatch({ conferenceName, createdBy: String(req.user.id) });
-    const pool = getCallerIdPool();
-
-    const candidates = await mapWithConcurrency(withPhone, withPhone.length, async (contact, i) => {
-      const fromNumber = pool[i % pool.length];
-      await addMultilineBatchCall({ batchId: batch.id, leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber });
-      return { leadId: contact.id, name: contact.name, phone: contact.phone, fromNumber };
-    });
-
-    res.status(201).json({ batchId: batch.id, conferenceName, candidates, ringSeconds: MULTILINE_RING_SECONDS });
-  })
-);
-
-// Actually dials every lead reserved for a batch, via the REST API,
-// into the conference the rep's own browser leg already joined. See
-// the comment above /api/multiline-start for why this is a separate
-// step. Calling this twice for the same batch only dials whatever's
-// still unplaced — cheap to guard, shouldn't happen.
-app.post(
-  "/api/multiline-place-legs",
-  dbRoute(async (req, res) => {
-    const missing = missingTwilioEnv();
-    if (missing.length) {
-      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
-    }
-    const base = publicBaseUrl();
-    if (!base) {
-      return res.status(500).json({
-        error:
-          "Multi-line dialling needs PUBLIC_URL set (or a Vercel deployment) so Twilio can reach the per-call callback URLs it uses.",
-      });
-    }
-    const batchId = Number(req.body?.batchId);
-    if (!batchId) return res.status(400).json({ error: "Missing batchId" });
-    const batch = await getMultilineBatchById(batchId);
-    if (!batch) return res.status(404).json({ error: "Batch not found" });
-
-    const rows = await getUnplacedMultilineBatchCalls(batchId);
-    await mapWithConcurrency(rows, rows.length, async (row) => {
-      try {
-        const call = await placeConferenceLeg({
-          to: row.phone,
-          from: row.from_number,
-          url: `${base}/api/voice-multiline-leg?conf=${encodeURIComponent(batch.conference_name)}`,
-          statusCallback: `${base}/api/multiline-status?rowId=${row.id}&batchId=${batchId}&leadId=${row.lead_id}`,
-        });
-        await setMultilineBatchCallSid(row.id, call.sid);
-      } catch (err) {
-        console.error("[multiline-place-legs] leg failed", row.lead_id, err.message);
-        await setMultilineBatchCallFailed(row.id, err.message);
-      }
-    });
-
-    res.status(200).json({ ok: true, placed: rows.length });
-  })
-);
-
-// Public — TwiML for one lead leg, joining it into the conference.
-app.post("/api/voice-multiline-leg", (req, res) => {
-  const conferenceName = req.query?.conf;
-  res.type("text/xml");
-  if (!conferenceName) return res.status(400).send("<Response><Say>Missing conference.</Say></Response>");
-  res.send(buildConferenceTwiml({ conferenceName, isRep: false }));
-});
-
-// Public — Twilio's status callback for one lead leg. Decides the
-// winner the instant a leg turns "in-progress" (answered) — see
-// api/multiline-status.js for the full reasoning.
-app.post("/api/multiline-status", async (req, res) => {
-  try {
-    await ensureSchema();
-    const rowId = Number(req.query?.rowId);
-    const batchId = Number(req.query?.batchId);
-    const leadId = Number(req.query?.leadId);
-    const callSid = req.body?.CallSid;
-    const callStatus = req.body?.CallStatus;
-    if (!rowId || !batchId || !callSid || !callStatus) return res.status(400).end();
-
-    await updateMultilineBatchCallStatusByRowId(rowId, callStatus);
-
-    if (callStatus === "in-progress") {
-      const won = await claimMultilineWinner({ batchId, callSid, leadId });
-      if (won) {
-        // See api/multiline-status.js for the full reasoning — genuinely
-        // awaited (not fire-and-forget) on purpose.
-        const others = await getOtherPendingMultilineBatchCalls(batchId, callSid);
-        await Promise.all([
-          unmuteConferenceParticipant({ conferenceName: won.conference_name, callSid }).catch((err) =>
-            console.error("[db] /api/multiline-status failed to unmute the winner", err)
-          ),
-          ...others
-            .filter((o) => o.call_sid)
-            .map((o) =>
-              endOrCancelCall(o.call_sid).catch((err) =>
-                console.error("[db] /api/multiline-status failed to hang up a losing leg", err)
-              )
-            ),
-        ]);
-      } else {
-        await endOrCancelCall(callSid);
-      }
-    }
-    res.status(204).end();
-  } catch (err) {
-    console.error("[db] /api/multiline-status", err);
-    res.status(204).end();
-  }
-});
-
-app.get(
-  "/api/multiline-batch",
-  dbRoute(async (req, res) => {
-    const id = Number(req.query?.id);
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    const batch = await getMultilineBatchWithCalls(id);
-    if (!batch) return res.status(404).json({ error: "Batch not found" });
-    res.setHeader("Cache-Control", "no-store");
-    res.json(batch);
-  })
-);
-
-// ---------- Live transfer ----------
-// Hands a live call over to a third party (the client's closer, say)
-// — see server/twilioCore.js's "Live transfer" section for how it's
-// choreographed, and the matching api/transfer-*.js files, which
-// this mirrors route-for-route. No database involved: the browser
-// holds the handful of call SIDs a transfer needs and passes them
-// back in, and Twilio itself is the source of truth for status.
-app.post("/api/transfer-start", async (req, res) => {
-  try {
-    res.status(201).json(await startLiveTransfer(req.body || {}));
-  } catch (err) {
-    console.error("[transfer-start]", err);
-    res.status(err.status || 500).json({ error: err.message || "Could not start the transfer" });
-  }
-});
-
-app.get("/api/transfer-status", async (req, res) => {
-  try {
-    const status = await getCallStatus(req.query?.callSid);
-    res.setHeader("Cache-Control", "no-store");
-    res.json({ status });
-  } catch (err) {
-    console.error("[transfer-status]", err);
-    res.status(err.status || 500).json({ error: err.message || "Could not read the transfer's status" });
-  }
-});
-
-app.post("/api/transfer-complete", async (req, res) => {
-  try {
-    res.json(await handOffConference(req.body || {}));
-  } catch (err) {
-    console.error("[transfer-complete]", err);
-    res.status(err.status || 500).json({ error: err.message || "Could not complete the transfer" });
-  }
-});
-
-app.post("/api/transfer-cancel", async (req, res) => {
-  const sid = String(req.body?.targetCallSid || "");
-  if (!/^CA[a-f0-9]{32}$/.test(sid)) return res.status(400).json({ error: "Missing targetCallSid" });
-  try {
-    await endOrCancelCall(sid);
-    res.sendStatus(204);
-  } catch (err) {
-    console.error("[transfer-cancel]", err);
-    res.status(500).json({ error: err.message || "Could not cancel the transfer" });
-  }
-});
-
-app.post(
-  "/api/multiline-cancel",
-  dbRoute(async (req, res) => {
-    const batchId = Number(req.body?.batchId);
-    if (!batchId) return res.status(400).json({ error: "Missing batchId" });
-    const pending = await getOtherPendingMultilineBatchCalls(batchId, null);
-    await Promise.all(pending.filter((c) => c.call_sid).map((c) => endOrCancelCall(c.call_sid)));
-    res.status(204).end();
-  })
-);
 
 // ---------- Soundboard (quick-play clips for a live call) ----------
 // Mirrors api/soundboard-clips.js.
@@ -1034,499 +698,11 @@ app.delete(
 );
 
 // ---------- SMS ----------
+// Outbound texts go through Crazytel — mounted straight from their
+// /api/*.js handlers (see server/sms.js).
+app.all("/api/sms-send", smsSendHandler);
+app.all("/api/sms-bulk-send", smsBulkSendHandler);
 
-// Sends an outbound SMS and logs it onto the lead's conversation.
-app.post(
-  "/api/sms-send",
-  dbRoute(async (req, res) => {
-    const missing = missingTwilioEnv();
-    if (missing.length) {
-      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
-    }
-    const { leadId, name, phone, text } = req.body || {};
-    if (!phone || !text) return res.status(400).json({ error: "Missing phone or text" });
-    // A client may only text leads under their own tags — never an
-    // arbitrary number. Mirrors api/sms-send.js.
-    const allowedTags = scopeTagsForUser(req.user);
-    if (allowedTags) {
-      const lead = leadId ? await getContactById(leadId) : null;
-      if (!lead || !allowedTags.includes(lead.tag)) {
-        return res.status(403).json({ error: "You can only message your own leads." });
-      }
-    }
-    await sendSms({ to: phone, body: text });
-    const timeLabel = new Date().toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
-    const conversationId = await logMessage({
-      leadId: leadId || null,
-      name: name || phone,
-      text,
-      time: timeLabel,
-      type: "text",
-      outgoing: true,
-    });
-    res.status(201).json({ conversationId });
-  })
-);
-
-// Sends the same text to a batch of contacts (Bulk SMS tab — selected
-// individually or by tag) via the one wired-in Twilio number/
-// messaging service, logging each as an outbound message same as a
-// single send. Mirrors api/sms-bulk-send.js.
-const BULK_SMS_CONCURRENCY = 5;
-app.post(
-  "/api/sms-bulk-send",
-  dbRoute(async (req, res) => {
-    const missing = missingTwilioEnv();
-    if (missing.length) {
-      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
-    }
-    const text = String(req.body?.text || "").trim();
-    const ids = Array.isArray(req.body?.contactIds)
-      ? Array.from(new Set(req.body.contactIds.map(Number).filter(Boolean)))
-      : [];
-    if (!text) return res.status(400).json({ error: "Missing message text" });
-    if (!ids.length) return res.status(400).json({ error: "Select at least one contact" });
-
-    const contacts = await getContactsByIds(ids);
-    const withPhone = contacts.filter((c) => c.phone);
-    const skipped = contacts.length - withPhone.length;
-    const timeLabel = new Date().toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
-
-    const results = await mapWithConcurrency(withPhone, BULK_SMS_CONCURRENCY, async (c) => {
-      try {
-        await sendSms({ to: c.phone, body: text });
-        await logMessage({ leadId: c.id, name: c.name, text, time: timeLabel, type: "text", outgoing: true });
-        return { id: c.id, name: c.name, ok: true };
-      } catch (err) {
-        return { id: c.id, name: c.name, ok: false, error: err.message || "Send failed" };
-      }
-    });
-
-    const failed = results.filter((r) => !r.ok);
-    res.status(200).json({ total: ids.length, sent: results.length - failed.length, failed, skipped });
-  })
-);
-
-// Twilio's "A message comes in" webhook — set this as the number's
-// Messaging webhook (POST http://<ngrok-url>/api/sms-inbound in dev).
-// Deliberately NOT wrapped in dbRoute: Twilio gives up on this
-// webhook after ~15s, and the database can be slower than that to
-// wake up from idle. Respond with the TwiML immediately — it needs
-// no database access — then do the contact-matching and logging
-// after Twilio's already got its 200.
-app.post("/api/sms-inbound", async (req, res) => {
-  res.type("text/xml").send("<Response></Response>");
-  try {
-    await ensureSchema();
-    const from = req.body?.From;
-    const body = req.body?.Body || "";
-    if (from) {
-      const contact = await findContactByPhone(from);
-      const timeLabel = new Date().toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" });
-      await logMessage({
-        leadId: contact ? contact.id : null,
-        name: contact ? contact.name : from,
-        text: body,
-        time: timeLabel,
-        type: "text",
-        outgoing: false,
-      });
-      // Same Y/N handling as api/sms-inbound.js.
-      await handleBookingReply({
-        messageSid: req.body?.MessageSid,
-        from,
-        body,
-        verified: verifyTwilioSignature({
-          signature: req.headers["x-twilio-signature"],
-          urls: candidateWebhookUrls(req, "/api/sms-inbound"),
-          params: req.body || {},
-        }),
-      }).catch((err) => console.error("[db] booking reply handling failed", err?.message || err));
-    }
-  } catch (err) {
-    console.error("[db] /api/sms-inbound", err);
-  }
-});
-
-// ---------- Lead webhook ----------
-// Public — auth is the CRM's single API key in ?token=, not the
-// session cookie (see PUBLIC_PATHS above and api/lead-webhook.js,
-// which this mirrors). One shared URL for every source; which
-// Contacts tag a lead lands on comes from a "tag"/"client" field in
-// the posted data instead of from which URL was used.
-const LEAD_WEBHOOK_CORE_ALIASES = {
-  name: ["name", "full_name", "fullName", "fullname"],
-  phone: ["phone", "phone_number", "phoneNumber", "mobile", "mobile_number"],
-  email: ["email", "email_address", "emailAddress"],
-  notes: ["notes", "message", "comment", "comments"],
-};
-const LEAD_WEBHOOK_RECOGNIZED_KEYS = new Set(
-  Object.values(LEAD_WEBHOOK_CORE_ALIASES)
-    .flat()
-    .concat([
-      "first_name",
-      "firstName",
-      "last_name",
-      "lastName",
-      "tag",
-      "client",
-      "status",
-      "lead_date",
-      "leadDate",
-      "token", // the auth token itself, present alongside lead data on a GET request
-    ])
-);
-const LEAD_WEBHOOK_FALLBACK_TAG = "Uncategorized";
-
-function leadWebhookPick(body, keys) {
-  for (const key of keys) {
-    const v = body?.[key];
-    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
-  }
-  return "";
-}
-
-function leadWebhookName(body) {
-  const direct = leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.name);
-  if (direct) return direct;
-  const first = leadWebhookPick(body, ["first_name", "firstName"]);
-  const last = leadWebhookPick(body, ["last_name", "lastName"]);
-  return [first, last].filter(Boolean).join(" ").trim();
-}
-
-function leadWebhookRecordFromBody(body) {
-  const fields = {};
-  for (const [key, value] of Object.entries(body || {})) {
-    if (LEAD_WEBHOOK_RECOGNIZED_KEYS.has(key)) continue;
-    if (value === undefined || value === null || String(value).trim() === "") continue;
-    fields[key] = value;
-  }
-  const tag = leadWebhookPick(body, ["tag", "client"]) || LEAD_WEBHOOK_FALLBACK_TAG;
-  return {
-    name: leadWebhookName(body) || "Unknown",
-    email: leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.email),
-    phone: leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.phone),
-    notes: leadWebhookPick(body, LEAD_WEBHOOK_CORE_ALIASES.notes),
-    status: (body?.status && String(body.status).trim()) || "New Lead",
-    lastContact: "Today",
-    leadDate: body?.lead_date || body?.leadDate || new Date().toISOString().slice(0, 10),
-    tag,
-    client: tag,
-    fields,
-  };
-}
-
-async function handleLeadWebhook(req, res) {
-  try {
-    await ensureSchema();
-    const token = req.query?.token;
-    if (!token) return res.status(401).json({ error: "Missing ?token= in the webhook URL" });
-    const keyRow = await findApiKeyByHash(hashApiKey(String(token)));
-    if (!keyRow) return res.status(401).json({ error: "Invalid or revoked API key" });
-    touchApiKeyLastUsed(keyRow.id).catch(() => {});
-
-    // GET has no body — some simpler lead-gen platforms (and a quick
-    // browser/curl test) can only fire a plain GET with the lead's
-    // data as query params, so read from there instead. Only ever one
-    // lead per GET, since there's no clean way to send an array of
-    // leads in a query string.
-    const payloads = req.method === "GET" ? [{ ...req.query }] : Array.isArray(req.body) ? req.body : [req.body];
-    const withPhone = payloads.filter((b) => b && leadWebhookPick(b, LEAD_WEBHOOK_CORE_ALIASES.phone));
-    const skipped = payloads.length - withPhone.length;
-    if (!withPhone.length) return res.status(400).json({ error: "No phone number found in the request body" });
-
-    const records = withPhone.map((b) => leadWebhookRecordFromBody(b));
-    const result = await importContactsBulk(records);
-    res.status(200).json({ ok: true, ...result, skipped });
-  } catch (err) {
-    console.error("[db] /api/lead-webhook", err);
-    res.status(500).json({ error: err.message || "Webhook failed" });
-  }
-}
-app.post("/api/lead-webhook", handleLeadWebhook);
-app.get("/api/lead-webhook", handleLeadWebhook);
-// Its counterpart for changing an existing lead's status by phone/email
-// (e.g. GHL "booked" tag → Booked) — the api/ handler mounted directly.
-app.all("/api/lead-status", leadStatusHandler);
-
-// ---------- Database ----------
-
-app.get("/api/clients", dbRoute(async (req, res) => res.json(await getClients())));
-app.post(
-  "/api/clients",
-  dbRoute(async (req, res) => res.status(201).json(await createClient(req.body || {})))
-);
-app.patch(
-  "/api/clients",
-  dbRoute(async (req, res) => {
-    const { id, ...patch } = req.body || {};
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    const client = await updateClient(id, patch);
-    if (!client) return res.status(404).json({ error: "Client not found" });
-    res.json(client);
-  })
-);
-app.delete(
-  "/api/clients",
-  dbRoute(async (req, res) => {
-    const ids = String(req.query.ids || "")
-      .split(",")
-      .map((id) => Number(id.trim()))
-      .filter(Boolean);
-    if (!ids.length) return res.status(400).json({ error: "Missing ids" });
-    await deleteClients(ids);
-    res.status(204).end();
-  })
-);
-
-app.get("/api/client-columns", dbRoute(async (req, res) => res.json(await getClientColumns())));
-app.post(
-  "/api/client-columns",
-  dbRoute(async (req, res) => {
-    const { label, type, options } = req.body || {};
-    if (!label || !type) return res.status(400).json({ error: "Missing label or type" });
-    res.status(201).json(await createClientColumn({ label, type, options }));
-  })
-);
-app.delete(
-  "/api/client-columns",
-  dbRoute(async (req, res) => {
-    const id = req.query.id;
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    await deleteClientColumn(id);
-    res.status(204).end();
-  })
-);
-
-app.post(
-  "/api/clients-import",
-  dbRoute(async (req, res) => res.json(await importClientData()))
-);
-
-app.post(
-  "/api/contacts-import",
-  dbRoute(async (req, res) => {
-    const { reset, offset, limit } = req.body || {};
-    if (reset) return res.json(await resetContactImport());
-    res.json(
-      await importContactDataBatch({
-        offset: Number.isFinite(offset) ? offset : 0,
-        limit: Number.isFinite(limit) ? limit : 500,
-      })
-    );
-  })
-);
-
-app.get(
-  "/api/contacts",
-  dbRoute(async (req, res) => res.json(await getContacts(scopeTagsForUser(req.user), hidesInternalNotes(req.user))))
-);
-app.post(
-  "/api/contacts",
-  dbRoute(async (req, res) => {
-    const allowedTags = scopeTagsForUser(req.user);
-    const body = req.body || {};
-    if (allowedTags && (!body.tag || !allowedTags.includes(body.tag))) {
-      return res.status(403).json({ error: "You can only add leads under your own tag." });
-    }
-    const hideInternal = hidesInternalNotes(req.user);
-    const created = await createContact(hideInternal ? sanitizeClientContactPatch(body) : body);
-    res.status(201).json(hideInternal ? contactForClient(created) : created);
-  })
-);
-app.patch(
-  "/api/contacts",
-  dbRoute(async (req, res) => {
-    const { id, ...rawPatch } = req.body || {};
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    const allowedTags = scopeTagsForUser(req.user);
-    const hideInternal = hidesInternalNotes(req.user);
-    const patch = hideInternal ? sanitizeClientContactPatch(rawPatch) : rawPatch;
-    if (allowedTags) {
-      const existing = await getContactById(id);
-      if (!existing || !allowedTags.includes(existing.tag)) {
-        return res.status(403).json({ error: "Not found" });
-      }
-      delete patch.tag;
-    }
-    const contact = await updateContact(id, patch);
-    if (!contact) return res.status(404).json({ error: "Contact not found" });
-    res.json(hideInternal ? contactForClient(contact) : contact);
-  })
-);
-app.delete(
-  "/api/contacts",
-  dbRoute(async (req, res) => {
-    if (scopeTagsForUser(req.user)) {
-      return res.status(403).json({ error: "Not allowed to delete leads." });
-    }
-    const ids = String(req.query.ids || "")
-      .split(",")
-      .map((id) => Number(id.trim()))
-      .filter(Boolean);
-    if (!ids.length) return res.status(400).json({ error: "Missing ids" });
-    await deleteContacts(ids);
-    res.status(204).end();
-  })
-);
-
-app.get("/api/contact-columns", dbRoute(async (req, res) => res.json(await getContactColumns())));
-app.post(
-  "/api/contact-columns",
-  dbRoute(async (req, res) => {
-    const { label, type, options } = req.body || {};
-    if (!label || !type) return res.status(400).json({ error: "Missing label or type" });
-    res.status(201).json(await createContactColumn({ label, type, options }));
-  })
-);
-app.patch(
-  "/api/contact-columns",
-  dbRoute(async (req, res) => {
-    const { key, label, type, options } = req.body || {};
-    if (!key) return res.status(400).json({ error: "Missing key" });
-    const column = await updateContactColumnByKey(key, { label, type, options });
-    if (!column) return res.status(404).json({ error: `No column with key "${key}"` });
-    res.json(column);
-  })
-);
-app.delete(
-  "/api/contact-columns",
-  dbRoute(async (req, res) => {
-    const id = req.query.id;
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    await deleteContactColumn(id);
-    res.status(204).end();
-  })
-);
-
-// Bulk-loads leads from an external source — see api/contacts-bulk-import.js.
-app.post(
-  "/api/contacts-bulk-import",
-  dbRoute(async (req, res) => {
-    const records = Array.isArray(req.body) ? req.body : req.body?.records;
-    if (!Array.isArray(records) || !records.length) {
-      return res.status(400).json({ error: "Expected a non-empty array of contact records" });
-    }
-    res.json(await importContactsBulk(records));
-  })
-);
-
-app.get(
-  "/api/conversations",
-  dbRoute(async (req, res) => res.json(await getConversations(scopeTagsForUser(req.user))))
-);
-app.post(
-  "/api/conversations",
-  dbRoute(async (req, res) => {
-    const { leadId, name, text, time, type } = req.body || {};
-    if (!leadId || !text) return res.status(400).json({ error: "Missing leadId or text" });
-    const allowedTags = scopeTagsForUser(req.user);
-    if (allowedTags) {
-      const lead = await getContactById(leadId);
-      if (!lead || !allowedTags.includes(lead.tag)) {
-        return res.status(403).json({ error: "Not found" });
-      }
-    }
-    const conversationId = await logCall({ leadId, name, text, time, type });
-    res.status(201).json({ conversationId });
-  })
-);
-app.delete(
-  "/api/conversations",
-  dbRoute(async (req, res) => {
-    if (scopeTagsForUser(req.user)) {
-      return res.status(403).json({ error: "Not allowed to delete conversations." });
-    }
-    const ids = String(req.query.ids || "")
-      .split(",")
-      .map((id) => Number(id.trim()))
-      .filter(Boolean);
-    if (!ids.length) return res.status(400).json({ error: "Missing ids" });
-    await deleteConversations(ids);
-    res.status(204).end();
-  })
-);
-
-app.get("/api/dial-lists", dbRoute(async (req, res) => res.json(await getDialLists())));
-app.post(
-  "/api/dial-lists",
-  dbRoute(async (req, res) => {
-    const { name, leadIds } = req.body || {};
-    if (!name || !Array.isArray(leadIds) || !leadIds.length) {
-      return res.status(400).json({ error: "Missing name or leadIds" });
-    }
-    res.status(201).json(await createDialList(name, leadIds));
-  })
-);
-app.patch(
-  "/api/dial-lists",
-  dbRoute(async (req, res) => {
-    const { id, leadIds, removeLeadId } = req.body || {};
-
-    if (removeLeadId) {
-      await removeLeadFromDialLists(removeLeadId);
-      return res.json(await getDialLists());
-    }
-
-    if (!id || !Array.isArray(leadIds) || !leadIds.length) {
-      return res.status(400).json({ error: "Missing id or leadIds" });
-    }
-    const list = await addLeadsToDialList(id, leadIds);
-    if (!list) return res.status(404).json({ error: "Powerlist not found" });
-    res.json(list);
-  })
-);
-app.delete(
-  "/api/dial-lists",
-  dbRoute(async (req, res) => {
-    const id = req.query.id;
-    if (!id) return res.status(400).json({ error: "Missing id" });
-    await deleteDialList(id);
-    res.status(204).end();
-  })
-);
-
-app.get(
-  "/api/called-leads",
-  dbRoute(async (req, res) => {
-    if (forbidClientRole(req.user, res)) return;
-    res.json(await getCalledLeadIds());
-  })
-);
-app.post(
-  "/api/called-leads",
-  dbRoute(async (req, res) => {
-    if (forbidClientRole(req.user, res)) return;
-    const { leadId } = req.body || {};
-    if (!leadId) return res.status(400).json({ error: "Missing leadId" });
-    await markLeadCalled(leadId);
-    res.status(204).end();
-  })
-);
-app.get("/api/call-log", dbRoute(async (req, res) => res.json(await getCallLog(scopeTagsForUser(req.user), hidesInternalNotes(req.user)))));
-app.post(
-  "/api/call-log",
-  dbRoute(async (req, res) =>
-    res.status(201).json(
-      await addCallLogEntry({
-        ...(req.body || {}),
-        userId: String(req.user.id),
-        userName: req.user.name || req.user.email || "Unknown",
-      })
-    )
-  )
-);
-
-// ---------- Calendars ----------
-// See the import comment above — these are the actual /api/*.js
-// handlers, mounted directly rather than reimplemented here.
-app.all("/api/calendars", calendarsHandler);
-app.all("/api/calendar-google-connect", calendarGoogleConnectHandler);
-app.all("/api/calendar-google-callback", calendarGoogleCallbackHandler);
-app.all("/api/calendar-google-disconnect", calendarGoogleDisconnectHandler);
-app.all("/api/calendar-google-calendars", calendarGoogleCalendarsHandler);
-app.all("/api/calendar-outlook-connect", calendarOutlookConnectHandler);
-app.all("/api/calendar-outlook-callback", calendarOutlookCallbackHandler);
 app.all("/api/calendar-outlook-disconnect", calendarOutlookDisconnectHandler);
 app.all("/api/calendar-outlook-calendars", calendarOutlookCalendarsHandler);
 app.all("/api/calendar-bookings", calendarBookingsHandler);
@@ -1535,11 +711,9 @@ app.all("/api/calendar-slots", calendarSlotsHandler);
 app.all("/api/calendar-book", calendarBookHandler);
 app.all("/api/calendar-cancel", calendarCancelHandler);
 app.all("/api/calendar-manage", calendarManageHandler);
-app.all("/api/booking-sms-status", bookingSmsStatusHandler);
 app.all("/api/automations", automationsHandler);
 app.all("/api/tag-folders", tagFoldersHandler);
 app.all("/api/tag-booking-links", tagBookingLinksHandler);
-app.all("/api/recording-status", recordingStatusHandler);
 app.all("/api/recording-audio", recordingAudioHandler);
 // CSM tab — does its own auth and client-role check (see api/csm.js).
 app.all("/api/csm", csmHandler);
@@ -1556,13 +730,10 @@ app.all("/api/whatsapp", whatsappHandler);
 app.all("/api/automations-process-runs", automationsProcessRunsHandler);
 
 app.listen(PORT, () => {
-  const voiceProvider = getVoiceProvider();
-  const missing = voiceProvider === "sip" ? missingVoiceGatewayEnv() : missingTwilioEnv();
-  console.log(`Local backend listening on http://localhost:${PORT} (voice: ${voiceProvider})`);
+  const missing = missingVoiceGatewayEnv();
+  console.log(`Local backend listening on http://localhost:${PORT} (voice: ${getVoiceProvider()})`);
   if (missing.length) {
-    console.warn(
-      `⚠ ${voiceProvider === "sip" ? "SIP" : "Twilio"} env vars not set yet, calls will fail until you add them to .env: ${missing.join(", ")}`
-    );
+    console.warn(`⚠ Voice gateway env vars not set yet, calls will fail until you add them to .env: ${missing.join(", ")}`);
   }
   if (!isDbConfigured()) {
     console.warn(`⚠ POSTGRES_URL not set yet — database routes will fail until you add it to .env`);

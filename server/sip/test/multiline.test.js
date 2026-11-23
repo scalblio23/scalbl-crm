@@ -12,15 +12,15 @@ import { createVoiceGateway } from "../gateway.js";
 const quiet = { log() {}, warn() {} };
 
 test("multi-line: first answer wins, the other leg is cancelled", async () => {
-  const trunk = new FakeTrunk({ username: "T909317", password: "pw" });
+  const trunk = new FakeTrunk({ username: "ct100001", password: "pw" });
   const port = await trunk.listen();
   const ua = new SipUserAgent(
     loadSipConfig({
       SIP_SERVER: "127.0.0.1",
       SIP_PORT: String(port),
-      SIP_USERNAME: "T909317",
+      SIP_USERNAME: "ct100001",
       SIP_PASSWORD: "pw",
-      SIP_CALLER_ID: "+61480851534",
+      SIP_CALLER_ID: "+61485000111",
       SIP_MAX_CHANNELS: "2",
       SIP_RTP_PORTS: "42000-42999",
     }),

@@ -1,19 +1,14 @@
-// The one calling API the app uses — picks the voice transport the
-// backend is configured for (VOICE_PROVIDER, see server/voiceConfig.js)
-// and forwards to it:
-//   - "sip":    VoIPcloud/VoIPline SIP trunk via the voice gateway (sipDevice.js)
-//   - "twilio": Twilio Voice SDK (twilioDevice.js)
-// Both hand back call objects with the same events, so the
-// Powerdialler's call handling is identical either way.
-import * as twilio from "./twilioDevice";
+// The one calling API the app uses. Calls go over the SIP voice gateway
+// (server/voiceGateway.js, on the DigitalOcean droplet) via sipDevice.js;
+// /api/token hands the browser the gateway's URL and a signed token.
 import * as sip from "./sipDevice";
 import { getSoundboardProcessor } from "./soundboardProcessor";
 
-// Same base-URL convention as api.js / twilioDevice.js.
+// Same base-URL convention as api.js.
 const CALL_SERVER_URL = import.meta.env.VITE_CALL_SERVER_URL || "";
 
 let providerPromise = null;
-let provider = null; // resolved "sip" | "twilio", once known
+let provider = null; // "sip" once the gateway config has been fetched
 
 async function fetchVoiceConfig() {
   let res;
@@ -35,14 +30,8 @@ function resolveProvider() {
   if (!providerPromise) {
     providerPromise = fetchVoiceConfig()
       .then((cfg) => {
-        if (cfg.provider === "sip") {
-          sip.configureSip(cfg, fetchVoiceConfig);
-          provider = "sip";
-        } else {
-          // twilioDevice fetches its own (short-lived) token when it
-          // first places a call, same as before.
-          provider = "twilio";
-        }
+        sip.configureSip(cfg, fetchVoiceConfig);
+        provider = "sip";
         return provider;
       })
       .catch((err) => {
@@ -53,8 +42,8 @@ function resolveProvider() {
   return providerPromise;
 }
 
-// Called once after login so a SIP browser registers with the gateway
-// straight away and can ring for inbound calls. Harmless for Twilio.
+// Called once after login so the browser registers with the gateway
+// straight away and can ring for inbound calls.
 export function initVoice() {
   return resolveProvider().catch(() => null);
 }
@@ -63,53 +52,43 @@ export function getVoiceProvider() {
   return provider;
 }
 
-// `opts.leadId` labels the call's recording with its contact (Twilio
-// and the SIP gateway both record).
+// `opts.leadId` labels the call's recording with its contact.
 export async function placeCall(phoneNumber, identity = "rep", opts = {}) {
-  return (await resolveProvider()) === "sip"
-    ? sip.placeCall(phoneNumber, opts)
-    : twilio.placeCall(phoneNumber, identity, opts);
+  await resolveProvider();
+  return sip.placeCall(phoneNumber, opts);
 }
 
-// Twilio multi-line: the rep's leg joins a Twilio Conference.
-// Also how a live transfer rejoins the rep (Twilio only).
-export async function joinConference(conferenceName, identity = "rep", opts = {}) {
-  return twilio.joinConference(conferenceName, identity, opts);
-}
-
-// SIP multi-line: the gateway rings every leg itself.
+// Multi Line: the gateway rings every leg itself.
 export async function placeMultilineCall(legs, opts) {
+  await resolveProvider();
   return sip.placeMultilineCall(legs, opts);
 }
 
 export function hangUp() {
-  if (provider === "sip") sip.hangUp();
-  else twilio.hangUp();
+  sip.hangUp();
 }
 
 export function sendDigits(digits) {
-  if (provider === "sip") sip.sendDigits(digits);
-  else twilio.sendDigits(digits);
+  sip.sendDigits(digits);
 }
 
-// Both transports feed the mic through the same soundboard mixer.
+// Plays a clip into the outgoing call audio (see soundboardProcessor.js).
 export function playSoundboardClip(audioUrl) {
   return getSoundboardProcessor().playClip(audioUrl);
 }
 
-// Inbound calls (SIP only). listener(call) — call.from, call.name,
+// Inbound calls. listener(call) — call.from, call.name,
 // call.accept(), call.reject(), and "cancel" if it stops ringing.
 export function onIncomingCall(listener) {
   return sip.onIncomingCall(listener);
 }
 
-// SIP trunk status for the UI: { connected, registration: { state, error }, callerId }.
+// Trunk status for the UI: { connected, registration: { state, error }, callerId }.
 export function onVoiceStatus(listener) {
   return sip.onStatus(listener);
 }
 
-// Live transfer over the SIP trunk — the gateway does the bridging
-// (Twilio transfers go through the backend's conference API instead).
+// Live transfer — the gateway rings the third party and does the bridging.
 export function startSipTransfer(to) {
   sip.startTransfer(to);
 }
