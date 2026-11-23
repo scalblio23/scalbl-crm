@@ -1,5 +1,5 @@
 import React, { Fragment, useState, useEffect, useMemo, useRef } from "react";
-import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock, ArrowLeft, Globe, Mail } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, CalendarDays, CheckCircle2, Clock, ArrowLeft, ArrowDown, Globe, Mail } from "lucide-react";
 import { api } from "./lib/api";
 import Dropdown from "./components/Dropdown";
 import { LocationLogo, meetingLocation } from "./components/MeetingLocation";
@@ -125,6 +125,11 @@ const tzLabel = (tz) => {
     return tz;
   }
 };
+
+// "Zoom Call", "Google Meet Call", … for the headline; just "Call" when
+// the calendar has no Location set.
+const callTypeLabel = (location) =>
+  ({ zoom: "Zoom Call", gmeet: "Google Meet Call", teams: "Teams Call", phone: "Phone Call" })[location] || "Call";
 
 const dayKeyPart = (key, opts) => new Date(`${key}T12:00:00Z`).toLocaleDateString("en-US", { ...opts, timeZone: "UTC" });
 
@@ -734,6 +739,11 @@ export default function BookingWidget({ slug }) {
   const atFirstMonth = monthKey <= todayKey.slice(0, 7);
   return (
     <div className={`${fullHeight} bg-gray-50 px-3 sm:px-6 py-4 sm:py-8`}>
+      <h1 className="max-w-6xl mx-auto mb-4 sm:mb-6 flex items-center justify-center gap-2 sm:gap-4 text-center text-2xl sm:text-4xl font-extrabold text-gray-900 leading-tight">
+        <ArrowDown className="shrink-0 h-7 w-7 sm:h-10 sm:w-10 text-blue-600" strokeWidth={3} aria-hidden="true" />
+        <span>Book Your {callTypeLabel(calendarInfo.meetingLocation)} Below</span>
+        <ArrowDown className="shrink-0 h-7 w-7 sm:h-10 sm:w-10 text-blue-600" strokeWidth={3} aria-hidden="true" />
+      </h1>
       <div className="max-w-6xl mx-auto bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col md:flex-row">
         <aside className={`${mobileTimesOpen && !selectedSlot ? "hidden md:block" : ""} md:w-[30%] shrink-0 p-6 sm:p-8 border-b md:border-b-0 md:border-r border-gray-200`}>
           {selectedSlot && !rescheduling && (
