@@ -103,6 +103,7 @@ import EmailInbox from "./components/EmailInbox";
 import BroadcastPanel from "./components/BroadcastPanel";
 import Dropdown from "./components/Dropdown";
 import { MEETING_LOCATIONS, LocationLogo, meetingLocation } from "./components/MeetingLocation";
+import speedCrmLogo from "./assets/speed-crm-logo-white.png";
 
 // Host photo → centre-cropped 320px square JPEG data URL (~20-40 KB),
 // small enough to store on the calendar row and send with its booking page.
@@ -6635,19 +6636,18 @@ export default function SimpleCRM() {
         }`}
       >
         <div className="px-5 py-5 border-b border-white/10">
-          <div className="text-lg font-bold tracking-tight text-white">Scalbl CRM</div>
-          <div className="text-xs text-gray-400 mt-0.5">Lead operations</div>
+          <img src={speedCrmLogo} alt="Speed CRM" className="w-36 h-auto select-none" draggable={false} />
         </div>
-        <nav className="flex-1 py-3 px-3 space-y-1.5">
+        <nav className="flex-1 py-3">
           {visibleNavItems.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setPage(key)}
               onMouseEnter={key === "csm" ? warmCsm : undefined}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm ring-1 transition-all duration-200 ${
+              className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-all duration-200 ${
                 page === key
-                  ? "bg-white/10 font-semibold text-white ring-blue-400/40 shadow-[0_0_14px_rgba(96,165,250,0.45)]"
-                  : "bg-white/[0.03] text-gray-300 ring-white/[0.06] shadow-[0_0_8px_rgba(255,255,255,0.05)] hover:bg-white/[0.08] hover:text-white hover:ring-white/15 hover:shadow-[0_0_12px_rgba(255,255,255,0.14)]"
+                  ? "font-semibold text-white [text-shadow:0_0_10px_rgba(255,255,255,0.65)] [&>svg]:drop-shadow-[0_0_6px_rgba(255,255,255,0.7)]"
+                  : "text-gray-300 [text-shadow:0_0_8px_rgba(255,255,255,0.22)] [&>svg]:drop-shadow-[0_0_4px_rgba(255,255,255,0.25)] hover:text-white hover:[text-shadow:0_0_10px_rgba(255,255,255,0.5)]"
               }`}
             >
               <Icon size={17} strokeWidth={page === key ? 2.4 : 1.8} />
