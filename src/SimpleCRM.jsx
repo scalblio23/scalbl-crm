@@ -6134,7 +6134,7 @@ export default function SimpleCRM() {
         }`}
       >
         <div className="px-5 py-5 border-b border-white/10 flex justify-center">
-          <img src={speedCrmLogo} alt="Speed CRM" className="w-40 h-auto select-none" draggable={false} />
+          <img src={speedCrmLogo} alt="Speed CRM" className="w-20 h-auto select-none" draggable={false} />
         </div>
         <nav className="flex-1 py-3">
           {visibleNavItems.map(({ key, label, icon: Icon }) => (
