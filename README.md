@@ -17,17 +17,15 @@ Then open the printed local URL in your browser.
 npm run build
 ```
 
-## Calling (SIP trunk — VoIPcloud / VoIPline)
+## Calling (SIP trunk — Crazytel)
 
-With `VOICE_PROVIDER=sip`, the Powerdialler calls out through a VoIPcloud
-SIP trunk (registered to `sipm5.au.voipcloud.online:7060` over TCP) instead
-of Twilio, presenting `+61480851534` as caller ID. Callbacks to that number
-ring the app too. The dialler workflow is unchanged: same Call button,
-sessions, wrap-up, soundboard, call log and conversation logging. SMS still
-goes through Twilio, because the SIP trunk carries voice only.
+The Powerdialler, Multi Line and the floating dialler call out through
+Crazytel SIP accounts (registered to `sip.crazytel.net.au:5060` over TCP),
+each presenting its own number as caller ID. Callbacks to those numbers
+ring the app too. Texts go through Crazytel's SMS API (see SMS below).
 
 ```
-browser (mic/speaker) ──WebSocket, PCM 8 kHz──▶ voice gateway ──SIP/TCP + G.711 RTP──▶ VoIPcloud ──▶ PSTN
+browser (mic/speaker) ──WebSocket, PCM 8 kHz──▶ voice gateway ──SIP/TCP + G.711 RTP──▶ Crazytel ──▶ PSTN
 ```
 
 A SIP registration and its RTP audio need sockets that stay open, and
@@ -50,27 +48,30 @@ always-on process, the **voice gateway** (`server/voiceGateway.js`). It:
 - carries audio as G.711 A-law or u-law RTP, and bridges it to each rep's
   browser over a WebSocket.
 
-The browser side is `src/lib/sipDevice.js`. It exposes the same call API as
-`twilioDevice.js`, and `src/lib/voiceDevice.js` chooses between the two
-based on the backend's `VOICE_PROVIDER`.
+The browser side is `src/lib/sipDevice.js`, used through
+`src/lib/voiceDevice.js`.
 
 ### Channels
 
-`SIP_MAX_CHANNELS` (default 1, matching "SIP Line MAX 1ch") caps
-simultaneous calls, inbound and outbound together. With one channel, a
-callback arriving mid-call gets busy. To add channels, buy them from
-VoIPcloud and raise the number; no code changes. **Multi Line** dialling
-works over SIP once there are 2 or more channels. The gateway rings each
-lead on its own channel, bridges whoever answers first and cancels the
+Each Crazytel SIP account carries one call at a time, inbound and
+outbound together. More lines means more accounts: list them in the JSON
+file named by `SIP_TRUNKS_FILE` (see `.env.example` and
+`server/sip/trunkPool.js`) and the gateway registers them all, spreading
+outbound calls round-robin across the free ones. Without it, the single
+`SIP_USERNAME` account is used and `SIP_MAX_CHANNELS` caps its calls.
+**Multi Line** dialling needs 2 or more free lines. The gateway rings each
+lead on its own line, bridges whoever answers first and cancels the
 others.
 
 ### Live transfer
 
-The live-call card's **Transfer this call** works over the SIP trunk too,
-with the same panel and states as the Twilio version (described under
-Calling (Twilio) below). The voice gateway does the work itself
-(`transfer-start` / `transfer-cancel` / `transfer-complete` over the
-browser's WebSocket; see `server/sip/gateway.js`):
+The live-call card's **Transfer this call** brings a third person into
+the call (typically the client's own closer) and, once they've answered,
+hands the lead over. The number is pre-filled from the lead's client's
+**Transfer number** column on the Clients tab, or the rep can type any
+number. The voice gateway does the work itself (`transfer-start` /
+`transfer-cancel` / `transfer-complete` over the browser's WebSocket; see
+`server/sip/gateway.js`):
 
 - it rings the number on another channel while the rep stays on with the
   lead;
@@ -80,7 +81,7 @@ browser's WebSocket; see `server/sip/gateway.js`):
   directly and ends the rep's call as "transferred". When either of them
   hangs up, the other is hung up too.
 
-A transfer uses a second channel for as long as the third party is on the
+A transfer uses a second line for as long as the third party is on the
 line, and the call recording stops at the handover.
 
 ### WhatsApp (CSM tab)
@@ -130,9 +131,10 @@ recording. Calls that match no contact aren't kept.
 By default every outbound call presents `SIP_CALLER_ID`. To rotate across
 several of the trunk's numbers, list them in `SIP_CALLER_IDS`
 (comma-separated); each call, and each Multi Line leg, takes the next one.
-In VoIPcloud, set the trunk's **Caller ID** to "Keep originator's caller
-ID", or it keeps presenting its own number. If calls then show as
-"Anonymous", try `SIP_CALLER_ID_FORMAT=e164-no-plus` or `national`.
+The provider must keep the originator's caller ID, or it presents the
+account's own number. If calls then show as "Anonymous", try
+`SIP_CALLER_ID_FORMAT=e164-no-plus` or `national`. With `SIP_TRUNKS_FILE`,
+each account always presents its own number instead.
 
 ### Set up locally
 
@@ -145,8 +147,8 @@ ID", or it keeps presenting its own number. If calls then show as
 
 ### Deploying
 
-The Vercel app needs `VOICE_PROVIDER=sip`, `VOICE_GATEWAY_URL` and
-`VOICE_GATEWAY_SECRET` (plus `SIP_CALLER_ID` for display). Run the gateway
+The Vercel app needs `VOICE_GATEWAY_URL` and `VOICE_GATEWAY_SECRET`.
+Run the gateway
 on any always-on host with Node 20+, such as a small VPS:
 
 - give it the full `.env` (the `SIP_*` values, `VOICE_GATEWAY_SECRET`, and
@@ -200,131 +202,6 @@ answered/busy/failed/no-answer calls, early media, audio in both directions,
 DTMF, inbound answer/cancel/BYE, the channel limit, multi-line and the
 browser WebSocket bridge.
 
-## Calling (Twilio)
-
-Used when `VOICE_PROVIDER=twilio` (or no SIP settings are configured).
-
-The Powerdialler's Call button places real calls the same way GoHighLevel's
-dialler does: the browser registers as a Twilio Voice "device" (a softphone),
-so calls ring through the rep's mic/speakers instead of their actual phone.
-Twilio credentials never reach the browser — a small backend in `/server`
-mints short-lived call tokens and tells Twilio who to dial.
-
-### 1. Set up Twilio
-
-1. Create a Twilio account and buy a phone number (Console → Phone Numbers).
-2. Console → Account → **API keys & tokens** → create a Standard API key.
-   Note the SID and Secret — the secret is only shown once.
-3. Console → Voice → TwiML → **TwiML Apps** → create one. Leave the Voice
-   webhook blank for now — you'll fill it in once you have a public URL for
-   `/api/voice` (see step 3 below).
-
-### 2. Configure environment variables
-
-```bash
-cp .env.example .env
-```
-
-Fill in `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`,
-`TWILIO_TWIML_APP_SID`, and `TWILIO_CALLER_ID` (the number from step 1). To
-rotate outbound calls across several numbers instead of one — spreading call
-volume so no single number gets carrier-flagged — set `TWILIO_CALLER_IDS`
-(comma-separated) instead; see `.env.example` for details.
-
-### 3. Run the app + calling server together
-
-```bash
-npm run dev:all
-```
-
-This runs the Vite frontend and the Express calling server (`/server`,
-default port 3001) side by side. `npm run server` runs just the backend.
-
-Twilio needs to reach `/api/voice` on the backend to know who to dial, so in
-local dev expose it with a tunnel (e.g. `ngrok http 3001`) and paste the
-resulting URL + `/api/voice` into the TwiML App's Voice webhook (method
-`POST`). In production, point it at your deployed backend's `/api/voice`.
-
-### How it fits together
-
-- `src/lib/twilioDevice.js` — frontend wrapper around the Twilio Voice SDK;
-  fetches a token, registers the browser as a calling device, places/ends calls.
-- `server/index.js` — **local dev only** (used by `npm run dev:all`). Mints
-  Access Tokens (`GET /api/token`), answers Twilio's voice webhook
-  (`POST /api/voice`), logs call status (`POST /api/status`), and drives
-  multi-line dialling (`/api/multiline-*`, see below).
-- `api/*.js` — the same endpoints as Vercel serverless functions, deployed
-  automatically alongside the frontend when you deploy to Vercel. Both paths
-  share their Twilio logic from `server/twilioCore.js`.
-- If Twilio isn't configured yet, the Call button surfaces a clear error in
-  the Powerdialler instead of failing silently.
-
-### Deploying to Vercel
-
-The `/api` functions deploy automatically with the rest of the app — no
-separate backend hosting needed. Two things to set up in the Vercel project:
-
-1. **Environment variables** — Project Settings → Environment Variables, add
-   `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`,
-   `TWILIO_TWIML_APP_SID`, `TWILIO_CALLER_ID` (or `TWILIO_CALLER_IDS` for
-   rotation — same values as your local `.env`). Do **not** set
-   `VITE_CALL_SERVER_URL` here — leaving it unset makes the frontend call
-   `/api/token` on the same domain, which is what you want in production.
-2. **TwiML App Voice webhook** — once deployed, point it at
-   `https://<your-vercel-domain>/api/voice` (method `POST`) in the Twilio
-   Console (Voice → TwiML → TwiML Apps).
-
-Redeploy after changing env vars (Vercel only picks them up on a fresh
-build). You can sanity-check they're set correctly by visiting
-`https://<your-vercel-domain>/api/health` — it should return `{"ok":true}`.
-
-### Multi-line dialling
-
-The **Multi Line** tab is a separate mode of the same Powerdialler engine —
-same dialler lists, same lead queue/filters, same wrap-up flow — with its
-"Lines" selector (2-4) forcing every round to dial that many leads at once
-instead of one at a time. Whoever answers first gets bridged to the rep, and
-every other line gets hung up immediately; while lines are still ringing, the
-tab shows each one's lead, phone number, and which caller ID it's dialling
-from. Under the hood, the rep's own browser leg and each lead's leg (placed
-via the Twilio REST API) all join the same Twilio Conference; the first leg
-to report `in-progress` wins, and the rest are cancelled. The regular
-Powerdialler tab is unaffected — it always dials one lead at a time.
-
-This needs a real, publicly-reachable URL Twilio can fetch — see `PUBLIC_URL`
-in `.env.example`. It's automatic on Vercel; in local dev, set it to the same
-ngrok URL used for the Voice webhook above. Without it, starting a multi-line
-dial fails with a clear error rather than silently placing calls Twilio can't
-call back.
-
-Each line rings for `MULTILINE_RING_SECONDS` (25s, in `server/twilioCore.js`)
-before Twilio gives up on it — well short of Twilio's own 60s default, so an
-unanswered line doesn't sit ringing for a full minute. The tab shows a live
-"gives up in Ns" countdown while it waits. If Twilio's status callback for a
-line never makes it back here at all (most likely a `PUBLIC_URL` that isn't
-actually reachable), the frontend also gives up on its own a few seconds
-after that window — so a broken callback shows up as a clear "gave up
-waiting" error instead of the dial just hanging with hold music forever.
-
-**If a line never rings at all** — a lead's leg is placed via the REST API
-straight from their stored phone number, normalized to E.164 the same way
-the single-line dialler does (so a locally-formatted number like
-`0412 334 556` still routes correctly). If Twilio rejects the call outright
-(bad number, geo permissions, or — very commonly when testing against a
-brand-new Twilio account — a **trial account only allowing calls to
-numbers verified in the Twilio Console**), that line's card in the "Dialling
-N lines" panel turns red with Twilio's own error message right there,
-instead of just sitting on "Dialling…" with no explanation. Same message is
-also in the Vercel Functions logs (or the local server's console) either way.
-
-There's no answering-machine detection and no participant muting — every
-leg that connects is immediately audible, so two lines answering within the
-same instant can briefly cross-talk before the loser is dropped (usually well
-under a second). Dialling more lines than you have reps to answer them is a
-regulated practice in a lot of places (the US TCPA/TSR's abandoned-call rules
-in particular) — that's on whoever's operating this CRM to stay within, not
-something the app enforces.
-
 ### Soundboard
 
 Both dialling tabs' live-call view has a small **soundboard** — short clips a
@@ -332,72 +209,32 @@ rep records once (mic, in-browser) and can fire off mid-call, e.g. a quick
 canned reply to a phone's call-screening prompt ("please say your name and
 reason for calling"). Unlike just playing a sound file on your own speakers,
 a clip actually gets mixed into the call's outgoing audio — the person on the
-other end hears it — via the Twilio Voice SDK's `AudioProcessor` API
-(`src/lib/soundboardProcessor.js`), which taps into the mic stream every call
-already sends and mixes a clip's audio into that same stream on demand. Clips
+other end hears it — via `src/lib/soundboardProcessor.js`, which taps into
+the mic stream every call already sends and mixes a clip's audio into that
+same stream on demand. Clips
 are shared across the whole team (stored as base64 in `soundboard_clips`),
 not per-rep.
 
-### Live transfer
+## SMS (Crazytel)
 
-Both dialling tabs' live-call view also has a **Live transfer** section: bring
-a third person into the call (typically the client's own closer) and, once
-they've answered, hand the lead over and drop off, leaving the two of them
-talking. The number is pre-filled from the lead's client's **Transfer number**
-column on the Clients tab (added automatically; edit it like any other client
-field), or the rep can type any number.
+Every text the CRM sends goes through Crazytel's SMS API (`server/sms.js`),
+from the numbers in `CRAZYTEL_SMS_DIDS` — the number mapped to the
+contact's tag, else the first admin-scoped one. That covers the
+Conversation view's message box (`POST /api/sms-send`), Broadcast bulk SMS
+(`POST /api/sms-bulk-send`), booking confirmations, patient reminders and
+Automations. Each sent text is also filed into the contact's thread under
+Conversations → Crazytel SMS.
 
-Nothing about placing a normal call changes — a Powerdialler call still
-starts as a plain `<Dial>` bridge, and only gets moved into a conference at
-the moment a rep clicks **Start transfer**:
-
-1. The browser picks a fresh conference name and calls `POST
-   /api/transfer-start`, which redirects the *lead's* leg into that
-   conference. That ends the rep's now-empty `<Dial>`, so their browser leg
-   drops — the browser expects this and immediately re-joins the same
-   conference (the same `joinConference` path Multi Line already uses). The
-   lead hears about a second of silence. A Multi Line call is already in a
-   conference, so it skips this step.
-2. The same request dials the transfer target via the REST API with inline
-   TwiML that joins them into the conference (a beep marks their arrival).
-   The browser polls `GET /api/transfer-status` for that leg's status —
-   there's no status callback, so **no `PUBLIC_URL` is needed** and it works
-   identically in local dev and on Vercel.
-3. While it rings, and once they've answered, the rep is still talking to
-   the lead. **Complete transfer & drop off** (`POST /api/transfer-complete`)
-   flips who ends the conference on exit — rep no longer, lead + target yes
-   — then hangs the rep up; the call is logged as transferred and the
-   session moves on as usual. **Cancel transfer** / **Drop** (`POST
-   /api/transfer-cancel`) just hangs the target up and the rep carries on
-   with the lead. Ending the call outright at any point still tears
-   everything down, exactly as before.
-
-## SMS (Twilio)
-
-Uses the same Twilio account and credentials as calling — no separate setup.
-
-- **Outbound**: the message box in the Conversation view sends a real SMS via
-  `POST /api/sms-send`, and logs it onto that lead's conversation. Click
-  **New** above the conversation list to text a contact who doesn't have a
-  thread yet.
-- **Inbound**: replies show up automatically — Twilio posts to
-  `POST /api/sms-inbound`, which matches the sender's number to a contact (by
-  phone, ignoring formatting) and logs it onto their conversation, creating
-  one if it's the first message from them.
-
-To receive inbound texts, set the **Messaging** webhook on your Twilio
-number: Console → Phone Numbers → your number → **Messaging Configuration** →
-**A message comes in** → `https://<your-domain>/api/sms-inbound` (method
-`POST`). In local dev, use the same ngrok URL as the voice webhook.
-
-The app currently only picks up new inbound messages on page refresh — there's
-no live push yet.
+Replies arrive on `POST /api/sms-crazytel-inbound?key=<CRAZYTEL_SMS_WEBHOOK_SECRET>`
+(Crazytel portal → the number → Forward Inbound SMS → JSON web request) and
+land in the same thread. A Y/N reply to a patient confirmation request is
+also acted on there (see Patient confirmation & reminders).
 
 ## Database (Postgres)
 
 Contacts, conversations, dialler lists, and the call log are stored in a
 Postgres database, not the browser — so they persist across devices and
-survive a redeploy. Same setup pattern as Twilio: one database, wherever the
+survive a redeploy. One database, wherever the
 app is running (locally or on Vercel).
 
 The database layer (`server/db.js`) uses the standard `pg` driver over a
@@ -521,8 +358,8 @@ redeploy — the next schema check seeds the row (`password_hash` starts
   creation/verification, and `requireAuth()`, shared by local dev and Vercel.
 - `api/auth-login.js`, `api/auth-set-password.js`, `api/auth-logout.js`,
   `api/auth-me.js` — the four auth endpoints; everything else under `/api`
-  requires a valid session cookie except the Twilio webhooks
-  (`/api/voice`, `/api/status`, `/api/sms-inbound`) and `/api/health`.
+  requires a valid session cookie except provider webhooks that check their
+  own key (e.g. `/api/sms-crazytel-inbound`) and `/api/health`.
 
 ## Updating a lead's status from outside (`/api/lead-status`)
 
@@ -651,10 +488,10 @@ a notification email to the calendar's owner.
 
 ### 3. SMS confirmations
 
-Uses the same Twilio setup as Calling/SMS above — no separate config. A
-booking with a phone number gets a confirmation text via `sendSms()`
-(`server/twilioCore.js`); a missing phone or unconfigured Twilio just skips
-the text rather than failing the booking.
+Uses the Crazytel SMS setup above — no separate config. A booking with a
+phone number gets a confirmation text via `sendSms()` (`server/sms.js`); a
+missing phone or unconfigured SMS just skips the text rather than failing
+the booking.
 
 ### How it fits together
 
@@ -708,10 +545,10 @@ For each booking on a calendar with it switched on:
 - **Y** → `attendance_status = 'confirmed'` (shown as *patient confirmed* in the bookings list) + "Thanks for confirming…" SMS.
 - **N** → that booking is cancelled (`cancel_reason = patient_unable_to_attend`), every pending reminder stops, the Google event is removed, and a cancellation with a rebooking link is sent. The contact/lead is never touched.
 - **No reply** → nothing changes; later reminders still send.
-- A reply only acts when the Twilio signature verifies and the sender's number matches exactly **one** future, still-booked appointment that was sent a request for its current time. Two candidates → nothing changes and the patient is asked to use their links.
+- A reply only acts when it arrived on the key-checked Crazytel webhook and the sender's number matches exactly **one** future, still-booked appointment that was sent a request for its current time. Two candidates → nothing changes and the patient is asked to use their links.
 - **Reschedule / cancel links** open `/book/<slug>#manage=<token>` (token in the URL fragment, never sent to a server in the URL). Rescheduling moves the same booking row (`schedule_version + 1`): old reminders are cancelled and a fresh confirmation + reminder cycle is scheduled. Inside 12 hours the Y/N request goes a minute after the confirmation (skipped under 1 hour); 30m/10m reminders whose moment has passed are skipped.
 - While on, it replaces the calendar's built-in confirmation **and** its "Booking Created" automations (they'd otherwise be duplicate messages). The owner notification email is unchanged. A setter cancelling from the CRM stops reminders without messaging the patient.
-- Reminders are `booking_reminders` rows (unique per booking/version/kind/channel), sent by the existing every-minute cron (`/api/automations-process-runs`). Before each send the booking is locked and re-checked. Failures are logged to `booking_events`; provider 429/5xx are retried, unknown outcomes are not (no duplicates). SMS delivery status comes from Twilio's status callback.
+- Reminders are `booking_reminders` rows (unique per booking/version/kind/channel), sent by the existing every-minute cron (`/api/automations-process-runs`). Before each send the booking is locked and re-checked. Failures are logged to `booking_events`; provider 429/5xx are retried, unknown outcomes are not (no duplicates), and each reminder is sent with a stable idempotency key.
 
-**Setup:** `TWILIO_AUTH_TOKEN` and `PUBLIC_URL` (see `.env.example`); every Twilio number in the caller-ID pool (or the Messaging Service) needs its inbound Messaging webhook set to `POST {PUBLIC_URL}/api/sms-inbound`, since a patient replies to whichever number texted them; Resend as for calendars; Google connected on the calendar for generated Meet links (otherwise the calendar's Video conference link is used); Vercel Pro for the every-minute cron.
+**Setup:** Crazytel SMS (`CRAZYTEL_*`) and `PUBLIC_URL` (see `.env.example`); every number in `CRAZYTEL_SMS_DIDS` needs Forward Inbound SMS pointed at `/api/sms-crazytel-inbound`, since a patient replies to whichever number texted them; Resend as for calendars; Google connected on the calendar for generated Meet links (otherwise the calendar's Video conference link is used); Vercel Pro for the every-minute cron.
 

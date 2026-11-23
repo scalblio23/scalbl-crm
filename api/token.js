@@ -1,39 +1,15 @@
-// Vercel serverless function — deployed automatically alongside the
-// frontend at /api/token. Requires the same TWILIO_* env vars as
-// local dev, set instead in the Vercel project's Environment Variables.
-import { missingTwilioEnv, mintAccessToken, getCallerIdPool } from "../server/twilioCore.js";
-import { getVoiceProvider, missingVoiceGatewayEnv, sipTokenResponse } from "../server/voiceConfig.js";
+// GET /api/token — hands a logged-in browser the SIP voice gateway's
+// WebSocket URL and a short-lived signed token (see server/voiceConfig.js).
+import { missingVoiceGatewayEnv, sipTokenResponse } from "../server/voiceConfig.js";
 import { requireAuth } from "../server/auth.js";
 
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
-
-  // VOICE_PROVIDER=sip: hand the browser the SIP voice gateway's URL
-  // and a signed token instead of a Twilio Access Token — see
-  // server/voiceConfig.js.
-  if (getVoiceProvider() === "sip") {
-    const missingSip = missingVoiceGatewayEnv();
-    if (missingSip.length) {
-      res.status(500).json({ error: `SIP calling is not configured. Missing: ${missingSip.join(", ")}` });
-      return;
-    }
-    res.status(200).json(sipTokenResponse(user));
-    return;
-  }
-
-  const missing = missingTwilioEnv();
+  const missing = missingVoiceGatewayEnv();
   if (missing.length) {
-    res.status(500).json({
-      error: `Twilio is not configured. Missing: ${missing.join(", ")}`,
-    });
+    res.status(500).json({ error: `Calling is not configured. Missing: ${missing.join(", ")}` });
     return;
   }
-
-  const identity = req.query.identity || "rep";
-  // Sent once per device registration (not per call) so the browser
-  // can rotate through caller IDs itself — see src/lib/twilioDevice.js
-  // — rather than asking the backend to pick one on every single call,
-  // which meant every call waited on a database round-trip first.
-  res.status(200).json({ token: mintAccessToken(identity), identity, callerIds: getCallerIdPool() });
+  res.status(200).json(sipTokenResponse(user));
 }

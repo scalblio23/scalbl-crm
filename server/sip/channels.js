@@ -1,7 +1,7 @@
 // Tracks how many of the trunk's simultaneous-call channels are in use.
 // Every call — inbound or outbound, single or one leg of a multi-line
 // round — holds one lease for its whole life. The limit comes from
-// SIP_MAX_CHANNELS, so going from VoIPcloud's 1-channel plan to N
+// SIP_MAX_CHANNELS (1 per account on Crazytel), so a plan with N
 // channels is a config change, not a code change.
 export class ChannelPool {
   constructor(max) {

@@ -12,7 +12,6 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes("node_modules")) return undefined;
           if (/[\\/]node_modules[\\/](recharts|d3-|victory-vendor|decimal\.js-light|lodash|eventemitter3|react-smooth|recharts-scale)/.test(id)) return "charts";
-          if (/[\\/]node_modules[\\/]@twilio[\\/]/.test(id)) return "twilio";
           if (/[\\/]node_modules[\\/]lucide-react[\\/]/.test(id)) return "icons";
           if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "react";
           return "vendor";

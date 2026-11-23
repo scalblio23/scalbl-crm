@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { getSmsRuntime } from "../server/smsRuntime.js";
 import { normalizeNumber, auToInternational } from "../server/smsPolicy.js";
+import { handleBookingReply } from "../server/patientReminders.js";
 
 // POST /api/sms-crazytel-inbound?key=<CRAZYTEL_SMS_WEBHOOK_SECRET>
 //
@@ -93,6 +94,15 @@ export default async function handler(req, res) {
 
   try {
     const result = await runtime.store.receive({ eventId, receiptHash, did, from, text, receivedAt });
+    if (!result.duplicate) {
+      // A Y/N reply to a patient confirmation request (server/patientReminders.js).
+      // Only acts on an exact Y/N from a number with exactly one booking
+      // awaiting confirmation; anything else is a no-op. This webhook is
+      // already verified by its secret key.
+      await handleBookingReply({ messageSid: eventId, from, body: text, verified: true }).catch((err) =>
+        console.error("[sms-crazytel-inbound] booking reply handling failed", err?.message || err)
+      );
+    }
     return res.status(200).json({ ok: true, duplicate: result.duplicate });
   } catch (err) {
     console.error("[sms-crazytel-inbound]", err);

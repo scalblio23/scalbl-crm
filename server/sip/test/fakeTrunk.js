@@ -1,4 +1,4 @@
-// A tiny stand-in for the VoIPcloud registrar/proxy, for tests: accepts
+// A tiny stand-in for the provider's SIP registrar/proxy, for tests: accepts
 // SIP over TCP, challenges REGISTER/INVITE with digest auth, and lets
 // the test script drive call progress and send its own requests
 // (inbound INVITE, BYE, CANCEL) down the registered connection.
@@ -10,7 +10,7 @@ import { parseChallenge, buildDigestAuthorization } from "../digest.js";
 import { parseSdp, buildSdp } from "../sdp.js";
 
 export class FakeTrunk extends EventEmitter {
-  constructor({ username, password, realm = "voipcloud", natReceived = null } = {}) {
+  constructor({ username, password, realm = "crazytel", natReceived = null } = {}) {
     super();
     this.username = username;
     this.password = password;

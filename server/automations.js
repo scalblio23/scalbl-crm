@@ -34,8 +34,9 @@ import {
 } from "./db.js";
 import { sendEmail, missingEmailEnv } from "./email.js";
 import { sendCrazytelSms } from "./crazytelSms.js";
+import { pickSenderDid } from "./sms.js";
 import { SmsStore } from "./smsStore.js";
-import { parseDids, didsForTags, auToInternational } from "./smsPolicy.js";
+import { auToInternational } from "./smsPolicy.js";
 
 // Picks the Crazytel sender for an automation SMS. Same scoping rule
 // as the inbox (smsPolicy.didsForTags): a DID mapped to the contact's
@@ -45,10 +46,7 @@ import { parseDids, didsForTags, auToInternational } from "./smsPolicy.js";
 // contacts always see the same number. Automations run with no
 // signed-in user, so there's no user scope to match against.
 function pickAutomationDid(context) {
-  const dids = parseDids(process.env.CRAZYTEL_SMS_DIDS || "");
-  const tag = context.tag || context.contact?.tag;
-  const tagMatched = tag ? didsForTags([tag], dids) : [];
-  return tagMatched[0] || dids.find((d) => d.adminScope) || null;
+  return pickSenderDid({ tag: context.tag || context.contact?.tag });
 }
 
 // One Crazytel send for an automation step — shared by "Send SMS"

@@ -1,11 +1,10 @@
 // SIP trunk configuration for the voice gateway (server/voiceGateway.js).
-// Everything is env-driven so the same code runs against VoIPcloud's
-// VoIPline trunk today and any other SIP-registration trunk later —
-// nothing here is VoIPcloud-specific except the defaults.
+// Everything is env-driven, so the same code runs against Crazytel (the
+// defaults) or any other SIP-registration trunk.
 import fs from "fs";
 import { normalizeCallerId } from "./phone.js";
 
-const DEFAULT_SERVER = "sipm5.au.voipcloud.online";
+const DEFAULT_SERVER = "sip.crazytel.net.au";
 
 function num(value, fallback) {
   const n = Number(value);
@@ -26,8 +25,8 @@ export function loadSipConfig(env = process.env) {
 
   return {
     server,
-    port: num(env.SIP_PORT, 7060),
-    // "tcp" (VoIPcloud's setting for this trunk) or "tls".
+    port: num(env.SIP_PORT, 5060),
+    // "tcp" or "tls".
     transport: (env.SIP_TRANSPORT || "tcp").toLowerCase(),
     // The SIP domain/realm used in From/To/Request-URIs — usually the
     // same host as the registrar.
@@ -43,19 +42,19 @@ export function loadSipConfig(env = process.env) {
     // With SIP_CALLER_IDS, the provider reads the presented number from
     // the From header, so each call's caller ID goes there.
     callerIdInFrom: callerIds.length > 0,
-    // The user part of the From header. VoIPcloud identifies the trunk
-    // by its SIP username and presents the trunk's configured Caller ID,
+    // The user part of the From header. The provider identifies the
+    // account by its SIP username and presents its configured Caller ID,
     // so the default is the username; the caller ID is still asserted
     // via the display name, P-Asserted-Identity and Remote-Party-ID.
-    // Set SIP_FROM_USER=+61480851534 if your provider wants it in From.
+    // Set SIP_FROM_USER=+61400000000 if your provider wants it in From.
     fromUser: env.SIP_FROM_USER || (callerIds.length ? "" : username),
     // How the destination is written into the INVITE's Request-URI:
     //   e164          +61412345678 (default)
     //   e164-no-plus  61412345678
     //   national      0412345678
     dialFormat: env.SIP_DIAL_FORMAT || "e164",
-    // Simultaneous calls the trunk allows (VoIPcloud "SIP Line MAX 1ch"
-    // = 1). Raise this when you add channels — nothing else changes.
+    // Simultaneous calls the account allows (1 per Crazytel SIP account;
+    // more lines = more accounts, see SIP_TRUNKS_FILE / trunkPool.js).
     maxChannels: Math.floor(num(env.SIP_MAX_CHANNELS, 1)),
     ringTimeoutSeconds: num(env.SIP_RING_TIMEOUT, 60),
     registerExpires: num(env.SIP_REGISTER_EXPIRES, 300),
@@ -167,7 +166,7 @@ export function missingSipEnv(env = process.env) {
   return missing;
 }
 
-// "+61480851534, 0485 998 251" → ["+61480851534", "+61485998251"]
+// "+61400000000, 0485 998 251" → ["+61400000000", "+61485998251"]
 export function parseCallerIds(raw) {
   return String(raw || "")
     .split(",")

@@ -1,9 +1,7 @@
-// Which voice transport the Powerdialler uses, and the handshake
-// between the CRM backend (Express locally / Vercel in production)
-// and the SIP voice gateway (server/voiceGateway.js).
+// The handshake between the CRM backend (Express locally / Vercel in
+// production) and the SIP voice gateway (server/voiceGateway.js).
 //
-// With VOICE_PROVIDER=sip, /api/token no longer mints a Twilio Access
-// Token — it hands the browser the gateway's WebSocket URL and a
+// /api/token hands the browser the gateway's WebSocket URL and a
 // short-lived token signed with VOICE_GATEWAY_SECRET, which the
 // gateway checks before letting that browser place or answer calls.
 // The SIP credentials themselves only ever live on the gateway.
@@ -11,12 +9,9 @@ import jwt from "jsonwebtoken";
 
 const AUDIENCE = "voice-gateway";
 
-// "sip" or "twilio". Explicit VOICE_PROVIDER wins; otherwise SIP is
-// used as soon as SIP credentials are configured.
-export function getVoiceProvider(env = process.env) {
-  const explicit = String(env.VOICE_PROVIDER || "").toLowerCase();
-  if (explicit === "sip" || explicit === "twilio") return explicit;
-  return env.SIP_USERNAME ? "sip" : "twilio";
+// Calls always go through the SIP voice gateway.
+export function getVoiceProvider() {
+  return "sip";
 }
 
 function gatewaySecret(env = process.env) {

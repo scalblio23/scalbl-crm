@@ -6,8 +6,8 @@ import { api } from "../lib/api";
 //
 // Deliberately not a bare <audio src="/api/recording-audio?sid=…">.
 // When the audio element fetches the file itself and anything goes
-// wrong — a 401 because the session expired, a 502 because Twilio
-// refused the media request, a body mangled on its way through the
+// wrong — a 401 because the session expired, a 502 because the voice
+// server refused the media request, a body mangled on its way through the
 // serverless streaming bridge — all the rep sees is a greyed-out play
 // button and 0:00 / 0:00, with no way to tell which it was. Fetching
 // the MP3 explicitly means:
@@ -50,7 +50,7 @@ export default function RecordingPlayer({ recordingSid }) {
       if (!raw.size) throw new Error("The recording came back empty.");
       // Pin the type: the browser picks its decoder from the Blob's
       // type, not from sniffing, and a proxy hop can lose the header.
-      // (A VoIPline recording can be WAV if the voice server had no
+      // (A recording can be WAV if the voice server had no
       // MP3 encoder — keep that type rather than mislabelling it.)
       const blob = raw.type === "audio/mpeg" || raw.type === "audio/wav" ? raw : new Blob([raw], { type: "audio/mpeg" });
       setBlobType(blob.type);

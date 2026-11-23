@@ -1,19 +1,18 @@
 import { ensureSchema, getContactsByIds, logMessage, mapWithConcurrency } from "../server/db.js";
-import { sendSms, missingTwilioEnv } from "../server/twilioCore.js";
+import { sendSms, recordSentSms, missingSmsEnv } from "../server/sms.js";
 import { requireAuth, forbidClientRole, forbidWithoutTab } from "../server/auth.js";
 
-// Cap on how many outbound sends run at once — Twilio will happily
-// queue more, but firing hundreds of REST calls in one tick from a
-// single serverless invocation risks both a Twilio rate-limit error
-// and the function's own execution time limit. 5 is plenty faster
-// than sequential without either.
+// Cap on how many outbound sends run at once — firing hundreds of
+// requests in one tick from a single serverless invocation risks both a
+// provider rate limit and the function's own execution time limit. 5 is
+// plenty faster than sequential without either.
 const CONCURRENCY = 5;
 
 // POST /api/sms-bulk-send — sends the same text to a batch of
 // contacts (selected individually or by tag on the Bulk SMS tab) via
-// the one wired-in Twilio number/messaging service, logging each as
-// an outbound message on that lead's conversation, same as a single
-// send. Body: { contactIds: number[], text }.
+// Crazytel (each from the number mapped to the contact's tag, see
+// server/sms.js), logging each as an outbound message on that lead's
+// conversation, same as a single send. Body: { contactIds: number[], text }.
 export default async function handler(req, res) {
   const user = await requireAuth(req, res);
   if (!user) return;
@@ -25,9 +24,9 @@ export default async function handler(req, res) {
       res.setHeader("Allow", "POST");
       return res.status(405).json({ error: "Method not allowed" });
     }
-    const missing = missingTwilioEnv();
+    const missing = missingSmsEnv();
     if (missing.length) {
-      return res.status(500).json({ error: `Twilio is not configured. Missing: ${missing.join(", ")}` });
+      return res.status(500).json({ error: `SMS is not configured. Missing: ${missing.join(", ")}` });
     }
 
     const text = String(req.body?.text || "").trim();
@@ -44,7 +43,8 @@ export default async function handler(req, res) {
 
     const results = await mapWithConcurrency(withPhone, CONCURRENCY, async (c) => {
       try {
-        await sendSms({ to: c.phone, body: text });
+        const sent = await sendSms({ to: c.phone, body: text, tag: c.tag });
+        await recordSentSms(sent, c.phone, text);
         await logMessage({ leadId: c.id, name: c.name, text, time: timeLabel, type: "text", outgoing: true });
         return { id: c.id, name: c.name, ok: true };
       } catch (err) {

@@ -1,6 +1,6 @@
 // Several SIP accounts on one provider, used as one bigger trunk.
 //
-// Crazytel (and VoIPcloud) give each SIP account one simultaneous call,
+// Crazytel gives each SIP account one simultaneous call,
 // so more lines means more accounts. TrunkPool runs one SipUserAgent per
 // account (from SIP_TRUNKS_FILE, see loadSipConfigs in ./config.js) and
 // presents the same surface the gateway already uses on a single

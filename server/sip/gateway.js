@@ -1,8 +1,8 @@
 // Bridges browsers (reps) to the SIP trunk. Each logged-in browser tab
 // holds one WebSocket to the gateway:
 //
-//   browser mic ──PCM16/8kHz──▶ WebSocket ──▶ G.711 RTP ──▶ VoIPcloud
-//   browser spk ◀──PCM16/8kHz── WebSocket ◀── G.711 RTP ◀── VoIPcloud
+//   browser mic ──PCM16/8kHz──▶ WebSocket ──▶ G.711 RTP ──▶ Crazytel
+//   browser spk ◀──PCM16/8kHz── WebSocket ◀── G.711 RTP ◀── Crazytel
 //
 // Control messages are JSON text frames; audio is binary frames of
 // little-endian 16-bit mono samples at 8 kHz (the browser does the
@@ -92,8 +92,7 @@ export function endedMessage({ reason, status, sipReason, cause }) {
   return sipReason ? `The call failed: ${sipReason}` : "The call failed.";
 }
 
-// Twilio-style leg statuses, so the Multi Line tab's existing status
-// labels work unchanged.
+// The leg statuses the Multi Line tab's status labels expect.
 function legStatusForEnd(reason) {
   if (reason === "busy" || reason === "declined") return "busy";
   if (reason === "no-answer") return "no-answer";

@@ -22,10 +22,10 @@
 // was cancelled or rescheduled a moment earlier, and a retried cron
 // tick can't send the same row twice.
 import crypto from "crypto";
-import twilio from "twilio";
 import { getPool, calendarFromRow, calendarBookingFromRow, CALENDAR_CONNECTIONS_SQL } from "./db.js";
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "./email.js";
-import { sendSms, missingTwilioEnv, publicBaseUrl } from "./twilioCore.js";
+import { sendSms, missingSmsEnv } from "./sms.js";
+import { publicBaseUrl } from "./publicUrl.js";
 import {
   getValidAccessToken,
   getFreeBusy,
@@ -57,11 +57,11 @@ export function patientLinkBase(env = process.env) {
   return publicBaseUrl(env);
 }
 
-// Twilio only accepts E.164 ("+614…") — it never infers a country —
+// The SMS provider wants E.164 ("+614…") — it never infers a country —
 // but patients type numbers the Australian way ("0412 345 678"). Those
 // are converted; anything already international is left alone, and
-// anything unrecognisable is passed through for Twilio to reject (which
-// is then logged as a failed reminder, never silently dropped).
+// anything unrecognisable is passed through for the provider to reject
+// (which is then logged as a failed reminder, never silently dropped).
 export function toSendableNumber(raw) {
   const s = String(raw || "").trim();
   if (s.startsWith("+")) return `+${s.slice(1).replace(/\D/g, "")}`;
@@ -78,7 +78,7 @@ const defaultDeps = {
   sendSms,
   sendEmail: sendCalendarEmail,
   missingEmailEnv,
-  missingTwilioEnv,
+  missingSmsEnv,
   baseUrl: () => patientLinkBase(),
   env: () => process.env,
   google: { getValidAccessToken, getFreeBusy, createGoogleEventWithMeet, patchGoogleEventTimes, deleteGoogleEvent },
@@ -395,11 +395,6 @@ function isRetryable(err) {
   return err && (err.status === 429 || (Number(err.status) >= 500 && Number(err.status) < 600));
 }
 
-function smsStatusCallbackUrl(base) {
-  // Only when we can verify Twilio's signature on the callback.
-  return base && deps.env().TWILIO_AUTH_TOKEN ? `${base}/api/booking-sms-status` : undefined;
-}
-
 async function sendOne(row, booking, msg, base) {
   if (row.channel === "email") {
     if (deps.missingEmailEnv().length) throw Object.assign(new Error("Resend not configured"), { permanent: true });
@@ -407,11 +402,12 @@ async function sendOne(row, booking, msg, base) {
     // Resend accepting it means queued for delivery, not delivered.
     return { providerId: sent?.id || null, providerStatus: "accepted" };
   }
-  if (deps.missingTwilioEnv().length) throw Object.assign(new Error("Twilio not configured"), { permanent: true });
+  if (deps.missingSmsEnv().length) throw Object.assign(new Error("SMS not configured"), { permanent: true });
   const result = await deps.sendSms({
     to: toSendableNumber(booking.contactPhone),
     body: msg.text,
-    statusCallback: smsStatusCallbackUrl(base),
+    // Stable per reminder row, so the provider dedupes a repeated send.
+    key: `reminder-${row.id}`,
   });
   return { providerId: result?.sid || null, providerStatus: result?.status || "queued" };
 }
@@ -564,12 +560,12 @@ export async function processDueBookingReminders(limit = 25, { batchSize = 5, bu
 export function workflowReadiness(calendar, env = process.env) {
   const base = patientLinkBase(env);
   return [
-    { key: "sms_send", required: true, ok: !missingTwilioEnv(env).length, label: "Twilio can send SMS", fix: "Twilio account/API key and caller ID env vars (same as calling)." },
-    { key: "sms_replies", required: true, ok: Boolean(env.TWILIO_AUTH_TOKEN), label: "Y/N replies can be verified", fix: "Set TWILIO_AUTH_TOKEN in Vercel (Twilio Console → Account → Auth Token)." },
+    { key: "sms_send", required: true, ok: !missingSmsEnv(env).length, label: "Crazytel can send SMS", fix: "Set CRAZYTEL_API_KEY and CRAZYTEL_SMS_DIDS in Vercel." },
+    { key: "sms_replies", required: true, ok: Boolean(env.CRAZYTEL_SMS_WEBHOOK_SECRET), label: "Y/N replies reach the CRM", fix: "Set CRAZYTEL_SMS_WEBHOOK_SECRET in Vercel." },
     { key: "email", required: true, ok: !missingEmailEnv(env).length, label: "Resend can send email", fix: "Set RESEND_API_KEY and RESEND_FROM_EMAIL (on a domain verified in Resend) in Vercel." },
     { key: "links", required: true, ok: Boolean(base) && /^https:\/\//.test(base), label: base ? `Patient links use ${base}` : "Patient links have a public address", fix: "Set PUBLIC_URL to the CRM's production address (https://…) in Vercel." },
     { key: "meet", required: false, ok: Boolean(calendar.googleConnected || calendar.videoConferenceLink), label: calendar.googleConnected ? "Google Meet links are generated per booking" : calendar.videoConferenceLink ? "Uses this calendar's Video conference link" : "Meeting link", fix: "Connect Google (Integrate tab) to generate Meet links, or set a Video conference link." },
-    { key: "inbound", required: false, ok: null, label: "Twilio sends replies to the CRM", fix: `Set every sending number's (or the Messaging Service's) incoming message webhook to POST ${base || "https://<your-domain>"}/api/sms-inbound — can't be checked from here.` },
+    { key: "inbound", required: false, ok: null, label: "Crazytel forwards replies to the CRM", fix: `In Crazytel, set each sending number's Forward Inbound SMS to a JSON web request to ${base || "https://<your-domain>"}/api/sms-crazytel-inbound?key=<CRAZYTEL_SMS_WEBHOOK_SECRET> — can't be checked from here.` },
   ];
 }
 
@@ -901,30 +897,12 @@ export function parseReplyIntent(body) {
   return null;
 }
 
-// Twilio signs each webhook with the account's Auth Token; anything
-// that doesn't verify is ignored. The signed URL is whatever is pasted
-// into the Twilio Console, which may be the request's own host or
-// PUBLIC_URL — either is accepted.
-export function verifyTwilioSignature({ signature, urls, params }) {
-  const authToken = deps.env().TWILIO_AUTH_TOKEN;
-  if (!authToken || !signature) return false;
-  return urls.filter(Boolean).some((url) => twilio.validateRequest(authToken, signature, url, params || {}));
-}
-
-export function candidateWebhookUrls(req, path) {
-  const host = req.headers?.["x-forwarded-host"] || req.headers?.host;
-  const proto = req.headers?.["x-forwarded-proto"] || "https";
-  const fromReq = host ? `${proto}://${host}${req.originalUrl || req.url || path}` : null;
-  const base = deps.baseUrl();
-  return [fromReq, base ? `${base}${path}` : null];
-}
-
 // Returns a short outcome string (for tests/logs). Only acts when the
-// reply is exactly Y or N, the webhook verifies, this MessageSid hasn't
+// reply is exactly Y or N, the webhook verified, this message id hasn't
 // been processed, and the sender's number matches exactly one booking
 // that is active, in the future, and was sent a confirmation request
 // for its current time. Anything else leaves every booking untouched —
-// the existing inbox logging in api/sms-inbound.js still runs either way.
+// the reply is still saved to the SMS inbox either way (api/sms-crazytel-inbound.js).
 export async function handleBookingReply({ messageSid, from, body, verified }) {
   const intent = parseReplyIntent(body);
   if (!intent) return "not_a_reply";
@@ -958,7 +936,7 @@ export async function handleBookingReply({ messageSid, from, body, verified }) {
   if (matches.length > 1) {
     // Never guess between two appointments.
     await record(null, "ambiguous");
-    if (!deps.missingTwilioEnv().length) {
+    if (!deps.missingSmsEnv().length) {
       await deps
         .sendSms({ to: from, body: "We couldn't tell which appointment your reply was for. Please use the confirm or cancel links in your appointment messages." })
         .catch((err) => console.error("[patientReminders] ambiguous-reply SMS failed", err?.message || err));
@@ -976,27 +954,6 @@ export async function handleBookingReply({ messageSid, from, body, verified }) {
   const outcome = !cancelled ? "not_found" : cancelled.alreadyCancelled ? "already_cancelled" : "cancelled";
   await record(bookingId, outcome);
   return outcome;
-}
-
-// Twilio delivery status callback for reminder SMS. Never moves a row
-// backwards (a late "sent" can't overwrite "delivered").
-const PROVIDER_RANK = { accepted: 0, queued: 1, sending: 2, sent: 3, delivered: 4, undelivered: 5, failed: 5 };
-export async function handleSmsStatusCallback({ messageSid, status, errorCode }) {
-  if (!messageSid || !(status in PROVIDER_RANK)) return "ignored";
-  const rows = await q("SELECT id, booking_id, provider_status FROM booking_reminders WHERE provider_id = $1 AND channel = 'sms'", [messageSid]);
-  if (!rows[0]) return "unknown";
-  const current = PROVIDER_RANK[rows[0].provider_status] ?? -1;
-  if (PROVIDER_RANK[status] <= current) return "stale";
-  const failed = status === "failed" || status === "undelivered";
-  await q(
-    `UPDATE booking_reminders SET provider_status = $2,
-       status = CASE WHEN $3 THEN 'failed' ELSE status END,
-       last_error = CASE WHEN $3 THEN $4 ELSE last_error END, updated_at = now()
-     WHERE id = $1`,
-    [rows[0].id, status, failed, errorCode ? `twilio_error_${errorCode}` : failed ? status : null]
-  );
-  if (failed) await logEvent(getPool(), rows[0].booking_id, "reminder_undelivered", { status, errorCode: errorCode || null });
-  return "updated";
 }
 
 // For the CRM's booking list — the audit trail of one booking.

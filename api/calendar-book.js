@@ -3,7 +3,7 @@
 // This is the one endpoint that does everything the feature promises
 // once a visitor picks a slot: re-validates it's still free, books it,
 // creates the Google and/or Outlook calendar event (if connected), and sends the
-// confirmation email (Resend) + confirmation SMS (Twilio).
+// confirmation email (Resend) + confirmation SMS (Crazytel).
 import {
   withSchemaRetry,
   getCalendarBySlug,
@@ -16,7 +16,8 @@ import {
 import { getCrmClashBusy, getExternalBusy, pushBookingToCalendars } from "../server/calendarSync.js";
 import { computeAvailableSlots, localDateStrInZone } from "../server/calendarAvailability.js";
 import { sendCalendarEmail, buildIcs, missingEmailEnv } from "../server/email.js";
-import { sendSms, missingTwilioEnv, publicBaseUrl } from "../server/twilioCore.js";
+import { sendSms, recordSentSms, missingSmsEnv } from "../server/sms.js";
+import { publicBaseUrl } from "../server/publicUrl.js";
 import { queueAutomationsForTrigger, startQueuedRuns } from "../server/automations.js";
 import { afterResponse } from "../server/afterResponse.js";
 import { workflowFor, createWorkflowGoogleEvent, onWorkflowBookingCreated } from "../server/patientReminders.js";
@@ -123,12 +124,14 @@ async function runAfterBooking({ booking, calendar, queued, name, email, phone, 
   if (owner?.email && !missingEmailEnv().length) {
     work.push(ownerNotificationEmail({ calendar, owner, name, email, phone, notes, startUTC }));
   }
-  if (phone && !hasCustomBookingAutomation && !missingTwilioEnv().length) {
+  if (phone && !hasCustomBookingAutomation && !missingSmsEnv().length) {
     work.push(
-      sendSms({
-        to: phone,
-        body: `Hi ${name}, your ${calendar.name} is confirmed for ${bookerWhen}. Reply to reschedule.`,
-      }).catch((err) => console.error("[api/calendar-book] confirmation SMS failed", err))
+      (async () => {
+        const text = `Hi ${name}, your ${calendar.name} is confirmed for ${bookerWhen}. Reply to reschedule.`;
+        // Filed into their Crazytel SMS thread, where a reply lands.
+        const sent = await sendSms({ to: phone, body: text, key: `booking-${booking.id}-confirmation` });
+        await recordSentSms(sent, phone, text);
+      })().catch((err) => console.error("[api/calendar-book] confirmation SMS failed", err?.message || err))
     );
   }
   await Promise.all(work);

@@ -11,7 +11,7 @@
 //
 // Usage (Node 18+):
 //   DIGITALOCEAN_TOKEN=... VOICE_DOMAIN=voice.example.com \
-//   SIP_PASSWORD=... GITHUB_TOKEN=... [POSTGRES_URL=...] \
+//   SIP_USERNAME=ct... SIP_PASSWORD=... SIP_CALLER_ID=+61... GITHUB_TOKEN=... [POSTGRES_URL=...] \
 //   node deploy/voice-gateway/provision-do.mjs [--replace] [--dry-run]
 //
 // A Droplet named DROPLET_NAME (default "scalbl-voice") that already
@@ -46,7 +46,9 @@ function die(msg) {
 const missing = [];
 if (!TOKEN) missing.push("DIGITALOCEAN_TOKEN");
 if (!DOMAIN) missing.push("VOICE_DOMAIN");
-if (!env.SIP_PASSWORD && (REPLACE || !DRY_RUN)) missing.push("SIP_PASSWORD");
+for (const key of ["SIP_USERNAME", "SIP_PASSWORD", "SIP_CALLER_ID"]) {
+  if (!env[key] && (REPLACE || !DRY_RUN)) missing.push(key);
+}
 if (missing.length) die(`Missing env: ${missing.join(", ")}`);
 
 async function api(method, path, body) {
@@ -72,7 +74,9 @@ function userData(gwSecret) {
   const vars = {
     DOMAIN,
     GH_TOKEN: env.GITHUB_TOKEN || "",
+    SIP_USERNAME: env.SIP_USERNAME,
     SIP_PASSWORD: env.SIP_PASSWORD,
+    SIP_CALLER_ID: env.SIP_CALLER_ID,
     GW_SECRET: gwSecret,
     PG_URL: env.POSTGRES_URL || "",
     REWRITE_ENV: "yes",
@@ -224,14 +228,12 @@ DigitalOcean dashboard → Console, and run:
 `);
 } else if (!DRY_RUN) {
   const result = dnsSet ? await waitForHealth() : "dns-pending";
-  if (result === "registered") console.log("✔ Gateway is up and registered with VoIPcloud.");
+  if (result === "registered") console.log("✔ Gateway is up and registered with Crazytel.");
   else if (result === "dns-pending") console.log("• Once the DNS record is in place, check https://" + DOMAIN + "/health");
   else console.log(`✖ Gateway not registered yet (${result}). On the Droplet: cat /var/log/scalbl-setup.log; journalctl -u scalbl-voice -n 50`);
 }
 
 console.log(`
 Set these in Vercel → Settings → Environment Variables, then redeploy:
-  VOICE_PROVIDER=sip
   VOICE_GATEWAY_URL=wss://${DOMAIN}/voice
-  VOICE_GATEWAY_SECRET=${created ? gwSecret : "<the value in /opt/scalbl-crm/.env on the Droplet>"}
-  SIP_CALLER_ID=+61480851534`);
+  VOICE_GATEWAY_SECRET=${created ? gwSecret : "<the value in /opt/scalbl-crm/.env on the Droplet>"}`);

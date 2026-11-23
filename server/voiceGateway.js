@@ -1,5 +1,5 @@
 // SIP voice gateway — a long-running process (npm run voice-gateway)
-// that registers with the VoIPcloud/VoIPline SIP trunk and bridges
+// that registers with the SIP trunk (Crazytel) and bridges
 // browser softphones to it. It has to be its own always-on process:
 // a SIP registration and RTP media need persistent sockets, which
 // serverless functions (the /api/* Vercel deployment) can't hold.
@@ -85,7 +85,7 @@ function formatDuration(totalSeconds) {
 }
 
 // A finished recording goes into the lead's conversation, where the
-// same player as Twilio recordings plays it (via /api/recording-audio).
+// recording player plays it (via /api/recording-audio).
 // One nobody can be matched to is deleted — nothing could ever show it.
 async function saveRecording({ id, file, seconds, call }) {
   let lead = null;

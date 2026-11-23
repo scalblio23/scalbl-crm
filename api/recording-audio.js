@@ -8,12 +8,24 @@
 import { Readable } from "node:stream";
 import { ensureSchema, getRecordingLeadTag } from "../server/db.js";
 import { requireAuth, scopeTagsForUser } from "../server/auth.js";
-import { fetchRecordingMedia } from "../server/twilioCore.js";
 import { mintRecordingToken, voiceGatewayHttpUrl } from "../server/voiceConfig.js";
 
-// VoIPline calls are recorded by the SIP voice gateway and kept on its
-// server (see server/sip/recorder.js), under ids like "sip-3f9a…".
+// Calls are recorded by the SIP voice gateway and kept on its server
+// (see server/sip/recorder.js), under ids like "sip-3f9a…".
 const SIP_RECORDING_RE = /^sip-[a-f0-9]{16,64}$/;
+
+// Older recordings ("RE…" ids) are from before the move to the SIP
+// gateway and are still stored at Twilio. They're fetched with one plain
+// request using TWILIO_ACCOUNT_SID / TWILIO_API_KEY_SID / TWILIO_API_KEY_SECRET;
+// once those are removed from Vercel, these old recordings stop playing.
+async function fetchLegacyTwilioRecording(recordingSid, env = process.env) {
+  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_API_KEY_SID || !env.TWILIO_API_KEY_SECRET) {
+    return new Response("Twilio credentials for old recordings aren't set", { status: 404 });
+  }
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Recordings/${encodeURIComponent(recordingSid)}.mp3`;
+  const auth = Buffer.from(`${env.TWILIO_API_KEY_SID}:${env.TWILIO_API_KEY_SECRET}`).toString("base64");
+  return fetch(url, { headers: { Authorization: `Basic ${auth}` } });
+}
 
 async function fetchSipRecording(sid) {
   const base = voiceGatewayHttpUrl();
@@ -68,7 +80,7 @@ export default async function handler(req, res) {
     // fits under the platform's buffered-response ceiling goes that
     // way; only a long call's file is streamed, and even then without
     // a Content-Length so the bridge frames it itself.
-    const upstream = isSip ? await fetchSipRecording(sid) : await fetchRecordingMedia(sid);
+    const upstream = isSip ? await fetchSipRecording(sid) : await fetchLegacyTwilioRecording(sid);
     if (upstream.status !== 200 && isSip) {
       const detail = await upstream.text().catch(() => "");
       console.error(`[api/recording-audio] voice gateway returned ${upstream.status} for ${sid}`, detail.slice(0, 300));
@@ -97,7 +109,7 @@ export default async function handler(req, res) {
       const notFound = upstream.status === 404;
       return res.status(notFound ? 404 : 502).json({
         error: notFound
-          ? "Twilio no longer has this recording."
+          ? "This older recording is no longer available."
           : `Recording unavailable — Twilio returned ${upstream.status}.`,
       });
     }

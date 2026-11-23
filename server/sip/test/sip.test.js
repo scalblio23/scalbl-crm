@@ -13,7 +13,7 @@ import { parseNameAddr } from "../message.js";
 import { toE164, formatForDial } from "../phone.js";
 
 const quiet = { log() {}, warn() {} };
-const USER = "T909317";
+const USER = "ct100001";
 const PASS = "test-password";
 
 let trunk;
@@ -38,10 +38,10 @@ before(async () => {
   const config = loadSipConfig({
     SIP_SERVER: "127.0.0.1",
     SIP_PORT: String(port),
-    SIP_DOMAIN: "sipm5.au.voipcloud.online",
+    SIP_DOMAIN: "sip.crazytel.net.au",
     SIP_USERNAME: USER,
     SIP_PASSWORD: PASS,
-    SIP_CALLER_ID: "+61 480 851 534",
+    SIP_CALLER_ID: "+61 485 000 111",
     SIP_MAX_CHANNELS: "1",
     SIP_RTP_PORTS: "41000-41999",
     SIP_KEEPALIVE_SECONDS: "1",
@@ -60,7 +60,7 @@ after(async () => {
 test("phone numbers normalise to E.164", () => {
   assert.equal(toE164("0412 345 678"), "+61412345678");
   assert.equal(toE164("61412345678"), "+61412345678");
-  assert.equal(toE164("+61 480 851 534"), "+61480851534");
+  assert.equal(toE164("+61 485 000 111"), "+61485000111");
   assert.equal(formatForDial("0412 345 678", "national"), "0412345678");
   assert.equal(formatForDial("0412 345 678", "e164-no-plus"), "61412345678");
 });
@@ -68,7 +68,7 @@ test("phone numbers normalise to E.164", () => {
 test("registers with digest auth over TCP and schedules refresh", () => {
   assert.equal(ua.registration.state, "registered");
   const reg = trunk.registers.at(-1);
-  assert.match(reg.get("authorization"), /username="T909317"/);
+  assert.match(reg.get("authorization"), /username="ct100001"/);
   assert.match(reg.get("contact"), /transport=tcp/);
   assert.match(reg.topVia, /^SIP\/2\.0\/TCP /);
   assert.ok(ua.registration.expiresAt > Date.now());
@@ -81,9 +81,9 @@ test("outbound call: auth, early media, answer, audio both ways, DTMF, hangup", 
   const invite = await invitePromise;
 
   // Request-URI in E.164, caller ID asserted.
-  assert.equal(invite.uri, "sip:+61412345678@sipm5.au.voipcloud.online");
-  assert.match(invite.get("p-asserted-identity"), /\+61480851534/);
-  assert.match(invite.get("from"), /"\+61480851534" <sip:T909317@sipm5\.au\.voipcloud\.online>/);
+  assert.equal(invite.uri, "sip:+61412345678@sip.crazytel.net.au");
+  assert.match(invite.get("p-asserted-identity"), /\+61485000111/);
+  assert.match(invite.get("from"), /"\+61485000111" <sip:ct100001@sip\.crazytel\.net\.au>/);
   assert.match(invite.get("proxy-authorization"), /Digest/);
   assert.match(invite.body, /m=audio \d+ RTP\/AVP 8 0 101/);
   // The 407 before it was ACKed.
@@ -207,8 +207,8 @@ test("channel limit: second outbound call and inbound call are refused while one
 
   const busy = trunk.next("response", (r) => r.status === 486 && r.callId === "inbound-while-busy");
   trunk.sendRequest("INVITE", `sip:${USER}@127.0.0.1`, {
-    from: `<sip:+61412000000@sipm5.au.voipcloud.online>;tag=${newTag()}`,
-    to: `<sip:${USER}@sipm5.au.voipcloud.online>`,
+    from: `<sip:+61412000000@sip.crazytel.net.au>;tag=${newTag()}`,
+    to: `<sip:${USER}@sip.crazytel.net.au>`,
     callId: "inbound-while-busy",
     body: "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 4000 RTP/AVP 8\r\n",
   });
@@ -229,8 +229,8 @@ test("inbound call: ring, answer, BYE; and caller cancelling before answer", asy
   const incoming = waitFor(ua, "incoming");
   const ringing = trunk.next("response", (r) => r.status === 180 && r.callId === "inbound-1");
   const invite = trunk.sendRequest("INVITE", `sip:${USER}@127.0.0.1`, {
-    from: `"Jane" <sip:0412345678@sipm5.au.voipcloud.online>;tag=abc`,
-    to: `<sip:${USER}@sipm5.au.voipcloud.online>`,
+    from: `"Jane" <sip:0412345678@sip.crazytel.net.au>;tag=abc`,
+    to: `<sip:${USER}@sip.crazytel.net.au>`,
     callId: "inbound-1",
     headers: { contact: "<sip:caller@127.0.0.1:5060;transport=tcp>" },
     body: media.sdp(["PCMU", "PCMA"]),
@@ -245,7 +245,7 @@ test("inbound call: ring, answer, BYE; and caller cancelling before answer", asy
   const res = await ok;
   assert.match(res.body, /m=audio \d+ RTP\/AVP 0 101/); // their preferred codec (u-law)
   const localTag = parseNameAddr(res.get("to")).params.tag;
-  trunk.sendRequest("ACK", "sip:T909317@127.0.0.1", {
+  trunk.sendRequest("ACK", "sip:ct100001@127.0.0.1", {
     from: invite.get("from"),
     to: res.get("to"),
     callId: "inbound-1",
@@ -257,9 +257,9 @@ test("inbound call: ring, answer, BYE; and caller cancelling before answer", asy
   assert.ok(Math.abs((await heard)[0] + 2000) < 200);
 
   const ended = waitFor(call, "ended");
-  trunk.sendRequest("BYE", "sip:T909317@127.0.0.1", {
+  trunk.sendRequest("BYE", "sip:ct100001@127.0.0.1", {
     from: invite.get("from"),
-    to: `<sip:${USER}@sipm5.au.voipcloud.online>;tag=${localTag}`,
+    to: `<sip:${USER}@sip.crazytel.net.au>;tag=${localTag}`,
     callId: "inbound-1",
     cseq: 2,
   });
@@ -269,8 +269,8 @@ test("inbound call: ring, answer, BYE; and caller cancelling before answer", asy
   // Caller hangs up while it's still ringing → missed call.
   const incoming2 = waitFor(ua, "incoming");
   const invite2 = trunk.sendRequest("INVITE", `sip:${USER}@127.0.0.1`, {
-    from: `<sip:+61412345678@sipm5.au.voipcloud.online>;tag=def`,
-    to: `<sip:${USER}@sipm5.au.voipcloud.online>`,
+    from: `<sip:+61412345678@sip.crazytel.net.au>;tag=def`,
+    to: `<sip:${USER}@sip.crazytel.net.au>`,
     callId: "inbound-2",
     body: "v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 4000 RTP/AVP 8\r\n",
   });
@@ -322,7 +322,7 @@ test("gateway: browser dials over WebSocket, hears audio, sends audio and DTMF",
     });
   const hello = await nextMsg("hello");
   assert.equal(hello.registration.state, "registered");
-  assert.equal(hello.callerId, "+61480851534");
+  assert.equal(hello.callerId, "+61485000111");
 
   const media = await new FakeMedia().open();
   const invitePromise = trunk.next("invite");
@@ -360,8 +360,8 @@ test("gateway: browser dials over WebSocket, hears audio, sends audio and DTMF",
 
   // Inbound call offered to the browser and answered from it.
   trunk.sendRequest("INVITE", `sip:${USER}@127.0.0.1`, {
-    from: `<sip:0412999888@sipm5.au.voipcloud.online>;tag=zz`,
-    to: `<sip:${USER}@sipm5.au.voipcloud.online>`,
+    from: `<sip:0412999888@sip.crazytel.net.au>;tag=zz`,
+    to: `<sip:${USER}@sip.crazytel.net.au>`,
     callId: "gw-inbound",
     headers: { contact: "<sip:caller@127.0.0.1>" },
     body: media.sdp(["PCMA"]),

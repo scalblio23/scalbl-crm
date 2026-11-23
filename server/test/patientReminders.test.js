@@ -1,13 +1,13 @@
 // Integration tests for the patient confirmation & reminder workflow
 // (server/patientReminders.js) against a real Postgres database, with
-// Twilio / Resend / Google replaced by in-memory fakes — nothing is
+// the SMS provider / Resend / Google replaced by in-memory fakes — nothing is
 // ever sent to a real person. Run with:
 //   TEST_POSTGRES_URL=postgres://... npm run test:reminders
 // Skipped entirely when TEST_POSTGRES_URL isn't set. Point it at a
 // throwaway database: the schema is created and test rows are written.
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import twilio from "twilio";
+import fs from "node:fs";
 
 const DB_URL = process.env.TEST_POSTGRES_URL;
 process.env.SESSION_SECRET ||= "test-session-secret";
@@ -16,7 +16,8 @@ const skip = !DB_URL && "TEST_POSTGRES_URL not set";
 let db, pr, handlers, pool;
 const sent = { sms: [], email: [] };
 let smsBehavior = null; // (msg) => result | throws
-const AUTH_TOKEN = "test-auth-token";
+const SMS_SECRET = "test-sms-webhook-secret";
+const OUR_DID = "+61485000999";
 const BASE = "https://crm.example.test";
 const RUN = Date.now().toString(36);
 const sidFor = (name) => `${name}_${RUN}`;
@@ -51,8 +52,7 @@ before(async () => {
     slots: (await import("../../api/calendar-slots.js")).default,
     manage: (await import("../../api/calendar-manage.js")).default,
     cancel: (await import("../../api/calendar-cancel.js")).default,
-    inbound: (await import("../../api/sms-inbound.js")).default,
-    status: (await import("../../api/booking-sms-status.js")).default,
+    inbound: (await import("../../api/sms-crazytel-inbound.js")).default,
     calendars: (await import("../../api/calendars.js")).default,
     bookings: (await import("../../api/calendar-bookings.js")).default,
   };
@@ -66,9 +66,9 @@ before(async () => {
     },
     sendEmail: async (msg) => { sent.email.push(msg); },
     missingEmailEnv: () => [],
-    missingTwilioEnv: () => [],
+    missingSmsEnv: () => [],
     baseUrl: () => BASE,
-    env: () => ({ TWILIO_AUTH_TOKEN: AUTH_TOKEN }),
+    env: () => ({}),
   });
 });
 
@@ -139,20 +139,19 @@ async function fireDue(bookingId, kind) {
   return pr.processDueBookingReminders(100);
 }
 
-function signedInbound({ from, body, sid }) {
-  const url = `${BASE}/api/sms-inbound`;
-  const params = { From: `+61${from.replace(/^0/, "")}`, Body: body, MessageSid: sid };
-  const signature = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params);
-  return { method: "POST", body: params, headers: { "x-twilio-signature": signature, host: "crm.example.test", "x-forwarded-proto": "https" }, url: "/api/sms-inbound" };
+// A reply as Crazytel forwards it to /api/sms-crazytel-inbound (JSON web
+// request, numbers without the "+").
+function crazytelInbound({ from, body, key = SMS_SECRET }) {
+  return {
+    method: "POST",
+    query: { key },
+    body: { from: `61${from.replace(/^0/, "")}`, to: OUR_DID.slice(1), text: body },
+    url: "/api/sms-crazytel-inbound",
+  };
 }
-async function reply(phone, body, sid = `SMIN${Math.random().toString(16).slice(2)}`) {
-  const req = signedInbound({ from: phone, body, sid });
-  return pr.handleBookingReply({
-    messageSid: sid,
-    from: req.body.From,
-    body,
-    verified: pr.verifyTwilioSignature({ signature: req.headers["x-twilio-signature"], urls: pr.candidateWebhookUrls(req, "/api/sms-inbound"), params: req.body }),
-  });
+// What the inbound webhook passes on once its key has verified.
+async function reply(phone, body, sid = `crazytel:${Math.random().toString(16).slice(2)}`) {
+  return pr.handleBookingReply({ messageSid: sid, from: `+61${phone.replace(/^0/, "")}`, body, verified: true });
 }
 
 // ---------- pure scheduling rules ----------
@@ -240,7 +239,7 @@ test("1b: Google-connected calendar gets a generated Meet link stored on the boo
   pr.__setDepsForTests({
     sendSms: async (m) => { sent.sms.push(m); return { sid: "SMx", status: "queued" }; },
     sendEmail: async (m) => { sent.email.push(m); },
-    missingEmailEnv: () => [], missingTwilioEnv: () => [], baseUrl: () => BASE, env: () => ({ TWILIO_AUTH_TOKEN: AUTH_TOKEN }),
+    missingEmailEnv: () => [], missingSmsEnv: () => [], baseUrl: () => BASE, env: () => ({}),
     google: {
       getValidAccessToken: async () => "tok",
       createGoogleEventWithMeet: async (args) => { assert.match(args.requestId, /^booking-/); return { id: "evt1", meetLink: "https://meet.google.com/gen-erat-ed" }; },
@@ -256,7 +255,7 @@ test("1b: Google-connected calendar gets a generated Meet link stored on the boo
     pr.__setDepsForTests({
       sendSms: async (msg) => { if (smsBehavior) return smsBehavior(msg); sent.sms.push(msg); return { sid: `SM${sent.sms.length}${Date.now()}`, status: "queued" }; },
       sendEmail: async (msg) => { sent.email.push(msg); },
-      missingEmailEnv: () => [], missingTwilioEnv: () => [], baseUrl: () => BASE, env: () => ({ TWILIO_AUTH_TOKEN: AUTH_TOKEN }),
+      missingEmailEnv: () => [], missingSmsEnv: () => [], baseUrl: () => BASE, env: () => ({}),
     });
   }
 });
@@ -480,7 +479,7 @@ test("manage page: bad token → 404; view exposes no email/phone", { skip }, as
 
 // ---------- 13: duplicate webhook ----------
 
-test("13: the same Twilio MessageSid delivered twice acts once", { skip }, async () => {
+test("13: the same inbound message delivered twice acts once", { skip }, async () => {
   const cal = await makeCalendar();
   const b = await book(cal, 50);
   await fireDue(b.id, "reminder_12h");
@@ -493,22 +492,29 @@ test("13: the same Twilio MessageSid delivered twice acts once", { skip }, async
   assert.equal(to(b).sms.length, 1);
 });
 
-test("13b: real /api/sms-inbound handler — signed Y confirms; unsigned/forged Y does nothing", { skip }, async () => {
-  const cal = await makeCalendar();
-  const b = await book(cal, 50);
-  await fireDue(b.id, "reminder_12h");
-  const forged = signedInbound({ from: b.phone, body: "N", sid: sidFor("SMforged") });
-  forged.headers["x-twilio-signature"] = "bm9wZQ==";
-  await call(handlers.inbound, forged);
-  await new Promise((r) => setTimeout(r, 500));
-  assert.equal((await bookingRow(b.id)).status, "confirmed");
+test("13b: real /api/sms-crazytel-inbound handler — Y with the right key confirms; a wrong key does nothing", { skip }, async () => {
+  // The Crazytel SMS tables are an operator-applied migration in production.
+  await pool.query(fs.readFileSync(new URL("../../scripts/sms-schema.sql", import.meta.url), "utf8"));
+  process.env.CRAZYTEL_SMS_DIDS = JSON.stringify([{ number: OUR_DID, allowedTags: [], clientScope: "admin" }]);
+  process.env.CRAZYTEL_SMS_WEBHOOK_SECRET = SMS_SECRET;
+  try {
+    const cal = await makeCalendar();
+    const b = await book(cal, 50);
+    await fireDue(b.id, "reminder_12h");
+    const forged = await call(handlers.inbound, crazytelInbound({ from: b.phone, body: "N", key: "wrong-key" }));
+    assert.equal(forged.statusCode, 401);
+    assert.equal((await bookingRow(b.id)).status, "confirmed");
 
-  await call(handlers.inbound, signedInbound({ from: b.phone, body: "Y", sid: sidFor("SMreal1") }));
-  for (let i = 0; i < 40 && !(await bookingRow(b.id)).attendance_status; i++) await new Promise((r) => setTimeout(r, 100));
-  assert.equal((await bookingRow(b.id)).attendance_status, "confirmed");
-  // the inbound text was still logged to the inbox, as before
-  const [m] = await sql("SELECT * FROM messages WHERE text = 'Y' ORDER BY id DESC LIMIT 1");
-  assert.ok(m);
+    const ok = await call(handlers.inbound, crazytelInbound({ from: b.phone, body: "Y" }));
+    assert.equal(ok.statusCode, 200);
+    assert.equal((await bookingRow(b.id)).attendance_status, "confirmed");
+    // the reply is still saved to the SMS inbox
+    const [m] = await sql("SELECT * FROM sms_messages WHERE text = 'Y' AND outgoing = false ORDER BY created_at DESC LIMIT 1");
+    assert.ok(m);
+  } finally {
+    delete process.env.CRAZYTEL_SMS_DIDS;
+    delete process.env.CRAZYTEL_SMS_WEBHOOK_SECRET;
+  }
 });
 
 // ---------- 14: cancelled appointments never get reminders, even mid-race ----------
@@ -571,10 +577,10 @@ test("15b: a token only ever reaches its own booking", { skip }, async () => {
 
 // ---------- 17: delivery failures ----------
 
-test("17: provider 5xx retries; definite rejection fails and is logged; Twilio 'undelivered' callback marks failed", { skip }, async () => {
+test("17: provider 5xx retries; definite rejection fails and is logged", { skip }, async () => {
   const cal = await makeCalendar();
   const b = await book(cal, 50);
-  smsBehavior = () => { throw Object.assign(new Error("Twilio 503"), { status: 503 }); };
+  smsBehavior = () => { throw Object.assign(new Error("Provider 503"), { status: 503 }); };
   await fireDue(b.id, "reminder_30m");
   let sms30 = (await reminders(b.id)).find((x) => x.kind === "reminder_30m" && x.channel === "sms");
   assert.equal(sms30.status, "pending");
@@ -591,27 +597,7 @@ test("17: provider 5xx retries; definite rejection fails and is logged; Twilio '
   // email for the same reminder unaffected
   assert.equal((await reminders(b.id)).find((x) => x.kind === "reminder_30m" && x.channel === "email").status, "sent");
 
-  // delivered/failed status from Twilio, signature-checked
   smsBehavior = null;
-  await fireDue(b.id, "reminder_10m");
-  const sms10 = (await reminders(b.id)).find((x) => x.kind === "reminder_10m" && x.channel === "sms");
-  assert.equal(sms10.provider_status, "queued");
-  const url = `${BASE}/api/booking-sms-status`;
-  const mk = (status) => {
-    const params = { MessageSid: sms10.provider_id, MessageStatus: status, ErrorCode: status === "undelivered" ? "30003" : "" };
-    return { method: "POST", body: params, url: "/api/booking-sms-status", headers: { host: "crm.example.test", "x-twilio-signature": twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params) } };
-  };
-  const bad = mk("delivered");
-  bad.headers["x-twilio-signature"] = "forged";
-  assert.equal((await call(handlers.status, bad)).statusCode, 403);
-  assert.equal((await call(handlers.status, mk("undelivered"))).statusCode, 204);
-  const after = (await reminders(b.id)).find((x) => x.id === sms10.id);
-  assert.equal(after.status, "failed");
-  assert.equal(after.provider_status, "undelivered");
-  assert.equal(after.last_error, "twilio_error_30003");
-  // a late "sent" can't move it backwards
-  await call(handlers.status, mk("sent"));
-  assert.equal((await reminders(b.id)).find((x) => x.id === sms10.id).provider_status, "undelivered");
 });
 
 test("17b: a stuck 'processing' row is failed as outcome_uncertain, never re-sent", { skip }, async () => {
@@ -660,7 +646,7 @@ test("cancel link on a calendar WITHOUT the workflow: GET never cancels, lands o
   pr.__setDepsForTests({
     sendSms: async (m) => { sent.sms.push(m); return { sid: "SMx", status: "queued" }; },
     sendEmail: async (m) => { sent.email.push(m); },
-    missingEmailEnv: () => [], missingTwilioEnv: () => [], baseUrl: () => BASE, env: () => ({ TWILIO_AUTH_TOKEN: AUTH_TOKEN }),
+    missingEmailEnv: () => [], missingSmsEnv: () => [], baseUrl: () => BASE, env: () => ({}),
     google: { getValidAccessToken: async () => "tok", deleteGoogleEvent: async (args) => { deleted.push(args); } },
   });
   try {
@@ -720,7 +706,7 @@ test("cancel link on a calendar WITHOUT the workflow: GET never cancels, lands o
     pr.__setDepsForTests({
       sendSms: async (msg) => { if (smsBehavior) return smsBehavior(msg); sent.sms.push(msg); return { sid: `SM${sent.sms.length}${Date.now()}`, status: "queued" }; },
       sendEmail: async (msg) => { sent.email.push(msg); },
-      missingEmailEnv: () => [], missingTwilioEnv: () => [], baseUrl: () => BASE, env: () => ({ TWILIO_AUTH_TOKEN: AUTH_TOKEN }),
+      missingEmailEnv: () => [], missingSmsEnv: () => [], baseUrl: () => BASE, env: () => ({}),
     });
   }
 });
@@ -807,14 +793,36 @@ test("a due automation run whose booking was cancelled some other way skips its 
 });
 
 test("a due automation run for a still-confirmed booking carries on as before", { skip }, async () => {
-  const { auto, runId } = await bookWithReminderAutomation("confirmed");
-  await sql("UPDATE automation_runs SET run_at = now() - interval '1 second' WHERE id = $1", [runId]);
-  await processDueAutomationRunsUntil(runId);
-  const run = await runRow(runId);
-  assert.equal(run.status, "done");
-  assert.equal(run.last_error, null);
-  assert.equal(run.next_step_index, 2);
-  await db.updateAutomation(auto.id, { active: false });
+  // Its reminder step texts the contact through Crazytel — faked here, so
+  // nothing is ever sent.
+  await pool.query(fs.readFileSync(new URL("../../scripts/sms-schema.sql", import.meta.url), "utf8"));
+  const realFetch = globalThis.fetch;
+  const crazytelSends = [];
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).startsWith("https://crazytel.io/")) {
+      crazytelSends.push(JSON.parse(opts.body));
+      return new Response(JSON.stringify({ status: "queued", uuid: `ct-${crazytelSends.length}` }), { status: 200 });
+    }
+    return realFetch(url, opts);
+  };
+  process.env.CRAZYTEL_API_KEY = "test-key";
+  process.env.CRAZYTEL_SMS_DIDS = JSON.stringify([{ number: OUR_DID, allowedTags: [], clientScope: "admin" }]);
+  try {
+    const { auto, runId } = await bookWithReminderAutomation("confirmed");
+    await sql("UPDATE automation_runs SET run_at = now() - interval '1 second' WHERE id = $1", [runId]);
+    await processDueAutomationRunsUntil(runId);
+    const run = await runRow(runId);
+    assert.equal(run.status, "done");
+    assert.equal(run.last_error, null);
+    assert.equal(run.next_step_index, 2);
+    assert.equal(crazytelSends.length, 1);
+    assert.equal(crazytelSends[0].from, OUR_DID.slice(1));
+    await db.updateAutomation(auto.id, { active: false });
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.CRAZYTEL_API_KEY;
+    delete process.env.CRAZYTEL_SMS_DIDS;
+  }
 });
 
 // The poller is global — rows left from earlier runs may be due too —
@@ -885,7 +893,7 @@ test("toSendableNumber: Australian formats become E.164; international left alon
     "0044 20 7946 0958": "+442079460958",
   };
   for (const [input, expected] of Object.entries(cases)) assert.equal(pr.toSendableNumber(input), expected, input);
-  assert.equal(pr.toSendableNumber("12345"), "12345"); // unrecognisable → Twilio rejects, logged as failed
+  assert.equal(pr.toSendableNumber("12345"), "12345"); // unrecognisable → the provider rejects it, logged as failed
 });
 
 test("patientLinkBase: PUBLIC_URL, then Vercel's production domain, before a per-deployment URL", { skip }, () => {
@@ -898,8 +906,8 @@ test("workflowReadiness: required items reflect the environment, never expose va
   const empty = pr.workflowReadiness({ googleConnected: false, videoConferenceLink: "" }, {});
   assert.deepEqual(empty.filter((c) => c.required && !c.ok).map((c) => c.key).sort(), ["email", "links", "sms_replies", "sms_send"]);
   const env = {
-    TWILIO_ACCOUNT_SID: "AC1", TWILIO_API_KEY_SID: "SK1", TWILIO_API_KEY_SECRET: "secret-value", TWILIO_TWIML_APP_SID: "AP1", TWILIO_CALLER_ID: "+61400000000",
-    TWILIO_AUTH_TOKEN: "auth-secret", RESEND_API_KEY: "re-secret", RESEND_FROM_EMAIL: "a@b.c", VERCEL_PROJECT_PRODUCTION_URL: "crm.example.com",
+    CRAZYTEL_API_KEY: "secret-value", CRAZYTEL_SMS_DIDS: JSON.stringify([{ number: "+61485000999", allowedTags: [], clientScope: "admin" }]),
+    CRAZYTEL_SMS_WEBHOOK_SECRET: "auth-secret", RESEND_API_KEY: "re-secret", RESEND_FROM_EMAIL: "a@b.c", VERCEL_PROJECT_PRODUCTION_URL: "crm.example.com",
   };
   const ready = pr.workflowReadiness({ googleConnected: true }, env);
   assert.ok(ready.filter((c) => c.required).every((c) => c.ok));
