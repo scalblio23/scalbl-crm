@@ -6630,24 +6630,24 @@ export default function SimpleCRM() {
       )}
       {/* Sidebar */}
       <aside
-        className={`w-56 border-r border-gray-200 flex flex-col shrink-0 bg-white fixed inset-y-0 left-0 z-40 overflow-y-auto transition-transform md:static md:z-auto md:translate-x-0 ${
+        className={`w-56 border-r border-black/40 flex flex-col shrink-0 bg-[#1f2125] text-gray-200 fixed inset-y-0 left-0 z-40 overflow-y-auto transition-transform md:static md:z-auto md:translate-x-0 ${
           mobileNavOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <div className="px-5 py-5 border-b border-gray-100">
-          <div className="text-lg font-bold tracking-tight">Scalbl CRM</div>
+        <div className="px-5 py-5 border-b border-white/10">
+          <div className="text-lg font-bold tracking-tight text-white">Scalbl CRM</div>
           <div className="text-xs text-gray-400 mt-0.5">Lead operations</div>
         </div>
-        <nav className="flex-1 py-3">
+        <nav className="flex-1 py-3 px-3 space-y-1.5">
           {visibleNavItems.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setPage(key)}
               onMouseEnter={key === "csm" ? warmCsm : undefined}
-              className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${
+              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm ring-1 transition-all duration-200 ${
                 page === key
-                  ? "bg-gray-100 font-semibold text-gray-900 border-r-2 border-gray-900"
-                  : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
+                  ? "bg-white/10 font-semibold text-white ring-blue-400/40 shadow-[0_0_14px_rgba(96,165,250,0.45)]"
+                  : "bg-white/[0.03] text-gray-300 ring-white/[0.06] shadow-[0_0_8px_rgba(255,255,255,0.05)] hover:bg-white/[0.08] hover:text-white hover:ring-white/15 hover:shadow-[0_0_12px_rgba(255,255,255,0.14)]"
               }`}
             >
               <Icon size={17} strokeWidth={page === key ? 2.4 : 1.8} />
@@ -6685,21 +6685,21 @@ export default function SimpleCRM() {
             </button>
           ))}
         </nav>
-        <div className="px-5 py-4 border-t border-gray-100 flex items-center justify-between gap-2">
+        <div className="px-5 py-4 border-t border-white/10 flex items-center justify-between gap-2">
           <span className="text-xs text-gray-400 truncate">{authUser?.name || "Signed in"}</span>
           <button
             onClick={handleLogout}
             title="Log out"
-            className="text-gray-300 hover:text-gray-600 shrink-0"
+            className="text-gray-500 hover:text-white shrink-0"
           >
             <LogOut size={14} />
           </button>
         </div>
-        <div className="px-5 pb-3 flex items-center gap-3 text-[11px] text-gray-300">
-          <a href="/privacypolicy" className="hover:text-gray-500">
+        <div className="px-5 pb-3 flex items-center gap-3 text-[11px] text-gray-500">
+          <a href="/privacypolicy" className="hover:text-gray-300">
             Privacy Policy
           </a>
-          <a href="/termsofservice" className="hover:text-gray-500">
+          <a href="/termsofservice" className="hover:text-gray-300">
             Terms of Service
           </a>
         </div>
