@@ -274,17 +274,17 @@ export default function BookingWidget({ slug }) {
     const [firstName = "", ...rest] = (params.get("name") || "").trim().split(/\s+/);
     return { firstName, lastName: rest.join(" "), country: "AU", email: params.get("email") || "", phone: params.get("phone") || "", notes: "" };
   });
-  // Opt-in embed options, so other booking links are unaffected:
-  //   ?commit=1  -> require a "will you show up" commitment checkbox before booking
+  // Opt-in embed option, so other booking links are unaffected:
   //   ?notes=0   -> hide the optional Notes field
+  // (?commit=1 used to force the attendance box on; it's now controlled
+  // only by the calendar's setting, so old links with it are harmless.)
   const embedOptions = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
-    return { requireCommit: params.get("commit") === "1", hideNotes: params.get("notes") === "0" };
+    return { hideNotes: params.get("notes") === "0" };
   }, []);
-  // The attendance-confirmation box shows when the calendar has it
-  // switched on (Calendar settings → Booking rules) or the link asks
-  // for it with ?commit=1.
-  const requireCommit = embedOptions.requireCommit || Boolean(calendarInfo?.requireAttendanceConfirm);
+  // The attendance-confirmation box shows only when the calendar has it
+  // switched on (Calendar settings → Booking rules).
+  const requireCommit = Boolean(calendarInfo?.requireAttendanceConfirm);
   const [committed, setCommitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
