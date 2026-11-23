@@ -66,10 +66,24 @@ if [[ -n "$GH_TOKEN" ]]; then
 else
   REPO_URL="https://github.com/${REPO}.git"
 fi
+# The app dir belongs to $APP_USER while this runs as root, which newer
+# git refuses ("dubious ownership") — trust this one directory for the
+# git commands below without touching any global git config.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$APP_DIR"
 if [[ -d "$APP_DIR/.git" ]]; then
   git -C "$APP_DIR" remote set-url origin "$REPO_URL"
   git -C "$APP_DIR" fetch -q origin "$BRANCH"
-  git -C "$APP_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH"
+  # Code edited directly on this server would block the update (and be
+  # lost by it), so save a copy first. .env, recordings and node_modules
+  # are untracked/ignored and stay exactly where they are.
+  CHANGED="$(git -C "$APP_DIR" status --porcelain --untracked-files=all -- server deploy api src package.json package-lock.json | cut -c4-)"
+  if [[ -n "$CHANGED" ]]; then
+    BACKUP="/root/scalbl-crm-local-changes-$(date +%Y%m%d-%H%M%S).tgz"
+    (cd "$APP_DIR" && printf '%s\n' "$CHANGED" | tar -czf "$BACKUP" -T - 2>/dev/null) || true
+    git -C "$APP_DIR" diff >"${BACKUP%.tgz}.patch" 2>/dev/null || true
+    echo "  Saved this server's own code edits to $BACKUP (and ${BACKUP%.tgz}.patch) before updating."
+  fi
+  git -C "$APP_DIR" checkout -q -f -B "$BRANCH" "origin/$BRANCH"
 else
   git clone -q --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 fi

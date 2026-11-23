@@ -20,3 +20,9 @@
 - Update it by re-running `deploy/voice-gateway/setup.sh` on the Droplet
   (it installs `main` by default). Changes to `server/sip/` only take
   effect after that.
+- The live gateway pools several Crazytel SIP accounts (one call each)
+  via `SIP_TRUNKS_FILE` in the Droplet's `.env` (JSON list + one password
+  file per account in `/opt/scalbl-voice-secrets`, see
+  `server/sip/trunkPool.js`). To add an account: new password file
+  (owner `scalbl`, mode 600, no trailing newline), add it to the JSON
+  list, `systemctl restart scalbl-voice`. Check https://voice.scalbl.io/health.

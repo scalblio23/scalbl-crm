@@ -10,8 +10,9 @@ import fs from "fs";
 import http from "http";
 import path from "path";
 import dotenv from "dotenv";
-import { loadSipConfig, missingSipEnv } from "./sip/config.js";
+import { loadSipConfigs, missingSipEnv } from "./sip/config.js";
 import { SipUserAgent } from "./sip/ua.js";
+import { TrunkPool } from "./sip/trunkPool.js";
 import { createVoiceGateway } from "./sip/gateway.js";
 import { CallRecorder, findRecordingFile, sweepRecordings } from "./sip/recorder.js";
 import { verifyGatewayToken, verifyRecordingToken, missingVoiceGatewayEnv } from "./voiceConfig.js";
@@ -43,8 +44,17 @@ if (missing.length) {
   process.exit(1);
 }
 
-const config = loadSipConfig();
-const ua = new SipUserAgent(config);
+// One SIP account (SIP_USERNAME/SIP_PASSWORD), or several pooled into
+// more lines when SIP_TRUNKS_FILE lists them (see sip/trunkPool.js).
+let configs;
+try {
+  configs = loadSipConfigs();
+} catch (err) {
+  console.error(`✖ Voice gateway can't start — ${err.message}`);
+  process.exit(1);
+}
+const config = configs[0];
+const ua = process.env.SIP_TRUNKS_FILE ? new TrunkPool(configs) : new SipUserAgent(config);
 
 // A caller who rang and nobody picked up (or no rep was online) —
 // logged onto their conversation so the callback isn't lost, the same
@@ -174,9 +184,11 @@ if (RECORDING_ENABLED) {
 
 server.listen(PORT, () => {
   console.log(`Voice gateway listening on :${PORT} (WebSocket path /voice, health /health)`);
-  console.log(
-    `[sip] trunk ${config.username}@${config.server}:${config.port}/${config.transport}, caller ID ${config.callerId}, ${config.maxChannels} channel(s)`
-  );
+  for (const c of configs) {
+    console.log(
+      `[sip] trunk ${c.username}@${c.server}:${c.port}/${c.transport}, caller ID ${c.callerId}, ${c.maxChannels} channel(s)`
+    );
+  }
   console.log(
     RECORDING_ENABLED
       ? `[recording] on — ${RECORDINGS_DIR}, kept ${RETENTION_DAYS} days`

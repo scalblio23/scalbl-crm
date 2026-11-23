@@ -51,10 +51,16 @@ export class RtpSession extends EventEmitter {
       const port = this.portMin + (Math.floor(Math.random() * (span / 2)) * 2);
       try {
         await this.bind(port);
-        return this.localPort;
       } catch {
-        // taken — try another
+        continue; // taken — try another
       }
+      // The call ended while the port was being opened — don't leave
+      // the socket behind.
+      if (this.closed) {
+        this.close();
+        throw new Error("RTP session closed");
+      }
+      return this.localPort;
     }
     throw new Error(`No free RTP port in ${this.portMin}-${this.portMax}`);
   }
@@ -237,6 +243,7 @@ export class RtpSession extends EventEmitter {
   }
 
   close() {
+    this.closed = true;
     this.sending = false;
     clearTimeout(this.timer);
     this.timer = null;
