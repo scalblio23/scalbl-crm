@@ -2,6 +2,7 @@
 // Everything is env-driven so the same code runs against VoIPcloud's
 // VoIPline trunk today and any other SIP-registration trunk later —
 // nothing here is VoIPcloud-specific except the defaults.
+import fs from "fs";
 import { normalizeCallerId } from "./phone.js";
 
 const DEFAULT_SERVER = "sipm5.au.voipcloud.online";
@@ -86,7 +87,79 @@ export function loadSipConfig(env = process.env) {
   };
 }
 
+// Most SIP accounts that SIP_TRUNKS_FILE may list. Each account carries
+// one call at a time, so this is also the gateway's line count.
+export const MAX_TRUNKS = 10;
+
+// Several SIP accounts on the same provider, pooled into more lines
+// (see server/sip/trunkPool.js). SIP_TRUNKS_FILE is an absolute path to a
+// JSON array, in outbound selection order:
+//   [{"username":"ct393909","authUsername":"ct393909",
+//     "passwordFile":"/opt/scalbl-voice-secrets/ct393909.password",
+//     "callerId":"+61485998180"}, ...]
+// Each password file holds the raw password (no trailing newline). Every
+// other setting (server, port, transport, codecs, public IP, …) comes
+// from the usual SIP_* env vars and is shared by all accounts. Without
+// SIP_TRUNKS_FILE this returns the single SIP_USERNAME/SIP_PASSWORD
+// trunk, exactly as before.
+export function loadSipConfigs(env = process.env) {
+  if (!env.SIP_TRUNKS_FILE) return [loadSipConfig(env)];
+  let rows;
+  try {
+    rows = JSON.parse(fs.readFileSync(env.SIP_TRUNKS_FILE, "utf8"));
+  } catch (err) {
+    throw new Error(`Can't read SIP_TRUNKS_FILE (${err.code || "invalid JSON"})`);
+  }
+  if (!Array.isArray(rows) || !rows.length || rows.length > MAX_TRUNKS) {
+    throw new Error(`SIP_TRUNKS_FILE must list 1 to ${MAX_TRUNKS} accounts`);
+  }
+  const base = loadSipConfig(env);
+  // Each account gets its own even-aligned slice of the RTP port range.
+  const width = Math.floor((base.rtpPortMax - base.rtpPortMin + 1) / rows.length / 2) * 2;
+  if (width < 2) throw new Error("SIP_RTP_PORTS is too small to share between the SIP_TRUNKS_FILE accounts");
+  const seen = new Set();
+  return rows.map((row, i) => {
+    const username = String(row?.username || "").trim();
+    const callerId = normalizeCallerId(String(row?.callerId || ""));
+    if (!username || !callerId || !row.passwordFile) {
+      throw new Error(`SIP_TRUNKS_FILE entry ${i + 1} needs username, passwordFile and callerId`);
+    }
+    if (seen.has(username)) throw new Error(`SIP_TRUNKS_FILE lists ${username} twice`);
+    seen.add(username);
+    let password;
+    try {
+      password = fs.readFileSync(String(row.passwordFile), "utf8");
+    } catch (err) {
+      throw new Error(`Can't read the password file for ${username} (${err.code || "error"})`);
+    }
+    if (!password.length) throw new Error(`The password file for ${username} is empty`);
+    const config = {
+      ...base,
+      id: username,
+      username,
+      authUsername: String(row.authUsername || username).trim(),
+      callerId,
+      callerIds: [callerId],
+      // The provider identifies the account by the From user; the
+      // account's own number goes in the display name,
+      // P-Asserted-Identity and Remote-Party-ID.
+      callerIdInFrom: true,
+      fromUser: username,
+      maxChannels: 1,
+      rtpPortMin: base.rtpPortMin + i * width,
+      rtpPortMax: i === rows.length - 1 ? base.rtpPortMax : base.rtpPortMin + (i + 1) * width - 1,
+      // Only the first account owns the optional extra SIP listener.
+      listenPort: i === 0 ? base.listenPort : 0,
+    };
+    delete config.password;
+    // Not enumerable, so it never ends up in JSON or a logged object.
+    Object.defineProperty(config, "password", { value: password, enumerable: false });
+    return config;
+  });
+}
+
 export function missingSipEnv(env = process.env) {
+  if (env.SIP_TRUNKS_FILE) return [];
   const missing = [];
   if (!env.SIP_USERNAME) missing.push("SIP_USERNAME");
   if (!env.SIP_PASSWORD) missing.push("SIP_PASSWORD");
