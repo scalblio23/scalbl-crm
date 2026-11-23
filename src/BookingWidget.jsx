@@ -837,10 +837,17 @@ export default function BookingWidget({ slug }) {
                 className="mt-4 w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-base px-7 py-3.5 rounded-lg font-semibold shadow-sm disabled:bg-gray-300 disabled:text-gray-500 disabled:shadow-none disabled:cursor-not-allowed"
               >
                 {submitting && <Loader2 size={16} className="animate-spin" />}
-                Schedule meeting
+                Confirm Booking
+              </button>
+              <button
+                type="button"
+                onClick={backToPicker}
+                className="mt-2 w-full flex items-center justify-center gap-1 text-sm text-gray-500 hover:text-gray-700 py-1"
+              >
+                <ChevronLeft size={16} /> Back (Choose New Time)
               </button>
               {!detailsComplete && !submitting && (
-                <p className="mt-2 text-xs text-gray-500 text-center">Fill in all your details to finish booking.</p>
+                <p className="mt-1 text-xs text-gray-500 text-center">Fill in all your details to finish booking.</p>
               )}
               {bookError && <p className="mt-2 text-sm text-red-600">{bookError}</p>}
             </div>
