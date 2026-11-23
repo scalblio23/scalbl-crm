@@ -25,6 +25,7 @@ export default async function handler(req, res) {
       meetingLocation: calendar.meetingLocation || null,
       hostName: calendar.hostName || "",
       attendanceConfirmText: calendar.attendanceConfirmText || "",
+      hideLocationNote: Boolean(calendar.hideLocationNote),
       hostPhoto: calendar.hostPhoto || null,
     });
   } catch (err) {
