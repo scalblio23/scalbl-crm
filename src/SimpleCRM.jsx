@@ -1654,6 +1654,7 @@ export default function SimpleCRM() {
       requireAttendanceConfirm: Boolean(openCalendar.requireAttendanceConfirm),
       sendCalendarInvite: Boolean(openCalendar.sendCalendarInvite),
       attendanceConfirmText: openCalendar.attendanceConfirmText || "",
+      showLocationNote: !openCalendar.hideLocationNote,
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     setCalendarNameDraft(openCalendar.name);
@@ -11057,6 +11058,7 @@ export default function SimpleCRM() {
                                 requireAttendanceConfirm: Boolean(rulesDraft.requireAttendanceConfirm),
                                 sendCalendarInvite: Boolean(rulesDraft.sendCalendarInvite),
                                 attendanceConfirmText: (rulesDraft.attendanceConfirmText || "").trim(),
+                                hideLocationNote: !rulesDraft.showLocationNote,
                               })
                             }
                             disabled={savingCalendar}
@@ -11142,6 +11144,22 @@ export default function SimpleCRM() {
                             </p>
                           </div>
                         )}
+                        <label className="flex items-start gap-2.5 border border-gray-200 rounded-lg p-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(rulesDraft.showLocationNote)}
+                            onChange={(e) => setRulesDraft((d) => ({ ...d, showLocationNote: e.target.checked }))}
+                            className="mt-0.5 h-4 w-4 accent-blue-600"
+                          />
+                          <span>
+                            <span className="block text-sm font-medium">Show the meeting location note</span>
+                            <span className="block text-xs text-gray-500 mt-0.5">
+                              The box on the booking page that says e.g. "This meeting is on Zoom, please choose a time
+                              where you will be in a quiet place of work." Untick to hide it. Set the location under
+                              Location &amp; video.
+                            </span>
+                          </span>
+                        </label>
                         <label className="flex items-start gap-2.5 border border-gray-200 rounded-lg p-3 cursor-pointer">
                           <input
                             type="checkbox"

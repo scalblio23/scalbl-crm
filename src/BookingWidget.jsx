@@ -806,7 +806,7 @@ export default function BookingWidget({ slug }) {
             <p className="mt-5 text-sm text-gray-600 leading-relaxed whitespace-pre-line break-words">{calendarInfo.description}</p>
           )}
           {/* The "be somewhere quiet" note is for choosing a time — not shown once a time is picked. */}
-          {!selectedSlot && meetingLocation(calendarInfo.meetingLocation) && (
+          {!selectedSlot && !calendarInfo.hideLocationNote && meetingLocation(calendarInfo.meetingLocation) && (
             <div className="mt-5 flex items-start gap-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
               <LocationLogo value={calendarInfo.meetingLocation} size={28} />
               <p className="text-sm text-gray-800 leading-snug">{meetingLocation(calendarInfo.meetingLocation).note}</p>
