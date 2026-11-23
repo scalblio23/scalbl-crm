@@ -286,6 +286,13 @@ export default function BookingWidget({ slug }) {
   // switched on (Calendar settings → Booking rules).
   const requireCommit = Boolean(calendarInfo?.requireAttendanceConfirm);
   const [committed, setCommitted] = useState(false);
+  // Every required field filled in (and the attendance box ticked when
+  // shown) — until then the Schedule meeting button stays greyed out.
+  const detailsComplete =
+    Boolean(form.firstName.trim() && form.lastName.trim()) &&
+    form.phone.replace(/\D/g, "").length >= 8 &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim()) &&
+    (!requireCommit || committed);
   const [submitting, setSubmitting] = useState(false);
   const [bookError, setBookError] = useState("");
   const [confirmation, setConfirmation] = useState(null);
@@ -783,7 +790,7 @@ export default function BookingWidget({ slug }) {
                 <LocationLogo value={calendarInfo.meetingLocation} size={20} /> {meetingLocation(calendarInfo.meetingLocation).label}
               </p>
             )}
-            {selectedSlot ? (
+            {selectedSlot && !rescheduling ? null : selectedSlot ? (
               <>
                 <p key={selectedSlot.startUTC} className="flex items-center gap-3 font-medium bw-fade">
                   <CalendarDays size={18} className="text-gray-500 shrink-0" />
@@ -802,6 +809,42 @@ export default function BookingWidget({ slug }) {
               )
             )}
           </div>
+          {selectedSlot && !rescheduling && (
+            <div className="bw-fade">
+              {(() => {
+                const when = bookingWhenParts(selectedSlot.startUTC, timezone);
+                const end = bookingWhenParts(selectedSlot.endUTC, timezone);
+                return (
+                  <div key={selectedSlot.startUTC} className="mt-5 rounded-xl border-2 border-blue-200 bg-blue-50 px-4 py-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">You're booking in for</p>
+                    <p className="mt-1.5 text-lg font-semibold text-gray-900">
+                      {when.day} {when.year}
+                    </p>
+                    <p className="text-3xl font-bold text-blue-700 tabular-nums leading-tight">
+                      {when.time} – {end.time}
+                    </p>
+                    <p className="mt-0.5 text-sm text-gray-600">
+                      {when.zone ? `${when.zone} · ` : ""}
+                      {timezone.replace(/_/g, " ")} time
+                    </p>
+                  </div>
+                );
+              })()}
+              <button
+                type="submit"
+                form="booking-details-form"
+                disabled={submitting || !detailsComplete}
+                className="mt-4 w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-base px-7 py-3.5 rounded-lg font-semibold shadow-sm disabled:bg-gray-300 disabled:text-gray-500 disabled:shadow-none disabled:cursor-not-allowed"
+              >
+                {submitting && <Loader2 size={16} className="animate-spin" />}
+                Schedule meeting
+              </button>
+              {!detailsComplete && !submitting && (
+                <p className="mt-2 text-xs text-gray-500 text-center">Fill in all your details to finish booking.</p>
+              )}
+              {bookError && <p className="mt-2 text-sm text-red-600">{bookError}</p>}
+            </div>
+          )}
           {calendarInfo.description && (
             <p className="mt-5 text-sm text-gray-600 leading-relaxed whitespace-pre-line break-words">{calendarInfo.description}</p>
           )}
@@ -993,7 +1036,7 @@ export default function BookingWidget({ slug }) {
             </button>
           </div>
         ) : (
-          <form onSubmit={submitBooking} className="flex-1 p-6 sm:p-8 flex flex-col bw-in">
+          <form id="booking-details-form" onSubmit={submitBooking} className="flex-1 p-6 sm:p-8 flex flex-col bw-in">
             <h2 className="text-xl sm:text-2xl font-medium text-gray-900 mb-6">Enter details</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5">
               <div>
@@ -1095,17 +1138,6 @@ export default function BookingWidget({ slug }) {
                 </div>
                 </div>
               )}
-            </div>
-            {bookError && <p className="text-sm text-red-600 mt-5">{bookError}</p>}
-            <div className="mt-8 sm:mt-auto pt-2 sm:pt-10 flex justify-end">
-              <button
-                type="submit"
-                disabled={submitting || (requireCommit && !committed)}
-                className="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-base px-7 py-3.5 rounded-lg font-semibold shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {submitting && <Loader2 size={16} className="animate-spin" />}
-                Schedule meeting
-              </button>
             </div>
           </form>
         )}
