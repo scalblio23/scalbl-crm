@@ -286,8 +286,53 @@ export default function BookingWidget({ slug }) {
   // switched on (Calendar settings → Booking rules).
   const requireCommit = Boolean(calendarInfo?.requireAttendanceConfirm);
   const [committed, setCommitted] = useState(false);
+  // "You're booking in for" + Confirm Booking. Phone: in the left panel; desktop: under the details form.
+  const renderConfirm = () => (
+      <div className="bw-fade">
+        {(() => {
+          const when = bookingWhenParts(selectedSlot.startUTC, timezone);
+          const end = bookingWhenParts(selectedSlot.endUTC, timezone);
+          return (
+            <div key={selectedSlot.startUTC} className="mt-5 rounded-xl border-2 border-blue-200 bg-blue-50 px-4 py-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">You're booking in for</p>
+              <p className="mt-1.5 text-lg font-semibold text-gray-900">
+                {when.day} {when.year}
+              </p>
+              <p className="text-3xl font-bold text-blue-700 tabular-nums leading-tight">
+                {when.time} – {end.time}
+              </p>
+              <p className="mt-0.5 text-sm text-gray-600">
+                {when.zone ? `${when.zone} · ` : ""}
+                {timezone.replace(/_/g, " ")} time
+              </p>
+            </div>
+          );
+        })()}
+        <button
+          type="submit"
+          form="booking-details-form"
+          disabled={submitting || !detailsComplete}
+          className="mt-4 w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-base px-7 py-3.5 rounded-lg font-semibold shadow-sm disabled:bg-gray-300 disabled:text-gray-500 disabled:shadow-none disabled:cursor-not-allowed"
+        >
+          {submitting && <Loader2 size={16} className="animate-spin" />}
+          Confirm Booking
+        </button>
+        <button
+          type="button"
+          onClick={backToPicker}
+          className="mt-2 w-full flex items-center justify-center gap-1 text-sm text-gray-500 hover:text-gray-700 py-1"
+        >
+          <ChevronLeft size={16} /> Back (Choose New Time)
+        </button>
+        {!detailsComplete && !submitting && (
+          <p className="mt-1 text-xs text-gray-500 text-center">Fill in all your details to finish booking.</p>
+        )}
+        {bookError && <p className="mt-2 text-sm text-red-600">{bookError}</p>}
+      </div>
+  );
+
   // Every required field filled in (and the attendance box ticked when
-  // shown) — until then the Schedule meeting button stays greyed out.
+  // shown) — until then the Confirm Booking button stays greyed out.
   const detailsComplete =
     Boolean(form.firstName.trim() && form.lastName.trim()) &&
     form.phone.replace(/\D/g, "").length >= 8 &&
@@ -809,49 +854,7 @@ export default function BookingWidget({ slug }) {
               )
             )}
           </div>
-          {selectedSlot && !rescheduling && (
-            <div className="bw-fade">
-              {(() => {
-                const when = bookingWhenParts(selectedSlot.startUTC, timezone);
-                const end = bookingWhenParts(selectedSlot.endUTC, timezone);
-                return (
-                  <div key={selectedSlot.startUTC} className="mt-5 rounded-xl border-2 border-blue-200 bg-blue-50 px-4 py-4">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">You're booking in for</p>
-                    <p className="mt-1.5 text-lg font-semibold text-gray-900">
-                      {when.day} {when.year}
-                    </p>
-                    <p className="text-3xl font-bold text-blue-700 tabular-nums leading-tight">
-                      {when.time} – {end.time}
-                    </p>
-                    <p className="mt-0.5 text-sm text-gray-600">
-                      {when.zone ? `${when.zone} · ` : ""}
-                      {timezone.replace(/_/g, " ")} time
-                    </p>
-                  </div>
-                );
-              })()}
-              <button
-                type="submit"
-                form="booking-details-form"
-                disabled={submitting || !detailsComplete}
-                className="mt-4 w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-base px-7 py-3.5 rounded-lg font-semibold shadow-sm disabled:bg-gray-300 disabled:text-gray-500 disabled:shadow-none disabled:cursor-not-allowed"
-              >
-                {submitting && <Loader2 size={16} className="animate-spin" />}
-                Confirm Booking
-              </button>
-              <button
-                type="button"
-                onClick={backToPicker}
-                className="mt-2 w-full flex items-center justify-center gap-1 text-sm text-gray-500 hover:text-gray-700 py-1"
-              >
-                <ChevronLeft size={16} /> Back (Choose New Time)
-              </button>
-              {!detailsComplete && !submitting && (
-                <p className="mt-1 text-xs text-gray-500 text-center">Fill in all your details to finish booking.</p>
-              )}
-              {bookError && <p className="mt-2 text-sm text-red-600">{bookError}</p>}
-            </div>
-          )}
+          {selectedSlot && !rescheduling && <div className="md:hidden">{renderConfirm()}</div>}
           {calendarInfo.description && (
             <p className="mt-5 text-sm text-gray-600 leading-relaxed whitespace-pre-line break-words">{calendarInfo.description}</p>
           )}
@@ -1146,6 +1149,9 @@ export default function BookingWidget({ slug }) {
                 </div>
               )}
             </div>
+            {selectedSlot && (
+              <div className="hidden md:block mt-8 w-full max-w-md mx-auto">{renderConfirm()}</div>
+            )}
           </form>
         )}
         </section>
