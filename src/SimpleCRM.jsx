@@ -1637,6 +1637,7 @@ export default function SimpleCRM() {
       sendCalendarInvite: Boolean(openCalendar.sendCalendarInvite),
       attendanceConfirmText: openCalendar.attendanceConfirmText || "",
       showLocationNote: !openCalendar.hideLocationNote,
+      requireLastName: openCalendar.requireLastName !== false,
     });
     setVideoDraft({ videoConferenceLink: openCalendar.videoConferenceLink || "" });
     setCalendarNameDraft(openCalendar.name);
@@ -10556,6 +10557,7 @@ export default function SimpleCRM() {
                                 sendCalendarInvite: Boolean(rulesDraft.sendCalendarInvite),
                                 attendanceConfirmText: (rulesDraft.attendanceConfirmText || "").trim(),
                                 hideLocationNote: !rulesDraft.showLocationNote,
+                                requireLastName: Boolean(rulesDraft.requireLastName),
                               })
                             }
                             disabled={savingCalendar}
@@ -10654,6 +10656,20 @@ export default function SimpleCRM() {
                               The box on the booking page that says e.g. "This meeting is on Zoom, please choose a time
                               where you will be in a quiet place of work." Untick to hide it. Set the location under
                               Location &amp; video.
+                            </span>
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-2.5 border border-gray-200 rounded-lg p-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(rulesDraft.requireLastName)}
+                            onChange={(e) => setRulesDraft((d) => ({ ...d, requireLastName: e.target.checked }))}
+                            className="mt-0.5 h-4 w-4 accent-blue-600"
+                          />
+                          <span>
+                            <span className="block text-sm font-medium">Require last name</span>
+                            <span className="block text-xs text-gray-500 mt-0.5">
+                              Untick to let people book with just their first name.
                             </span>
                           </span>
                         </label>

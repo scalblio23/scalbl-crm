@@ -901,6 +901,8 @@ export async function ensureSchema() {
     // Booking rules → untick "Show the meeting location note" to hide the
     // "This meeting is on Zoom…" box on the booking page.
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS hide_location_note BOOLEAN NOT NULL DEFAULT false`);
+    // Booking rules → untick "Require last name" to make it optional.
+    await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS require_last_name BOOLEAN NOT NULL DEFAULT true`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_outlook_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     await query(`ALTER TABLE calendars ADD COLUMN IF NOT EXISTS clash_crm_calendar_ids JSONB NOT NULL DEFAULT '[]'`);
     // Emails received through Resend (see api/email-inbound.js), shown
@@ -2879,6 +2881,7 @@ export function calendarFromRow(r, { includeSecrets = false } = {}) {
     sendCalendarInvite: Boolean(r.send_calendar_invite),
     attendanceConfirmText: r.attendance_confirm_text || "",
     hideLocationNote: Boolean(r.hide_location_note),
+    requireLastName: r.require_last_name !== false,
     confirmationWorkflow: r.confirmation_workflow || null,
     connections,
     bookingConnectionId: target ? target.id : null,
@@ -3001,7 +3004,8 @@ export async function updateCalendar(id, patch) {
        host_photo = CASE WHEN $27 THEN $28::text ELSE host_photo END,
        send_calendar_invite = COALESCE($29, send_calendar_invite),
        attendance_confirm_text = CASE WHEN $30 THEN $31::text ELSE attendance_confirm_text END,
-       hide_location_note = COALESCE($32, hide_location_note)
+       hide_location_note = COALESCE($32, hide_location_note),
+       require_last_name = COALESCE($33, require_last_name)
      WHERE id = $1
      RETURNING id`,
     [
@@ -3039,6 +3043,7 @@ export async function updateCalendar(id, patch) {
       Object.prototype.hasOwnProperty.call(patch, "attendanceConfirmText"),
       patch.attendanceConfirmText || null,
       typeof patch.hideLocationNote === "boolean" ? patch.hideLocationNote : null,
+      typeof patch.requireLastName === "boolean" ? patch.requireLastName : null,
     ]
   );
   return rows[0] ? getCalendarById(rows[0].id) : null;

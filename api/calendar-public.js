@@ -26,6 +26,7 @@ export default async function handler(req, res) {
       hostName: calendar.hostName || "",
       attendanceConfirmText: calendar.attendanceConfirmText || "",
       hideLocationNote: Boolean(calendar.hideLocationNote),
+      requireLastName: calendar.requireLastName !== false,
       hostPhoto: calendar.hostPhoto || null,
     });
   } catch (err) {

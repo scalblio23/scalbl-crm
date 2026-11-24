@@ -285,6 +285,8 @@ export default function BookingWidget({ slug }) {
   // The attendance-confirmation box shows only when the calendar has it
   // switched on (Calendar settings → Booking rules).
   const requireCommit = Boolean(calendarInfo?.requireAttendanceConfirm);
+  // Calendar settings → Booking rules → Require last name (on unless unticked).
+  const requireLastName = calendarInfo?.requireLastName !== false;
   const [committed, setCommitted] = useState(false);
   // "You're booking in for" + Confirm Booking. Phone: in the left panel; desktop: under the details form.
   const renderConfirm = () => (
@@ -334,7 +336,7 @@ export default function BookingWidget({ slug }) {
   // Every required field filled in (and the attendance box ticked when
   // shown) — until then the Confirm Booking button stays greyed out.
   const detailsComplete =
-    Boolean(form.firstName.trim() && form.lastName.trim()) &&
+    Boolean(form.firstName.trim() && (!requireLastName || form.lastName.trim())) &&
     form.phone.replace(/\D/g, "").length >= 8 &&
     /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim()) &&
     (!requireCommit || committed);
@@ -1060,9 +1062,9 @@ export default function BookingWidget({ slug }) {
                 />
               </div>
               <div>
-                <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">Last name *</label>
+                <label className="text-sm sm:text-base font-medium block mb-2 text-gray-900">Last name{requireLastName ? " *" : ""}</label>
                 <input
-                  required
+                  required={requireLastName}
                   autoComplete="family-name"
                   value={form.lastName}
                   onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))}
