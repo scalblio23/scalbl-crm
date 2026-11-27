@@ -62,6 +62,7 @@ export default function CrazytelSmsInbox({ active, contacts }) {
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
   const [search, setSearch] = useState("");
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [contactSearch, setContactSearch] = useState("");
   const messagesEnd = useRef(null);
@@ -173,9 +174,11 @@ export default function CrazytelSmsInbox({ active, contacts }) {
 
   if (!active) return null;
   const q = search.trim().toLowerCase();
-  const visibleThreads = q
-    ? threads.filter((t) => [t.name, t.remoteNumber, t.preview].some((v) => String(v || "").toLowerCase().includes(q)))
-    : threads;
+  const unreadCount = threads.filter((t) => t.unread).length;
+  // Unread filter keeps the open thread in the list once it's been read.
+  const visibleThreads = threads
+    .filter((t) => !unreadOnly || t.unread || t.id === selectedId)
+    .filter((t) => !q || [t.name, t.remoteNumber, t.preview].some((v) => String(v || "").toLowerCase().includes(q)));
   // "New" contact search: name, or any part of the number (spaces and +61/0 ignored).
   const cq = contactSearch.trim().toLowerCase();
   const cDigits = cq.replace(/\D/g, "").replace(/^(61|0)/, "");
@@ -277,6 +280,14 @@ export default function CrazytelSmsInbox({ active, contacts }) {
               </button>
             )}
           </div>
+          <div className="mt-2 flex gap-1.5" role="group" aria-label="Filter conversations">
+            {[["All", false], [`Unread${unreadCount ? ` (${unreadCount})` : ""}`, true]].map(([label, value]) => (
+              <button key={String(value)} type="button" onClick={() => setUnreadOnly(value)} aria-pressed={unreadOnly === value}
+                className={`text-xs px-2.5 py-1 rounded-full border ${unreadOnly === value ? "bg-gray-900 text-white border-gray-900" : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         {loadError && <p role="alert" className="px-4 py-2 text-xs text-red-600 border-b border-gray-100">{loadError}</p>}
         {!loadError && !loading && !fromNumbers.length && (
@@ -289,7 +300,9 @@ export default function CrazytelSmsInbox({ active, contacts }) {
             </div>
           )}
           {threads.length > 0 && !visibleThreads.length && (
-            <div className="px-4 py-10 text-center text-sm text-gray-400">No conversations match "{search.trim()}".</div>
+            <div className="px-4 py-10 text-center text-sm text-gray-400">
+              {unreadOnly && !q ? "No unread conversations." : `No ${unreadOnly ? "unread " : ""}conversations match "${search.trim()}".`}
+            </div>
           )}
           {visibleThreads.map((thread) => (
             <button type="button" key={thread.id} onClick={() => markRead(thread)} aria-pressed={selectedId === thread.id}
