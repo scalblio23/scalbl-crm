@@ -59,6 +59,7 @@ import {
   Square,
   Globe,
   Megaphone,
+  MessageSquareText,
   Image,
   Eye,
   MousePointerClick,
@@ -991,6 +992,7 @@ const navItems = [
   { key: "powerdialler", label: "Powerdialler", icon: Phone },
   { key: "multiline", label: "Multi Line", icon: Layers },
   { key: "broadcast", label: "Broadcast", icon: Megaphone },
+  { key: "bulk-sms", label: "SMS Broadcast", icon: MessageSquareText },
   { key: "log", label: "Log", icon: ClipboardList },
   { key: "reports", label: "Reports", icon: BarChart3 },
   { key: "portal", label: "Portal", icon: Globe },
@@ -3021,6 +3023,10 @@ export default function SimpleCRM() {
   // filters/selects over the full `contacts` list rather than one
   // filtered/paginated view. -----
   const [bulkSmsTag, setBulkSmsTag] = useState(""); // "" = all tags
+  const [bulkSmsStatus, setBulkSmsStatus] = useState(""); // "" = any status
+  const [bulkSmsFrom, setBulkSmsFrom] = useState(""); // created on/after (yyyy-mm-dd)
+  const [bulkSmsTo, setBulkSmsTo] = useState(""); // created on/before (yyyy-mm-dd)
+  const [bulkSmsProgress, setBulkSmsProgress] = useState(null); // { done, total } while sending
   const [bulkSmsSearch, setBulkSmsSearch] = useState("");
   const [bulkSmsSelectedIds, setBulkSmsSelectedIds] = useState([]);
   const [bulkSmsMessage, setBulkSmsMessage] = useState("");
@@ -3031,6 +3037,14 @@ export default function SimpleCRM() {
   const bulkSmsFiltered = contacts.filter((c) => {
     if (!c.phone) return false;
     if (bulkSmsTag && (c.tag || "Untagged") !== bulkSmsTag) return false;
+    if (bulkSmsStatus && (c.status || "New Lead") !== bulkSmsStatus) return false;
+    if (bulkSmsFrom || bulkSmsTo) {
+      const created = c.createdAt ? new Date(c.createdAt) : null;
+      if (!created || Number.isNaN(created.getTime())) return false;
+      // Local calendar days, both ends inclusive.
+      if (bulkSmsFrom && created < new Date(`${bulkSmsFrom}T00:00:00`)) return false;
+      if (bulkSmsTo && created > new Date(`${bulkSmsTo}T23:59:59.999`)) return false;
+    }
     const q = bulkSmsSearch.trim().toLowerCase();
     if (!q) return true;
     return c.name?.toLowerCase().includes(q) || c.phone?.toLowerCase().includes(q);
@@ -3055,14 +3069,33 @@ export default function SimpleCRM() {
     if (!window.confirm(`Send this text to ${count} contact${count === 1 ? "" : "s"}? This can't be undone.`)) return;
     setBulkSmsSending(true);
     setBulkSmsResult(null);
+    // Sent in batches so a big list never runs into the server's time
+    // limit; the progress shows as it goes.
+    const ids = [...bulkSmsSelectedIds];
+    const BATCH = 40;
+    const total = { total: 0, sent: 0, failed: [], skipped: 0 };
+    let done = 0;
+    setBulkSmsProgress({ done, total: ids.length });
     try {
-      const result = await api.post("/api/sms-bulk-send", { contactIds: bulkSmsSelectedIds, text });
-      setBulkSmsResult(result);
+      for (let i = 0; i < ids.length; i += BATCH) {
+        const chunk = ids.slice(i, i + BATCH);
+        const r = await api.post("/api/sms-bulk-send", { contactIds: chunk, text });
+        total.total += r.total;
+        total.sent += r.sent;
+        total.skipped += r.skipped;
+        total.failed.push(...(r.failed || []));
+        done += chunk.length;
+        setBulkSmsProgress({ done, total: ids.length });
+      }
       setBulkSmsMessage("");
       setBulkSmsSelectedIds([]);
     } catch (err) {
-      setDbError(err.message || "Could not send the bulk message.");
+      setDbError(
+        `${err.message || "Could not send the bulk message."}${done ? ` Stopped after ${done} of ${ids.length} — the rest were not sent.` : ""}`
+      );
     } finally {
+      if (total.total) setBulkSmsResult(total);
+      setBulkSmsProgress(null);
       setBulkSmsSending(false);
     }
   };
@@ -7118,7 +7151,7 @@ export default function SimpleCRM() {
             <div className="h-[70vh] shrink-0 md:h-auto md:shrink md:flex-1 flex flex-col overflow-hidden border-b md:border-b-0 md:border-r border-gray-200">
               <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between flex-wrap gap-3">
                 <div>
-                  <h1 className="text-xl font-bold">Bulk SMS</h1>
+                  <h1 className="text-xl font-bold">SMS Broadcast</h1>
                   <div className="text-sm text-gray-400 mt-0.5">
                     {bulkSmsSelectedIds.length} selected
                   </div>
@@ -7136,6 +7169,51 @@ export default function SimpleCRM() {
                       </option>
                     ))}
                   </select>
+                  <select
+                    value={bulkSmsStatus}
+                    onChange={(e) => setBulkSmsStatus(e.target.value)}
+                    aria-label="Status"
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 bg-white"
+                  >
+                    <option value="">All statuses</option>
+                    {Array.from(new Set([...LEAD_STATUSES, ...contacts.map((c) => c.status).filter(Boolean)])).map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-500">
+                    Created
+                    <input
+                      type="date"
+                      value={bulkSmsFrom}
+                      onChange={(e) => setBulkSmsFrom(e.target.value)}
+                      aria-label="Created from"
+                      className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-900 outline-none focus:border-gray-400 bg-white"
+                    />
+                    to
+                    <input
+                      type="date"
+                      value={bulkSmsTo}
+                      onChange={(e) => setBulkSmsTo(e.target.value)}
+                      aria-label="Created to"
+                      className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-gray-900 outline-none focus:border-gray-400 bg-white"
+                    />
+                  </label>
+                  {(bulkSmsTag || bulkSmsStatus || bulkSmsFrom || bulkSmsTo) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkSmsTag("");
+                        setBulkSmsStatus("");
+                        setBulkSmsFrom("");
+                        setBulkSmsTo("");
+                      }}
+                      className="text-xs text-gray-400 hover:text-gray-700 font-medium"
+                    >
+                      Clear filters
+                    </button>
+                  )}
                   <div className="relative">
                     <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-300" />
                     <input
@@ -7182,6 +7260,10 @@ export default function SimpleCRM() {
                           </td>
                           <td className="px-2 py-2 font-medium">{c.name}</td>
                           <td className="px-2 py-2 text-gray-500">{c.phone}</td>
+                          <td className="px-2 py-2 text-xs text-gray-500 whitespace-nowrap">{c.status || "New Lead"}</td>
+                          <td className="px-2 py-2 text-xs text-gray-400 whitespace-nowrap">
+                            {c.createdAt ? new Date(c.createdAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""}
+                          </td>
                           <td className="px-2 py-2">
                             {c.tag ? (
                               <span className={`text-xs px-2.5 py-1 rounded-full border ${tagColorClasses(c.tag)}`}>
@@ -7218,7 +7300,24 @@ export default function SimpleCRM() {
                   rows={8}
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-gray-400 resize-none"
                 />
-                <div className="text-xs text-gray-400">{bulkSmsMessage.length} characters</div>
+                <div className="text-xs text-gray-400">
+                  {bulkSmsMessage.length} characters · {bulkSmsMessage.length <= 160 ? 1 : Math.ceil(bulkSmsMessage.length / 153)} SMS each
+                  {bulkSmsMessage.length <= 160 ? "" : " (long messages are split)"}
+                </div>
+                <div className="text-xs text-gray-500 bg-gray-50 border border-gray-100 rounded-lg p-2.5">
+                  Sent through Crazytel. Replies land in Conversation → Crazytel SMS.
+                </div>
+                {bulkSmsProgress && (
+                  <div className="text-xs text-gray-600">
+                    Sending… {bulkSmsProgress.done} of {bulkSmsProgress.total}
+                    <div className="mt-1 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                      <div
+                        className="h-full bg-gray-900 transition-all"
+                        style={{ width: `${Math.round((bulkSmsProgress.done / bulkSmsProgress.total) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {bulkSmsResult && (
                   <div className="border border-gray-200 rounded-lg p-3 text-xs space-y-1">
