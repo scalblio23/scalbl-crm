@@ -1,5 +1,6 @@
 import { ensureSchema, getContactsByIds, logMessage, mapWithConcurrency } from "../server/db.js";
 import { sendSms, recordSentSms, missingSmsEnv } from "../server/sms.js";
+import { personalize } from "../server/broadcasts.js";
 import { requireAuth, forbidClientRole, forbidWithoutTab } from "../server/auth.js";
 
 // Cap on how many outbound sends run at once — firing hundreds of
@@ -43,9 +44,11 @@ export default async function handler(req, res) {
 
     const results = await mapWithConcurrency(withPhone, CONCURRENCY, async (c) => {
       try {
-        const sent = await sendSms({ to: c.phone, body: text, tag: c.tag });
-        await recordSentSms(sent, c.phone, text);
-        await logMessage({ leadId: c.id, name: c.name, text, time: timeLabel, type: "text", outgoing: true });
+        // {{first_name}} / {{name}} merge fields, same as email Broadcast.
+        const body = personalize(text, c);
+        const sent = await sendSms({ to: c.phone, body, tag: c.tag });
+        await recordSentSms(sent, c.phone, body);
+        await logMessage({ leadId: c.id, name: c.name, text: body, time: timeLabel, type: "text", outgoing: true });
         return { id: c.id, name: c.name, ok: true };
       } catch (err) {
         return { id: c.id, name: c.name, ok: false, error: err.message || "Send failed" };
